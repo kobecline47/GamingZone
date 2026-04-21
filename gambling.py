@@ -449,6 +449,11 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
         value="Roll higher than the bot's dice. Tie = push.",
         inline=False,
     )
+    embed.add_field(
+        name="🦹 /heist <bet> <target>",
+        value="Plan a multi-stage heist. Pick your target: Corner Store → Federal Reserve. Up to **15× your bet**!",
+        inline=False,
+    )
     embed.set_footer(text="Earn PokeCoins → use /pokeshop to buy Pokemon!")
     return embed
 
@@ -663,3 +668,151 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         # Payout is handled inside _dice_embed
         embed = _dice_embed(p_roll, b_roll, bet, uid)
         await interaction.edit_original_response(embed=embed)
+
+    # ── /heist ────────────────────────────────────────────────────────────────
+    @bot.tree.command(name="heist", description="🦹 Plan and execute a multi-stage heist for big PokeCoins!", guild=gobj)
+    @app_commands.describe(
+        bet="PokeCoins to risk on the heist",
+        target="Where to rob",
+    )
+    @app_commands.choices(target=[
+        app_commands.Choice(name="🏪 Corner Store  (Low risk, low reward)",    value="store"),
+        app_commands.Choice(name="🏦 City Bank     (Medium risk, 3× reward)",  value="bank"),
+        app_commands.Choice(name="💎 Diamond Vault (High risk, 7× reward)",    value="vault"),
+        app_commands.Choice(name="🚀 Federal Reserve (Extreme risk, 15× reward)", value="fed"),
+    ])
+    async def cmd_heist(interaction: discord.Interaction, bet: int, target: str):
+        uid = interaction.user.id
+        err = _check_bet(uid, bet)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        # ── Target config ─────────────────────────────────────────────────────
+        targets = {
+            "store": {"name": "🏪 Corner Store",    "mult": 1.5, "success_base": 0.75, "color": 0x2ECC71},
+            "bank":  {"name": "🏦 City Bank",       "mult": 3.0, "success_base": 0.50, "color": 0x3498DB},
+            "vault": {"name": "💎 Diamond Vault",   "mult": 7.0, "success_base": 0.30, "color": 0x9B59B6},
+            "fed":   {"name": "🚀 Federal Reserve", "mult": 15.0,"success_base": 0.12, "color": 0xFF4444},
+        }
+        t = targets[target]
+
+        # ── Phase 1: Planning embed ───────────────────────────────────────────
+        plan_embed = discord.Embed(
+            title="🦹 Heist Planning Room",
+            description=(
+                f"**Target:** {t['name']}\n"
+                f"**Potential payout:** `{int(bet * t['mult']):,}` PokeCoins  (**×{t['mult']}**)\n"
+                f"**Success chance:** `{int(t['success_base'] * 100)}%` base\n\n"
+                "```\n"
+                "  Assembling the crew...  🕵️\n"
+                "  Studying the blueprints...  📐\n"
+                "  Sourcing equipment...  🔧\n"
+                "```"
+            ),
+            color=t["color"],
+        )
+        plan_embed.set_footer(text="The heist begins in 2 seconds...")
+        await interaction.response.send_message(embed=plan_embed)
+        await asyncio.sleep(2)
+
+        # ── Phase 2: Crew roll ────────────────────────────────────────────────
+        crew_members = [
+            ("🔓 Safecracker",  0.10),
+            ("🚗 Getaway Driver", 0.08),
+            ("💻 Hacker",       0.12),
+            ("🔫 Muscle",       0.05),
+            ("🕵️ Inside Man",   0.15),
+        ]
+        crew_lines = []
+        success_mod = 0.0
+        for role, bonus in crew_members:
+            joined = random.random() < 0.65
+            if joined:
+                crew_lines.append(f"✅ {role} joined the crew  (+{int(bonus*100)}%)")
+                success_mod += bonus
+            else:
+                crew_lines.append(f"❌ {role} bailed last minute")
+
+        final_chance = min(t["success_base"] + success_mod, 0.92)
+
+        crew_embed = discord.Embed(
+            title="🦹 Crew Assembled",
+            description="\n".join(crew_lines),
+            color=t["color"],
+        )
+        crew_embed.add_field(name="📊 Final Success Chance", value=f"`{int(final_chance * 100)}%`", inline=True)
+        crew_embed.add_field(name="💰 Bet",                  value=f"`{bet:,}` PokeCoins",          inline=True)
+        crew_embed.set_footer(text="Executing the heist...")
+        await interaction.edit_original_response(embed=crew_embed)
+        await asyncio.sleep(2.5)
+
+        # ── Phase 3: Heist stages ─────────────────────────────────────────────
+        stages = [
+            ("🚨 Disabling the alarm system",    "bypassed the alarm",      "triggered the alarm early"),
+            ("📦 Cracking open the vault",        "cracked it in seconds",   "set off a silent alert"),
+            ("🏃 Loading the loot",               "loaded bags in record time","guard spotted the crew"),
+            ("🚗 Making the getaway",             "vanished into the night", "cops gave chase"),
+        ]
+        stage_lines = []
+        heist_failed = False
+        for action, success_txt, fail_txt in stages:
+            # Each stage independently can fail; failure at any stage ends the heist
+            stage_ok = random.random() < final_chance
+            if stage_ok:
+                stage_lines.append(f"✅ **{action}** — {success_txt}")
+            else:
+                stage_lines.append(f"❌ **{action}** — {fail_txt}!")
+                heist_failed = True
+                break
+            await asyncio.sleep(0.0)  # yield without delay (stages reveal at once)
+
+        # Roll overall success
+        rolled = random.random()
+        succeeded = rolled < final_chance and not heist_failed
+
+        # ── Phase 4: Result ───────────────────────────────────────────────────
+        if succeeded:
+            payout = int(bet * t["mult"])
+            WALLETS[uid] = _wallet(uid) + payout
+            color = 0xFFD700
+            outcome = (
+                f"💰 **HEIST SUCCESSFUL!**\n"
+                f"The crew escaped clean with the loot!\n\n"
+                f"**+{payout:,} PokeCoins** landed in your wallet!"
+            )
+            title = f"🦹 {t['name']} — SUCCESS!"
+        else:
+            # Partial recovery: sometimes escape with a fraction
+            escape_roll = random.random()
+            if escape_roll < 0.3:
+                recovered = int(bet * 0.4)
+                WALLETS[uid] = _wallet(uid) - (bet - recovered)
+                color = 0xFFAA00
+                outcome = (
+                    f"⚠️ **PARTIAL ESCAPE!**\n"
+                    f"The crew scattered — you recovered some loot.\n\n"
+                    f"**Lost {bet - recovered:,} PokeCoins** (recovered `{recovered:,}`)"
+                )
+                title = f"🦹 {t['name']} — PARTIAL"
+            else:
+                WALLETS[uid] = _wallet(uid) - bet
+                color = 0xFF4444
+                outcome = (
+                    f"🚨 **BUSTED!**\n"
+                    f"The cops caught the crew and seized the loot.\n\n"
+                    f"**−{bet:,} PokeCoins** confiscated."
+                )
+                title = f"🦹 {t['name']} — BUSTED!"
+
+        result_embed = discord.Embed(title=title, color=color)
+        result_embed.add_field(
+            name="📋 Heist Log",
+            value="\n".join(stage_lines) if stage_lines else "Couldn't even get inside.",
+            inline=False,
+        )
+        result_embed.add_field(name="📊 Outcome",  value=outcome,                          inline=False)
+        result_embed.add_field(name="💰 Bet",       value=f"`{bet:,}` PokeCoins",           inline=True)
+        result_embed.add_field(name="💼 Balance",   value=f"`{_wallet(uid):,}` PokeCoins",  inline=True)
+        result_embed.set_footer(text="Plan your next heist with /heist!")
+        await interaction.edit_original_response(embed=result_embed)
