@@ -1,0 +1,93 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Dashboard — Login</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #0d1117;
+            color: #e6edf3;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 16px;
+            padding: 48px 44px;
+            width: 380px;
+            box-shadow: 0 16px 48px rgba(0,0,0,.5);
+        }
+        .logo { font-size: 2.8rem; margin-bottom: 14px; }
+        h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }
+        .sub { color: #8b949e; font-size: 0.88rem; margin-bottom: 34px; }
+        label {
+            display: block;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: .07em;
+            color: #8b949e;
+            font-weight: 600;
+            margin-bottom: 7px;
+        }
+        input[type=text], input[type=password] {
+            width: 100%;
+            padding: 11px 14px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #e6edf3;
+            font-size: 0.95rem;
+            outline: none;
+            margin-bottom: 18px;
+            transition: border-color .15s;
+        }
+        input[type=text]:focus, input[type=password]:focus { border-color: #58a6ff; }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #238636;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background .15s;
+            margin-top: 6px;
+        }
+        button:hover { background: #2ea043; }
+        .error {
+            background: rgba(248,81,73,.12);
+            border: 1px solid #f85149;
+            border-radius: 6px;
+            padding: 10px 14px;
+            color: #f85149;
+            font-size: 0.85rem;
+            margin-bottom: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo">&#9881;</div>
+        <h1>Bot Dashboard</h1>
+        <p class="sub">Sign in to manage your Discord bot</p>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" placeholder="Enter username" autofocus autocomplete="username">
+            <label for="pw">Password</label>
+            <input type="password" id="pw" name="password" placeholder="Enter password" autocomplete="current-password">
+            <button type="submit">Sign in &#8594;</button>
+        </form>
+    </div>
+</body>
+</html>
