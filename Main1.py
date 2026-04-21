@@ -23,8 +23,8 @@ if sys.platform == "win32":
     if _ffmpeg_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
-GUILD_ID  = discord.Object(id=1495449662755442698)
-GUILD_ID_2 = discord.Object(id=711335159189864468)
+GUILD_ID  = discord.Object(id=711335159189864468)
+GUILD_ID_2 = discord.Object(id=1495449662755442698)
 
 
 class Client(commands.Bot):
