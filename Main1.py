@@ -244,24 +244,8 @@ class Client(commands.Bot):
             gambling.setup_gambling(self, GUILD_ID_2.id)
             synced2 = await self.tree.sync(guild=GUILD_ID_2)
             print(f'Synced {len(synced2)} slash commands to guild {GUILD_ID_2.id}')
-            # Start web dashboard
-            dashboard.init(
-                xp_data=XP_DATA,
-                voice_minutes=VOICE_MINUTES,
-                invite_counts=INVITE_COUNTS,
-                open_tickets=OPEN_TICKETS,
-                giveaways=GIVEAWAYS,
-                streamers=STREAMERS,
-                banned_words=BANNED_WORDS,
-                banned_word_warnings=BANNED_WORD_WARNINGS,
-                whitelist=WHITELIST,
-                music_states=music_states,
-                reaction_roles=REACTION_ROLES,
-                bot_client=self,
-                guild_id=GUILD_ID.id,
-                bot_loop=asyncio.get_event_loop(),
-            )
-            dashboard.start()
+            # Inject the running event loop into the dashboard now that the bot is connected
+            dashboard._state["bot_loop"] = asyncio.get_event_loop()
         except Exception as e:
             print(f'Error syncing commands: {e}')
 
@@ -1710,5 +1694,24 @@ async def setupfreegames(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+
+# Start web dashboard before bot connects so Railway's health check passes immediately
+dashboard.init(
+    xp_data=XP_DATA,
+    voice_minutes=VOICE_MINUTES,
+    invite_counts=INVITE_COUNTS,
+    open_tickets=OPEN_TICKETS,
+    giveaways=GIVEAWAYS,
+    streamers=STREAMERS,
+    banned_words=BANNED_WORDS,
+    banned_word_warnings=BANNED_WORD_WARNINGS,
+    whitelist=WHITELIST,
+    music_states=music_states,
+    reaction_roles=REACTION_ROLES,
+    bot_client=client,
+    guild_id=GUILD_ID.id,
+    bot_loop=None,  # loop injected after on_ready via update below
+)
+dashboard.start()
 
 client.run(os.getenv('BOT_TOKEN'))
