@@ -28,8 +28,8 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 app = Flask(__name__)
 app.secret_key = os.environ.get("DASHBOARD_SECRET_KEY") or os.urandom(24)
 
-DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
-DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", 5000))
+DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+DASHBOARD_PORT = int(os.environ.get("PORT") or os.environ.get("DASHBOARD_PORT") or 5000)
 
 # ── Admin accounts ────────────────────────────────────────────────────────────
 # Add or remove entries here to control who can log in.
