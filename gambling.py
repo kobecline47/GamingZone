@@ -60,6 +60,34 @@ def _spin() -> str:
     return random.choices(_SLOT_SYMBOLS, weights=_SLOT_WEIGHTS, k=1)[0]
 
 
+# ── Basket system ─────────────────────────────────────────────────────────────
+# Each user gets a shuffled basket of outcomes so the same symbol can't spam.
+# The basket is a deck: refills once empty. This prevents identical patterns
+# repeating back-to-back while still feeling random.
+_BASKET_SIZE = 30   # how many spins before refill
+_USER_BASKETS: dict[int, list[str]] = {}  # uid -> remaining basket
+
+
+def _fill_basket() -> list[str]:
+    """Build a fresh shuffled basket weighted by rarity."""
+    pool: list[str] = []
+    # Each symbol gets a proportional count in the pool
+    counts = [int(w) for w in _SLOT_WEIGHTS]  # [30,25,20,15,5,3,1,0] → round up
+    for sym, count in zip(_SLOT_SYMBOLS, counts):
+        pool.extend([sym] * max(count, 1))
+    random.shuffle(pool)
+    return pool
+
+
+def _draw(uid: int) -> str:
+    """Draw one symbol from the user's basket; refills when empty."""
+    basket = _USER_BASKETS.get(uid)
+    if not basket:
+        basket = _fill_basket()
+        _USER_BASKETS[uid] = basket
+    return basket.pop()
+
+
 def _slot_display(s1: str, s2: str, s3: str) -> str:
     return (
         "```\n"
@@ -455,7 +483,24 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         )
         await asyncio.sleep(1.2)
 
-        s1, s2, s3 = _spin(), _spin(), _spin()
+        # ── Basket draw — prevents same pattern back-to-back ──────────────────
+        # ~5% chance of a hot streak: force all 3 reels to the same symbol
+        if random.random() < 0.05:
+            lucky = _draw(uid)
+            s1 = s2 = s3 = lucky
+        else:
+            s1, s2, s3 = _draw(uid), _draw(uid), _draw(uid)
+            # Prevent two identical consecutive draws being the same pair twice
+            # by re-drawing s3 if all 3 accidentally match (keep it rare & earned)
+            if s1 == s2 == s3 and random.random() > 0.05:
+                _USER_BASKETS.setdefault(uid, _fill_basket())
+                _USER_BASKETS[uid].append(s3)  # put it back
+                random.shuffle(_USER_BASKETS[uid])
+                # Draw a different symbol for s3
+                s3 = _draw(uid)
+                while s3 == s1 and len(set(_SLOT_SYMBOLS)) > 1:
+                    _USER_BASKETS[uid].append(s3)
+                    s3 = _draw(uid)
 
         if s1 == s2 == s3:
             mult  = _SLOT_MULT[s1]
