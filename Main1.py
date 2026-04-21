@@ -583,15 +583,79 @@ def _fetch_steam_free_games() -> list[dict]:
     except Exception as e:
         print(f"[FreeGames] Steam error: {e}")
 
+    # ── Source 3: Epic Games Store (currently free promotions) ───────────────
+    try:
+        epic_url = (
+            "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
+            "?locale=en-US&country=US&allowCountries=US"
+        )
+        req = urllib.request.Request(epic_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            epic_data = json.loads(r.read().decode(errors="ignore"))
+        elements = (
+            epic_data.get("data", {})
+            .get("Catalog", {})
+            .get("searchStore", {})
+            .get("elements", [])
+        )
+        for g in elements:
+            promos = g.get("promotions") or {}
+            current = promos.get("promotionalOffers", [])
+            if not current:
+                continue
+            # Must have an active offer where discountPercentage == 0 (100% off)
+            is_free = False
+            for offer_group in current:
+                for offer in offer_group.get("promotionalOffers", []):
+                    if offer.get("discountSetting", {}).get("discountPercentage", 999) == 0:
+                        is_free = True
+            if not is_free:
+                continue
+            slug = g.get("productSlug") or g.get("urlSlug") or ""
+            # Some slugs contain '/home' suffix — strip it
+            slug = slug.replace("/home", "").strip()
+            epic_store_url = f"https://store.epicgames.com/en-US/p/{slug}" if slug else "https://store.epicgames.com/en-US/free-games"
+            gid = f"epic_{g.get('id', slug)}"
+            if gid in seen_ids:
+                continue
+            seen_ids.add(gid)
+            # Key art image
+            key_images = g.get("keyImages", [])
+            header_img = next((img["url"] for img in key_images if img.get("type") == "DieselStoreFrontWide"), "")
+            if not header_img:
+                header_img = next((img["url"] for img in key_images if img.get("type") == "OfferImageWide"), "")
+            thumb_img = next((img["url"] for img in key_images if img.get("type") == "Thumbnail"), header_img)
+            orig_price = g.get("price", {}).get("totalPrice", {}).get("fmtPrice", {}).get("originalPrice", "")
+            results.append({
+                "id":           gid,
+                "name":         g.get("title", "Unknown"),
+                "header_image": header_img,
+                "thumbnail":    thumb_img,
+                "url":          epic_store_url,
+                "worth":        orig_price,
+                "description":  g.get("description", ""),
+                "end_date":     "",
+                "platforms":    "Epic Games",
+                "source":       "epic",
+            })
+    except Exception as e:
+        print(f"[FreeGames] Epic error: {e}")
+
     return results
 
 
 class FreeGameView(discord.ui.View):
-    """Persistent view with a clickable 'Claim on Steam' button."""
-    def __init__(self, url: str):
+    """Persistent view with a clickable store button."""
+    def __init__(self, url: str, source: str = "steam"):
         super().__init__(timeout=None)
+        if source == "epic":
+            label = "🛒 Claim on Epic Games Store"
+        elif source == "gamerpower":
+            label = "🎮 Claim / View Game"
+        else:
+            label = "🎮 Claim / View on Steam"
         self.add_item(discord.ui.Button(
-            label="🎮 Claim / View on Steam",
+            label=label,
             style=discord.ButtonStyle.link,
             url=url,
         ))
@@ -611,11 +675,18 @@ def _build_free_game_embed(game: dict) -> discord.Embed:
         description=f"**Price:** {orig_str}{end_line}\n\n{desc_snippet}".strip(),
         color=0x1B2838,
     )
+    source = game.get("source", "steam")
+    color_map = {"epic": 0x2D2D2D, "gamerpower": 0x1B2838, "steam": 0x1B2838}
+    embed.color = color_map.get(source, 0x1B2838)
+    if source == "epic":
+        embed.set_author(name="Epic Games Store", icon_url="https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Epic_Games_logo.svg/120px-Epic_Games_logo.svg.png")
+    else:
+        embed.set_author(name="Steam", icon_url="https://store.steampowered.com/favicon.ico")
     if game.get("header_image"):
         embed.set_image(url=game["header_image"])
     if game.get("thumbnail") and game["thumbnail"] != game.get("header_image"):
         embed.set_thumbnail(url=game["thumbnail"])
-    source_label = "GamerPower + Steam" if game.get("source") == "gamerpower" else "Steam Store"
+    source_label = {"epic": "Epic Games Store", "gamerpower": "GamerPower/Steam", "steam": "Steam Store"}.get(source, "Steam")
     embed.set_footer(text=f"Source: {source_label} • Grab it before the offer ends!")
     embed.timestamp = discord.utils.utcnow()
     return embed
@@ -625,7 +696,7 @@ async def _post_free_games(ch: discord.TextChannel, games: list[dict]):
     """Post a summary embed followed by individual game embeds with buttons."""
     if not games:
         await ch.send(embed=discord.Embed(
-            description="🔍 No free Steam games found right now. The bot checks every 4 hours — we'll ping you when deals appear!",
+            description="🔍 No free games found right now on Steam or Epic. The bot checks every 4 hours — we'll post automatically when deals appear!",
             color=0x1B2838,
         ))
         return
@@ -633,20 +704,21 @@ async def _post_free_games(ch: discord.TextChannel, games: list[dict]):
     # ── Summary embed ────────────────────────────────────────────────────────
     lines = []
     for i, g in enumerate(games, 1):
-        lines.append(f"**{i}.** [{g['name']}]({g['url']})")
+        store_tag = "[Epic]" if g.get("source") == "epic" else "[Steam]"
+        lines.append(f"**{i}.** {store_tag} [{g['name']}]({g['url']})")
     summary = discord.Embed(
         title=f"🎮 {len(games)} Free Game{'s' if len(games) != 1 else ''} Available Right Now!",
         description="\n".join(lines),
         color=0x00C851,
     )
-    summary.set_footer(text="Click any title below to go straight to Steam • Updated every 4 hours")
+    summary.set_footer(text="Click any title below to go to the store • Updated every 4 hours")
     summary.timestamp = discord.utils.utcnow()
     await ch.send(embed=summary)
 
     # ── Individual game embeds with Claim button ──────────────────────────────
     for game in games:
         embed = _build_free_game_embed(game)
-        view = FreeGameView(game["url"])
+        view = FreeGameView(game["url"], source=game.get("source", "steam"))
         await ch.send(embed=embed, view=view)
 
 
