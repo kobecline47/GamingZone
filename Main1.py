@@ -522,27 +522,132 @@ async def streamer_check():
 
 
 def _fetch_steam_free_games() -> list[dict]:
-    """Fetch games currently 100 % off on Steam (runs in executor)."""
+    """Fetch active free game giveaways from GamerPower + Steam specials."""
     results = []
+    seen_ids: set = set()
+
+    # ── Source 1: GamerPower API (Steam giveaways) ───────────────────────────
+    try:
+        gp_url = "https://www.gamerpower.com/api/giveaways?platform=steam&type=game&status=active"
+        req = urllib.request.Request(gp_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            gp_data = json.loads(r.read().decode(errors="ignore"))
+        if isinstance(gp_data, list):
+            for g in gp_data:
+                gid = f"gp_{g['id']}"
+                if gid in seen_ids:
+                    continue
+                seen_ids.add(gid)
+                # Try to extract a Steam app URL from the giveaway page URL
+                steam_url = g.get("open_giveaway_url", g.get("gamerpower_url", ""))
+                results.append({
+                    "id":           gid,
+                    "name":         g.get("title", "Unknown"),
+                    "header_image": g.get("image", g.get("thumbnail", "")),
+                    "thumbnail":    g.get("thumbnail", ""),
+                    "url":          steam_url,
+                    "worth":        g.get("worth", "Free"),
+                    "description":  g.get("description", ""),
+                    "end_date":     g.get("end_date", ""),
+                    "platforms":    g.get("platforms", "Steam"),
+                    "source":       "gamerpower",
+                })
+    except Exception as e:
+        print(f"[FreeGames] GamerPower error: {e}")
+
+    # ── Source 2: Steam featured specials (100 % off) ────────────────────────
     try:
         url = "https://store.steampowered.com/api/featuredcategories"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode(errors="ignore"))
-        specials = data.get("specials", {}).get("items", [])
-        for game in specials:
-            # 100 % discount and final price is 0 = currently free
+        for game in data.get("specials", {}).get("items", []):
             if game.get("discount_percent") == 100 and game.get("final_price") == 0:
+                gid = f"steam_{game['id']}"
+                if gid in seen_ids:
+                    continue
+                seen_ids.add(gid)
+                orig = game.get("original_price", 0)
                 results.append({
-                    "id":           game["id"],
+                    "id":           gid,
                     "name":         game.get("name", "Unknown"),
                     "header_image": game.get("large_capsule_image") or game.get("small_capsule_image", ""),
+                    "thumbnail":    game.get("small_capsule_image", ""),
                     "url":          f"https://store.steampowered.com/app/{game['id']}/",
-                    "original":     game.get("original_price", 0),
+                    "worth":        f"${orig / 100:.2f}" if orig else "Paid",
+                    "description":  "",
+                    "end_date":     "",
+                    "platforms":    "Steam",
+                    "source":       "steam",
                 })
     except Exception as e:
-        print(f"[FreeGames] Fetch error: {e}")
+        print(f"[FreeGames] Steam error: {e}")
+
     return results
+
+
+class FreeGameView(discord.ui.View):
+    """Persistent view with a clickable 'Claim on Steam' button."""
+    def __init__(self, url: str):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="🎮 Claim / View on Steam",
+            style=discord.ButtonStyle.link,
+            url=url,
+        ))
+
+
+def _build_free_game_embed(game: dict) -> discord.Embed:
+    """Build a rich embed for a single free game."""
+    worth = game.get("worth", "")
+    orig_str = f"~~{worth}~~ → **FREE**" if worth and worth != "Free" else "**FREE**"
+    end = game.get("end_date", "")
+    end_line = f"\n⏰ **Ends:** {end}" if end and end.lower() not in ("n/a", "") else ""
+    desc_raw = game.get("description", "")
+    desc_snippet = (desc_raw[:200] + "…") if len(desc_raw) > 200 else desc_raw
+    embed = discord.Embed(
+        title=f"🆓  {game['name']}",
+        url=game["url"],
+        description=f"**Price:** {orig_str}{end_line}\n\n{desc_snippet}".strip(),
+        color=0x1B2838,
+    )
+    if game.get("header_image"):
+        embed.set_image(url=game["header_image"])
+    if game.get("thumbnail") and game["thumbnail"] != game.get("header_image"):
+        embed.set_thumbnail(url=game["thumbnail"])
+    source_label = "GamerPower + Steam" if game.get("source") == "gamerpower" else "Steam Store"
+    embed.set_footer(text=f"Source: {source_label} • Grab it before the offer ends!")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+async def _post_free_games(ch: discord.TextChannel, games: list[dict]):
+    """Post a summary embed followed by individual game embeds with buttons."""
+    if not games:
+        await ch.send(embed=discord.Embed(
+            description="🔍 No free Steam games found right now. The bot checks every 4 hours — we'll ping you when deals appear!",
+            color=0x1B2838,
+        ))
+        return
+
+    # ── Summary embed ────────────────────────────────────────────────────────
+    lines = []
+    for i, g in enumerate(games, 1):
+        lines.append(f"**{i}.** [{g['name']}]({g['url']})")
+    summary = discord.Embed(
+        title=f"🎮 {len(games)} Free Game{'s' if len(games) != 1 else ''} Available Right Now!",
+        description="\n".join(lines),
+        color=0x00C851,
+    )
+    summary.set_footer(text="Click any title below to go straight to Steam • Updated every 4 hours")
+    summary.timestamp = discord.utils.utcnow()
+    await ch.send(embed=summary)
+
+    # ── Individual game embeds with Claim button ──────────────────────────────
+    for game in games:
+        embed = _build_free_game_embed(game)
+        view = FreeGameView(game["url"])
+        await ch.send(embed=embed, view=view)
 
 
 @tasks.loop(hours=4)
@@ -580,27 +685,11 @@ async def free_games_check():
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
 
     new_games = [g for g in games if g["id"] not in POSTED_FREE_GAMES]
-    for game in new_games:
-        POSTED_FREE_GAMES.add(game["id"])
-        orig_cents = game["original"]
-        orig_str   = f"~~${orig_cents / 100:.2f}~~" if orig_cents else "~~Paid~~"
-        embed = discord.Embed(
-            title=f"🆓 {game['name']}",
-            url=game["url"],
-            description=(
-                f"**Price:** {orig_str} → **FREE**\n"
-                f"Click the title to claim it on Steam before the offer ends!"
-            ),
-            color=0x1B2838,
-        )
-        if game["header_image"]:
-            embed.set_image(url=game["header_image"])
-        embed.set_footer(text="Steam Free Game Alert • Check the store for expiry date")
-        embed.timestamp = discord.utils.utcnow()
-        await ch.send(embed=embed)
-
-    if not new_games and not games:
-        pass  # No free games right now — don't spam the channel
+    if new_games:
+        for g in new_games:
+            POSTED_FREE_GAMES.add(g["id"])
+        await _post_free_games(ch, new_games)
+    # else: no new games — don't spam the channel
 
 
 class GameRoleButton(discord.ui.Button):
@@ -1647,50 +1736,26 @@ async def setupfreegames(interaction: discord.Interaction):
             title="🎮 Free Games on Steam",
             description=(
                 "This channel is automatically updated every **4 hours** "
-                "with games that are currently **100% off** on Steam.\n\n"
-                "Grab them before the offer ends!"
+                "with games that are currently **free to claim** on Steam.\n\n"
+                "Each post includes the game image, description, expiry info, "
+                "and a **Claim on Steam** button — just click and grab it!"
             ),
-            color=0x1B2838,
+            color=0x00C851,
         )
-        intro.set_footer(text="Powered by the Steam store API")
+        intro.set_footer(text="Powered by GamerPower + Steam Store API")
         await ch.send(embed=intro)
 
-    await interaction.followup.send(f"✅ Fetching current Steam deals and posting to {ch.mention}…", ephemeral=True)
+    await interaction.followup.send(f"✅ Fetching current free games and posting to {ch.mention}…", ephemeral=True)
 
     loop = asyncio.get_running_loop()
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
 
-    posted = 0
     for game in games:
         POSTED_FREE_GAMES.add(game["id"])
-        orig_cents = game["original"]
-        orig_str   = f"~~${orig_cents / 100:.2f}~~" if orig_cents else "~~Paid~~"
-        embed = discord.Embed(
-            title=f"🆓 {game['name']}",
-            url=game["url"],
-            description=(
-                f"**Price:** {orig_str} → **FREE**\n"
-                f"Click the title to claim it on Steam before the offer ends!"
-            ),
-            color=0x1B2838,
-        )
-        if game["header_image"]:
-            embed.set_image(url=game["header_image"])
-        embed.set_footer(text="Steam Free Game Alert • Check the store for expiry date")
-        embed.timestamp = discord.utils.utcnow()
-        await ch.send(embed=embed)
-        posted += 1
-
-    if posted == 0:
-        await ch.send(
-            embed=discord.Embed(
-                description="🔍 No games are 100% off on Steam right now. Check back later — the bot will post automatically when deals appear!",
-                color=0x1B2838,
-            )
-        )
+    await _post_free_games(ch, games)
 
     await interaction.followup.send(
-        f"{'✅ Posted **' + str(posted) + '** free game(s).' if posted else '⚠️ No free games found right now.'} The channel will auto-update every 4 hours.",
+        f"{'✅ Posted **' + str(len(games)) + '** free game(s) with images and claim buttons.' if games else '⚠️ No free games found right now.'} The channel auto-updates every 4 hours.",
         ephemeral=True,
     )
 
