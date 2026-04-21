@@ -90,6 +90,7 @@ input[type=range]{width:120px;accent-color:#58a6ff}
   <button class="tab-btn" onclick="showTab('giveaways')">Giveaways</button>
   <button class="tab-btn" onclick="showTab('streamers')">Streamers</button>
   <button class="tab-btn" onclick="showTab('reactionroles')">Reaction Roles</button>
+  <button class="tab-btn" onclick="showTab('pokecoins')">💰 PokeCoins</button>
 </div>
 
 <!-- TOAST -->
@@ -385,6 +386,33 @@ input[type=range]{width:120px;accent-color:#58a6ff}
   </div>
 </div>
 
+<!-- ═══════════════════════════════════ POKECOINS ════════════════════════════ -->
+<div class="tab-content" id="tab-pokecoins">
+  <div class="card">
+    <h3>💰 Give / Remove PokeCoins</h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px">
+      <div>
+        <label style="display:block;margin-bottom:4px;font-size:.85rem;color:#8b949e">Member</label>
+        <select id="pc-member" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:6px;min-width:200px">
+          <option value="">— select member —</option>
+        </select>
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:4px;font-size:.85rem;color:#8b949e">Amount (use negative to remove)</label>
+        <input id="pc-amount" type="number" placeholder="e.g. 500 or -200" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:6px;width:200px"/>
+      </div>
+      <button class="btn btn-primary" onclick="givePokeCoins()">Give / Remove</button>
+      <button class="btn btn-secondary" onclick="checkBalance()">Check Balance</button>
+    </div>
+    <div id="pc-result" style="margin-top:8px;padding:10px;border-radius:6px;display:none"></div>
+  </div>
+  <div class="card">
+    <h3>🏆 PokeCoin Leaderboard</h3>
+    <table><thead><tr><th>#</th><th>Member</th><th>PokeCoins</th></tr></thead>
+    <tbody id="pc-lb"></tbody></table>
+  </div>
+</div>
+
 <script>
 // ── helpers ─────────────────────────────────────────────────────────────────
 function showTab(name) {
@@ -436,7 +464,7 @@ async function loadSelects() {
   _members = mRes.members || [];
   _channels = cRes.channels || [];
   _roles = rRes.roles || [];
-  ['ban-uid','kick-uid','to-uid','unmute-uid','wl-uid','rank-uid'].forEach(id => fillSelect(id, _members, 'id', 'display'));
+  ['ban-uid','kick-uid','to-uid','unmute-uid','wl-uid','rank-uid','pc-member'].forEach(id => fillSelect(id, _members, 'id', 'display'));
   ['ann-ch','clr-ch','gv-ch','rr-ch','lfg-ch'].forEach(id => fillSelect(id, _channels, 'id', 'name'));
   ['rr-role'].forEach(id => fillSelect(id, _roles, 'id', 'name'));
 
@@ -717,19 +745,69 @@ async function postLFG() {
   else toast(d.error || 'Error', false);
 }
 
-// ── init & polling ─────────────────────────────────────────────────────
+// ── pokecoins ────────────────────────────────────────────────────────────
+async function loadPcLeaderboard() {
+  const d = await api('/api/pokecoins/leaderboard');
+  if (!Array.isArray(d)) return;
+  document.getElementById('pc-lb').innerHTML = d.slice(0,25).map((e,i) =>
+    `<tr><td>${i+1}</td><td>${e.name}</td><td>🪙 ${e.balance.toLocaleString()}</td></tr>`
+  ).join('') || '<tr><td colspan="3" style="color:#8b949e">No data</td></tr>';
+}
+
+async function givePokeCoins() {
+  const uid = selVal('pc-member');
+  const amount = parseInt(document.getElementById('pc-amount').value);
+  if (!uid) { toast('Select a member', false); return; }
+  if (!amount || isNaN(amount)) { toast('Enter a valid amount', false); return; }
+  const d = await api('/api/pokecoins/give', {user_id: uid, amount});
+  const box = document.getElementById('pc-result');
+  box.style.display = 'block';
+  if (d.ok) {
+    box.style.background = '#1a3a2a';
+    box.style.border = '1px solid #2ea043';
+    box.innerHTML = `✅ ${d.message}<br><span style="color:#8b949e">New balance: 🪙 ${d.new_balance.toLocaleString()}</span>`;
+    toast(d.message);
+    loadPcLeaderboard();
+  } else {
+    box.style.background = '#3a1a1a';
+    box.style.border = '1px solid #f85149';
+    box.innerHTML = `❌ ${d.error}`;
+    toast(d.error, false);
+  }
+}
+
+async function checkBalance() {
+  const uid = selVal('pc-member');
+  if (!uid) { toast('Select a member', false); return; }
+  const d = await api('/api/pokecoins/balance?user_id=' + uid);
+  const box = document.getElementById('pc-result');
+  box.style.display = 'block';
+  if (d.balance !== undefined) {
+    box.style.background = '#161b22';
+    box.style.border = '1px solid #30363d';
+    box.innerHTML = `👤 <strong>${d.name}</strong> — Balance: 🪙 <strong style="color:#ffd700">${d.balance.toLocaleString()} PokeCoins</strong>`;
+  } else {
+    box.style.background = '#3a1a1a';
+    box.style.border = '1px solid #f85149';
+    box.innerHTML = `❌ ${d.error}`;
+  }
+}
+
+// ── init & polling ────────────────────────────────────────────────────────
 async function init() {
   await loadSelects();
   await loadStats();
   await loadMusic();
   await loadModeration();
   await loadReactionRoles();
+  await loadPcLeaderboard();
 }
 
 init();
 setInterval(loadStats, 30000);
 setInterval(loadMusic, 10000);
 setInterval(loadModeration, 60000);
+setInterval(loadPcLeaderboard, 60000);
 </script>
 </body>
 </html>

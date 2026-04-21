@@ -961,3 +961,75 @@ def api_rank():
         "progress": progress_xp,
         "next_level_xp": next_level_xp,
     })
+
+# ── PokeCoins management ──────────────────────────────────────────────────────
+@app.route("/api/pokecoins/give", methods=["POST"])
+def api_pokecoins_give():
+    if not _logged_in(): return _unauth()
+    data    = request.json or {}
+    uid_str = str(data.get("user_id", "")).strip()
+    amount  = data.get("amount", 0)
+    if not uid_str:
+        return jsonify({"error": "user_id required"}), 400
+    try:
+        uid    = int(uid_str)
+        amount = int(amount)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid user_id or amount"}), 400
+    if amount == 0:
+        return jsonify({"error": "Amount cannot be zero"}), 400
+    if abs(amount) > 1_000_000:
+        return jsonify({"error": "Amount exceeds limit of 1,000,000"}), 400
+    try:
+        from pokemon_game import WALLETS, _ensure_player
+        _ensure_player(uid)
+        current = WALLETS.get(uid, 0)
+        WALLETS[uid] = max(0, current + amount)
+        action = "Gave" if amount > 0 else "Removed"
+        return jsonify({
+            "ok": True,
+            "message": f"{action} {abs(amount):,} PokeCoins {'to' if amount > 0 else 'from'} {_member_name(uid)}",
+            "new_balance": WALLETS[uid],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/pokecoins/balance")
+def api_pokecoins_balance():
+    if not _logged_in(): return _unauth()
+    uid_str = request.args.get("user_id", "").strip()
+    if not uid_str:
+        return jsonify({"error": "user_id required"}), 400
+    try:
+        uid = int(uid_str)
+    except ValueError:
+        return jsonify({"error": "Invalid user_id"}), 400
+    try:
+        from pokemon_game import WALLETS, _ensure_player
+        _ensure_player(uid)
+        return jsonify({
+            "name":    _member_name(uid),
+            "user_id": uid,
+            "balance": WALLETS.get(uid, 0),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/pokecoins/leaderboard")
+def api_pokecoins_leaderboard():
+    if not _logged_in(): return _unauth()
+    try:
+        from pokemon_game import WALLETS
+        client   = _state.get("client")
+        guild_id = _state.get("guild_id")
+        guild    = client.get_guild(guild_id) if client else None
+        member_ids = {m.id for m in guild.members} if guild else set()
+        entries = [
+            {"user_id": uid, "name": _member_name(uid), "balance": bal}
+            for uid, bal in WALLETS.items()
+            if not member_ids or uid in member_ids
+        ]
+        entries.sort(key=lambda x: x["balance"], reverse=True)
+        return jsonify(entries[:50])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
