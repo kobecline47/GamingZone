@@ -22,11 +22,18 @@ from flask import (
     Flask, render_template, request,
     redirect, url_for, session, jsonify,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 app = Flask(__name__)
+# Trust Railway/ngrok reverse-proxy headers so HTTPS sessions work correctly
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = os.environ.get("DASHBOARD_SECRET_KEY") or os.urandom(24)
+# Secure cookie settings for HTTPS custom domain
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PORT = int(os.environ.get("PORT") or os.environ.get("DASHBOARD_PORT") or 5000)
