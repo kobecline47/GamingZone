@@ -207,6 +207,18 @@ input[type=range]{width:120px;accent-color:#58a6ff}
         <input id="ubn-reason" placeholder="Reason..."/></div></div>
       <button class="btn btn-primary" onclick="unbanAction()">Unban</button>
     </div>
+    <!-- LFG -->
+    <div class="card">
+      <h3>Post LFG (Looking For Group)</h3>
+      <div class="form-row">
+        <div class="form-group"><label>Channel</label><select id="lfg-ch"></select></div>
+        <div class="form-group"><label>Game</label><input id="lfg-game" placeholder="e.g. Fortnite"/></div>
+        <div class="form-group"><label>Players Needed</label><input id="lfg-players" type="number" value="2" min="1" max="100"/></div>
+      </div>
+      <div class="form-row"><div class="form-group"><label>Message (optional)</label>
+        <input id="lfg-msg" placeholder="Extra details..."/></div></div>
+      <button class="btn btn-primary" onclick="postLFG()">Post LFG</button>
+    </div>
   </div>
 </div>
 
@@ -220,12 +232,24 @@ input[type=range]{width:120px;accent-color:#58a6ff}
   </div>
 
   <div class="card">
+    <h3>Play a Song</h3>
+    <div class="form-row">
+      <div class="form-group" style="flex:2"><label>Search / YouTube URL</label>
+        <input id="play-query" placeholder="Song name or YouTube URL..."/></div>
+      <div class="form-group"><label>Voice Channel</label>
+        <select id="play-vc"></select></div>
+    </div>
+    <button class="btn btn-primary" onclick="playFromDashboard()">&#9654; Play</button>
+  </div>
+
+  <div class="card">
     <h3>Controls</h3>
     <div class="music-controls">
       <button class="btn btn-secondary" onclick="simpleAction('/api/music/skip',{})">&#9654;&#9654; Skip</button>
       <button class="btn btn-secondary" onclick="simpleAction('/api/music/pause',{})">&#9646;&#9646; Pause</button>
       <button class="btn btn-secondary" onclick="simpleAction('/api/music/resume',{})">&#9654; Resume</button>
       <button class="btn btn-danger" onclick="simpleAction('/api/music/stop',{})">&#9632; Stop</button>
+      <button class="btn btn-secondary" onclick="simpleAction('/api/music/leave',{})">&#128268; Leave VC</button>
     </div>
     <div class="vol-row">
       <span style="font-size:.85rem;color:#8b949e">Volume:</span>
@@ -263,6 +287,16 @@ input[type=range]{width:120px;accent-color:#58a6ff}
 
 <!-- ═══════════════════════════════════ LEADERBOARD ══════════════════════════ -->
 <div class="tab-content" id="tab-leaderboard">
+  <div class="card" style="max-width:480px;margin-bottom:20px">
+    <h3>Rank Lookup</h3>
+    <div class="form-row">
+      <div class="form-group"><label>Member</label><select id="rank-uid"></select></div>
+      <div class="form-group" style="display:flex;align-items:flex-end">
+        <button class="btn btn-primary" onclick="lookupRank()">Look Up</button>
+      </div>
+    </div>
+    <div id="rank-result" style="margin-top:12px"></div>
+  </div>
   <div class="split">
     <div class="card">
       <h3>XP Rankings</h3>
@@ -402,14 +436,19 @@ async function loadSelects() {
   _members = mRes.members || [];
   _channels = cRes.channels || [];
   _roles = rRes.roles || [];
-  ['ban-uid','kick-uid','to-uid','unmute-uid','wl-uid'].forEach(id => fillSelect(id, _members, 'id', 'display'));
-  ['ann-ch','clr-ch','gv-ch','rr-ch'].forEach(id => fillSelect(id, _channels, 'id', 'name'));
+  ['ban-uid','kick-uid','to-uid','unmute-uid','wl-uid','rank-uid'].forEach(id => fillSelect(id, _members, 'id', 'display'));
+  ['ann-ch','clr-ch','gv-ch','rr-ch','lfg-ch'].forEach(id => fillSelect(id, _channels, 'id', 'name'));
   ['rr-role'].forEach(id => fillSelect(id, _roles, 'id', 'name'));
 
   // ban list for unban
   const bRes = await api('/api/bans');
   const bans = bRes.bans || [];
   fillSelect('ubn-uid', bans, 'id', 'name');
+
+  // voice channels for music play
+  const vcRes = await api('/api/voice-channels');
+  const vcs = vcRes.channels || [];
+  fillSelect('play-vc', vcs.map(c => ({...c, label: `${c.name} (${c.members} in VC)`})), 'id', 'label');
 }
 
 // ── stats / overview ─────────────────────────────────────────────────────
@@ -634,6 +673,48 @@ async function addReactionRole() {
   });
   if (d.ok) { toast(d.message); loadReactionRoles(); }
   else toast(d.error, false);
+}
+
+// ── play from dashboard ────────────────────────────────────────────────
+async function playFromDashboard() {
+  const query = document.getElementById('play-query').value.trim();
+  const vc    = selVal('play-vc');
+  if (!query) { toast('Enter a song name or URL', false); return; }
+  const d = await api('/api/music/play', {query, voice_channel_id: vc});
+  if (d.ok) { toast(d.message); document.getElementById('play-query').value = ''; loadMusic(); }
+  else toast(d.error || 'Error', false);
+}
+
+// ── rank lookup ────────────────────────────────────────────────────────
+async function lookupRank() {
+  const uid = selVal('rank-uid');
+  const d   = await api('/api/rank?user_id=' + uid);
+  if (d.error) { toast(d.error, false); return; }
+  const pct = Math.min(100, Math.round((d.progress / d.next_level_xp) * 100));
+  document.getElementById('rank-result').innerHTML = `
+    <div style="background:#21262d;border-radius:8px;padding:14px">
+      <div style="font-weight:700;font-size:1.1rem;color:#c9d1d9">${d.name}</div>
+      <div style="margin:8px 0;display:flex;gap:16px;font-size:.9rem">
+        <span>Level <strong style="color:#58a6ff">${d.level}</strong></span>
+        <span>Total XP <strong style="color:#58a6ff">${d.xp}</strong></span>
+      </div>
+      <div style="font-size:.82rem;color:#8b949e;margin-bottom:6px">${d.progress} / ${d.next_level_xp} XP to next level</div>
+      <div style="background:#30363d;border-radius:4px;height:8px">
+        <div style="background:#58a6ff;width:${pct}%;height:8px;border-radius:4px"></div>
+      </div>
+    </div>`;
+}
+
+// ── LFG ───────────────────────────────────────────────────────────────
+async function postLFG() {
+  const d = await api('/api/lfg', {
+    channel_id: selVal('lfg-ch'),
+    game: document.getElementById('lfg-game').value.trim(),
+    players: parseInt(document.getElementById('lfg-players').value) || 2,
+    message: document.getElementById('lfg-msg').value.trim()
+  });
+  if (d.ok) { toast(d.message); document.getElementById('lfg-game').value = ''; document.getElementById('lfg-msg').value = ''; }
+  else toast(d.error || 'Error', false);
 }
 
 // ── init & polling ─────────────────────────────────────────────────────

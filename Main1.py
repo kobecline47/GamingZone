@@ -1711,6 +1711,10 @@ dashboard.init(
     bot_client=client,
     guild_id=GUILD_ID.id,
     bot_loop=None,  # loop injected after on_ready via update below
+    search_youtube_fn=search_youtube,
+    play_next_fn=play_next,
+    song_entry_cls=SongEntry,
+    get_music_state_fn=get_music_state,
 )
 dashboard.start()
 

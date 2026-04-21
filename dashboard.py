@@ -67,6 +67,10 @@ def init(
     bot_client,
     guild_id: int,
     bot_loop,
+    search_youtube_fn=None,
+    play_next_fn=None,
+    song_entry_cls=None,
+    get_music_state_fn=None,
 ) -> None:
     _state.update(dict(
         xp_data=xp_data,
@@ -83,6 +87,10 @@ def init(
         client=bot_client,
         guild_id=guild_id,
         bot_loop=bot_loop,
+        search_youtube_fn=search_youtube_fn,
+        play_next_fn=play_next_fn,
+        song_entry_cls=song_entry_cls,
+        get_music_state_fn=get_music_state_fn,
     ))
 
 
@@ -790,3 +798,166 @@ def api_reaction_roles_add():
         return jsonify({"ok": True, "message": f"Reaction role added: {emoji}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
+# API: VOICE CHANNELS
+@app.route("/api/voice-channels")
+def api_voice_channels():
+    if not _logged_in(): return _unauth()
+    guild = _guild()
+    if not guild:
+        return jsonify({"channels": []})
+    channels = [
+        {"id": str(c.id), "name": c.name, "members": len(c.members)}
+        for c in sorted(guild.voice_channels, key=lambda c: c.name)
+    ]
+    return jsonify({"channels": channels})
+
+
+# API: MUSIC PLAY FROM DASHBOARD
+@app.route("/api/music/play", methods=["POST"])
+def api_music_play():
+    if not _logged_in(): return _unauth()
+    data             = request.json or {}
+    query            = data.get("query", "").strip()
+    voice_channel_id = data.get("voice_channel_id", "").strip()
+    if not query:
+        return jsonify({"error": "Query cannot be empty"}), 400
+    try:
+        vcid = int(voice_channel_id)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Select a voice channel"}), 400
+
+    search_fn     = _state.get("search_youtube_fn")
+    play_next_fn  = _state.get("play_next_fn")
+    song_entry_cls= _state.get("song_entry_cls")
+    music_states  = _state.get("music_states", {})
+    guild_id      = _state.get("guild_id")
+
+    if not (search_fn and play_next_fn and song_entry_cls):
+        return jsonify({"error": "Music engine not ready yet — wait for bot to fully start"}), 503
+
+    async def _do():
+        guild = _guild()
+        results = await search_fn(query, max_results=1)
+        if not results:
+            raise ValueError("No results found")
+        r = results[0]
+        # Get or create music state
+        state = music_states.setdefault(guild_id, _state.get("get_music_state_fn")(guild_id))
+        vc = guild.voice_client
+        if vc is None:
+            vc_ch = guild.get_channel(vcid)
+            if not vc_ch:
+                raise ValueError("Voice channel not found")
+            vc = await vc_ch.connect()
+            state.voice_client = vc
+        elif vc.channel.id != vcid:
+            vc_ch = guild.get_channel(vcid)
+            await vc.move_to(vc_ch)
+        bot_user = _state["client"].user
+        entry = song_entry_cls(
+            title=r.get("title", "Unknown"),
+            url=r["url"],
+            webpage_url=r.get("webpage_url", ""),
+            duration=r.get("duration", 0),
+            requester=bot_user,
+        )
+        state.queue.append(entry)
+        if not vc.is_playing() and not vc.is_paused():
+            bot_loop = _state.get("bot_loop")
+            play_next_fn(guild_id, bot_loop)
+            return f"Now playing: {entry.title}"
+        return f"Queued: {entry.title} (position {len(state.queue)})"
+
+    try:
+        msg = _run(_do(), timeout=20)
+        return jsonify({"ok": True, "message": msg})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# API: MUSIC LEAVE
+@app.route("/api/music/leave", methods=["POST"])
+def api_music_leave():
+    if not _logged_in(): return _unauth()
+    music_states = _state.get("music_states", {})
+    guild_id     = _state.get("guild_id")
+    async def _do():
+        guild = _guild()
+        vc = guild.voice_client
+        if not vc:
+            raise ValueError("Bot is not in a voice channel")
+        if guild_id in music_states:
+            music_states[guild_id].queue.clear()
+            music_states[guild_id].current = None
+        await vc.disconnect()
+    try:
+        _run(_do())
+        return jsonify({"ok": True, "message": "Disconnected from voice channel"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# API: LFG
+@app.route("/api/lfg", methods=["POST"])
+def api_lfg():
+    if not _logged_in(): return _unauth()
+    data       = request.json or {}
+    channel_id = data.get("channel_id", "").strip()
+    game       = data.get("game", "").strip()
+    players    = int(data.get("players", 2))
+    message    = data.get("message", "").strip()
+    if not game:
+        return jsonify({"error": "Game name is required"}), 400
+    try:
+        cid = int(channel_id)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid channel"}), 400
+    async def _do():
+        guild = _guild()
+        ch = guild.get_channel(cid)
+        if not ch:
+            raise ValueError("Channel not found")
+        embed = discord.Embed(
+            title=f"🎮 Looking For Group — {game}",
+            description=message or f"Looking for {players} players to join!",
+            color=0x5865F2,
+        )
+        embed.add_field(name="Game", value=game, inline=True)
+        embed.add_field(name="Players Needed", value=str(players), inline=True)
+        embed.set_footer(text="Posted via Dashboard")
+        embed.timestamp = discord.utils.utcnow()
+        await ch.send(embed=embed)
+    try:
+        _run(_do())
+        return jsonify({"ok": True, "message": f"LFG posted for {game}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# API: RANK LOOKUP
+@app.route("/api/rank")
+def api_rank():
+    if not _logged_in(): return _unauth()
+    uid_str  = request.args.get("user_id", "").strip()
+    xp_data  = _state.get("xp_data", {})
+    guild_id = _state.get("guild_id")
+    if not uid_str:
+        return jsonify({"error": "user_id required"}), 400
+    try:
+        uid = int(uid_str)
+    except ValueError:
+        return jsonify({"error": "Invalid user ID"}), 400
+    xp    = xp_data.get(guild_id, {}).get(uid, 0)
+    level = _xp_to_level(xp)
+    next_level_xp = _xp_required(level + 1)
+    current_level_xp = sum(_xp_required(l + 1) for l in range(level))
+    progress_xp = xp - current_level_xp
+    return jsonify({
+        "name":  _member_name(uid),
+        "level": level,
+        "xp":    xp,
+        "progress": progress_xp,
+        "next_level_xp": next_level_xp,
+    })
