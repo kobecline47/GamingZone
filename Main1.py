@@ -264,6 +264,7 @@ class Client(commands.Bot):
             giveaway_check.start()
             streamer_check.start()
             free_games_check.start()
+            empty_vc_cleanup.start()
             # Register Pokemon battle commands
             pokemon_game.setup_pokemon(self, GUILD_ID.id)
             pokemon_game.setup_pokemon_economy(self, GUILD_ID.id)
@@ -492,6 +493,39 @@ class OpenTicketView(discord.ui.View):
         self.add_item(OpenTicketButton())
 
 # ── Background Tasks ──────────────────────────────────────────────────────────
+@tasks.loop(minutes=2)
+async def empty_vc_cleanup():
+    """Scan all guilds for empty user-created voice channels and delete them."""
+    for guild in client.guilds:
+        # Channels to always keep: lobby triggers, AFK channel, channels with 0 user limit that are permanent
+        protected_ids: set[int] = set()
+        if guild.afk_channel:
+            protected_ids.add(guild.afk_channel.id)
+        # Protect all Personal Space lobby channels
+        lobby_id = PERSONAL_SPACE_LOBBY.get(guild.id)
+        if lobby_id:
+            protected_ids.add(lobby_id)
+        # Protect all known music / permanent VCs by name keywords
+        permanent_keywords = ("music", "stream", "stage", "afk", "join to create", "general", "lounge", "waiting")
+        for vc in guild.voice_channels:
+            if any(kw in vc.name.lower() for kw in permanent_keywords):
+                protected_ids.add(vc.id)
+        for vc in guild.voice_channels:
+            if vc.id in protected_ids:
+                continue
+            if len(vc.members) == 0:
+                # Only delete if it was a Personal Space channel OR was created by a non-admin
+                # (check: channel has non-default overwrites, meaning someone customised it)
+                is_personal_space = vc.id in PERSONAL_SPACE_CHANNELS
+                has_custom_overwrites = len(vc.overwrites) > 1  # more than just @everyone
+                if is_personal_space or has_custom_overwrites:
+                    try:
+                        PERSONAL_SPACE_CHANNELS.pop(vc.id, None)
+                        await vc.delete(reason="Empty user-created voice channel — auto-cleaned")
+                        print(f"[VCCleanup] Deleted empty channel: #{vc.name} in {guild.name}")
+                    except Exception as e:
+                        print(f"[VCCleanup] Could not delete #{vc.name}: {e}")
+
 @tasks.loop(seconds=30)
 async def giveaway_check():
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
