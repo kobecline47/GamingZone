@@ -1721,7 +1721,7 @@ if _ngrok_authtoken:
     try:
         from pyngrok import ngrok as _ngrok, conf as _ngrok_conf
         _ngrok_conf.get_default().auth_token = _ngrok_authtoken
-        _tunnel = _ngrok.connect(dashboard.DASHBOARD_PORT, "http", hostname=_ngrok_domain)
+        _tunnel = _ngrok.connect(dashboard.DASHBOARD_PORT, "http", hostname=_ngrok_domain, pooling_enabled=True)
         print(f"[ngrok] Tunnel active: {_tunnel.public_url}")
     except Exception as _e:
         print(f"[ngrok] Warning: tunnel failed to start — {_e}")
