@@ -128,6 +128,49 @@ class Client(commands.Bot):
 
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         gid, uid = member.guild.id, member.id
+
+        # ── Personal Space logic ──────────────────────────────────────────────
+        lobby_id = PERSONAL_SPACE_LOBBY.get(gid)
+
+        # User joined the lobby trigger channel → create their private VC
+        if lobby_id and after.channel and after.channel.id == lobby_id:
+            guild = member.guild
+            category = after.channel.category
+            # Create a private channel: only the owner + admins can see it by default
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=False),
+                member: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, mute_members=True, deafen_members=True, move_members=True),
+            }
+            # Admins keep their perms
+            for role in guild.roles:
+                if role.permissions.administrator:
+                    overwrites[role] = discord.PermissionOverwrite(connect=True, view_channel=True)
+            try:
+                new_ch = await guild.create_voice_channel(
+                    name=f"🔒 {member.display_name}'s Space",
+                    category=category,
+                    overwrites=overwrites,
+                    reason="Personal Space auto-created",
+                )
+                PERSONAL_SPACE_CHANNELS[new_ch.id] = uid
+                await member.move_to(new_ch)
+            except Exception as e:
+                print(f"[PersonalSpace] Could not create channel: {e}")
+
+        # User left a personal space channel → delete if empty
+        if before.channel and before.channel.id in PERSONAL_SPACE_CHANNELS:
+            ch = before.channel
+            # Give Discord a moment to update member list
+            await asyncio.sleep(1)
+            try:
+                ch = member.guild.get_channel(ch.id)
+                if ch and len(ch.members) == 0:
+                    PERSONAL_SPACE_CHANNELS.pop(ch.id, None)
+                    await ch.delete(reason="Personal Space empty — auto-deleted")
+            except Exception as e:
+                print(f"[PersonalSpace] Could not delete channel: {e}")
+
+        # ── XP voice tracking ─────────────────────────────────────────────────
         # Joined a voice channel
         if before.channel is None and after.channel is not None:
             VOICE_JOIN_TIME.setdefault(gid, {})[uid] = time.time()
@@ -340,6 +383,12 @@ STREAMER_CHANNEL_NAME = "streamer-alerts"
 # ── Free Games ────────────────────────────────────────────────────────────────
 FREE_GAMES_CHANNEL_NAME = "free-games"
 POSTED_FREE_GAMES: set[int] = set()  # app IDs already announced
+
+# ── Personal Space (private temp voice channels) ──────────────────────────────
+# guild_id -> lobby voice channel ID that triggers creation
+PERSONAL_SPACE_LOBBY: dict[int, int] = {}
+# channel_id -> owner member_id  (tracks active personal space channels)
+PERSONAL_SPACE_CHANNELS: dict[int, int] = {}
 
 # ── Game Channel System ───────────────────────────────────────────────────────
 GAME_LIST = [
@@ -1401,6 +1450,69 @@ async def gamertags_view(interaction: discord.Interaction, user: discord.Member 
     for platform, tag in tags.items():
         embed.add_field(name=platform, value=tag, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@client.tree.command(name="personalspace", description="Set up the Personal Space system — creates a lobby VC that spawns private rooms (Admin only)", guild=GUILD_ID)
+@app_commands.describe(category="Category to create the lobby in (optional — uses default if omitted)")
+async def personalspace(interaction: discord.Interaction, category: str = ""):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    gid   = guild.id
+
+    # Resolve category
+    target_cat = None
+    if category:
+        target_cat = discord.utils.get(guild.categories, name=category)
+
+    # Check if a lobby already exists for this guild
+    existing_lobby_id = PERSONAL_SPACE_LOBBY.get(gid)
+    existing_ch = guild.get_channel(existing_lobby_id) if existing_lobby_id else None
+    if existing_ch:
+        await interaction.followup.send(
+            f"✅ Personal Space lobby already exists: {existing_ch.mention}\n"
+            f"Members join it to get their own private voice room. Delete it and re-run this command to reset.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        lobby = await guild.create_voice_channel(
+            name="➕  Join to Create",
+            category=target_cat,
+            reason="Personal Space lobby created by /personalspace",
+        )
+        PERSONAL_SPACE_LOBBY[gid] = lobby.id
+        embed = discord.Embed(
+            title="🔒 Personal Space System Active!",
+            description=(
+                f"**Lobby channel created:** {lobby.mention}\n\n"
+                "**How it works:**\n"
+                "1️⃣ Join **➕ Join to Create** to get your own private voice room\n"
+                "2️⃣ Your room is named after you and only you can see it by default\n"
+                "3️⃣ Invite friends by right-clicking the channel → Edit → Permissions\n"
+                "4️⃣ Room auto-deletes when everyone leaves\n\n"
+                "You can rename, set limits, and manage permissions of your own room."
+            ),
+            color=0x7289DA,
+        )
+        embed.set_footer(text="Personal Space • Powered by GamingZoneBot")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Also post a public info message in the current text channel
+        if interaction.channel:
+            pub = discord.Embed(
+                title="🔒 Personal Space Voice Rooms",
+                description=(
+                    f"Join {lobby.mention} to instantly get your own **private voice channel**!\n"
+                    "It disappears automatically when you leave. 🎮"
+                ),
+                color=0x7289DA,
+            )
+            await interaction.channel.send(embed=pub)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to create lobby: {e}", ephemeral=True)
 
 @client.tree.command(name="setupgames", description="Create game roles, channels, and the game selector (Admin only)", guild=GUILD_ID)
 async def setupgames(interaction: discord.Interaction):
