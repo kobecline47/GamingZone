@@ -5,6 +5,7 @@ import random
 import asyncio
 import collections
 import os
+import re
 import urllib.request
 import urllib.parse
 import json
@@ -324,6 +325,7 @@ spam_tracker: dict[int, list] = {}  # user_id -> list of message timestamps
 SPAM_THRESHOLD = 5    # messages
 SPAM_WINDOW    = 5    # seconds
 BANNED_WORD_WARNINGS: dict[int, int] = {}  # user_id -> warning count (max 2 before ban)
+AD_WARNINGS: dict[int, int] = {}           # user_id -> ad warning count (1=timeout, 2=kick)
 
 import datetime
 
@@ -990,6 +992,82 @@ async def on_message(message: discord.Message):
                 embed.add_field(name="Duration", value="2 minutes", inline=False)
                 embed.timestamp = discord.utils.utcnow()
                 await log_ch.send(embed=embed)
+            return
+
+        # ── Discord/Bot advertisement detection ───────────────────────────────
+        _AD_PATTERNS = [
+            r"discord\.gg/\S+",                     # discord.gg/invite
+            r"discord\.com/invite/\S+",             # discord.com/invite/...
+            r"discordapp\.com/invite/\S+",          # old format
+            r"dsc\.gg/\S+",                         # shortener
+            r"top\.gg/bot/\d+",                     # bot listing
+            r"discord\.me/\S+",                     # discord.me
+            r"disboard\.org/server/\S+",            # disboard
+        ]
+        is_ad = any(re.search(pat, message.content, re.IGNORECASE) for pat in _AD_PATTERNS)
+
+        if is_ad:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+
+            uid = message.author.id
+            AD_WARNINGS[uid] = AD_WARNINGS.get(uid, 0) + 1
+            warn_count = AD_WARNINGS[uid]
+
+            log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+
+            if warn_count >= 2:
+                # 2nd offense — kick
+                AD_WARNINGS.pop(uid, None)
+                notice = await message.channel.send(
+                    f"{message.author.mention} 🦵 You have been **kicked** for advertising another Discord server or bot. "
+                    f"Advertising is not allowed in this server."
+                )
+                await asyncio.sleep(5)
+                try:
+                    await notice.delete()
+                except discord.HTTPException:
+                    pass
+                try:
+                    await message.author.kick(reason="Auto-mod: advertising (2nd offense)")
+                except discord.HTTPException:
+                    pass
+                if log_ch:
+                    embed = discord.Embed(title="🦵 Auto-Mod: Kicked for Advertising (2nd Offense)", color=0xE67E22)
+                    embed.add_field(name="User",    value=f"{message.author.mention} ({message.author})", inline=False)
+                    embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                    embed.add_field(name="Content", value=message.content[:500], inline=False)
+                    embed.add_field(name="Reason",  value="Advertising another server or bot (2nd offense)", inline=False)
+                    embed.timestamp = discord.utils.utcnow()
+                    await log_ch.send(embed=embed)
+            else:
+                # 1st offense — 1 minute timeout
+                try:
+                    await message.author.timeout(
+                        datetime.timedelta(minutes=1),
+                        reason="Auto-mod: advertising another Discord server/bot (1st offense)",
+                    )
+                except discord.HTTPException:
+                    pass
+                warning = await message.channel.send(
+                    f"{message.author.mention} ⚠️ **Warning 1/2:** Advertising other Discord servers or bots is not allowed.\n"
+                    f"You have been timed out for **1 minute**. A second offense will result in a **kick**."
+                )
+                await asyncio.sleep(8)
+                try:
+                    await warning.delete()
+                except discord.HTTPException:
+                    pass
+                if log_ch:
+                    embed = discord.Embed(title="⏱️ Auto-Mod: Ad Timeout (Warning 1/2)", color=0xFFAA00)
+                    embed.add_field(name="User",     value=f"{message.author.mention} ({message.author})", inline=False)
+                    embed.add_field(name="Channel",  value=message.channel.mention, inline=False)
+                    embed.add_field(name="Content",  value=message.content[:500], inline=False)
+                    embed.add_field(name="Duration", value="1 minute timeout", inline=False)
+                    embed.timestamp = discord.utils.utcnow()
+                    await log_ch.send(embed=embed)
             return
 
 
