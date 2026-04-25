@@ -1579,7 +1579,13 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
-    results = Search(query)
+    try:
+        results = Search(query)
+        print(f'[Search] Found {len(results.videos)} videos for \"{query}\"')
+    except Exception as e:
+        print(f'[Search Error] Failed to search YouTube: {e}')
+        return []
+    
     entries = []
     for yt in results.videos[:max_results]:
         try:
@@ -1591,7 +1597,11 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
                     'webpage_url': yt.watch_url,
                     'duration': yt.length or 0,
                 })
-        except Exception:
+                print(f'[Search] Added: {yt.title}')
+            else:
+                print(f'[Search] No audio stream for: {yt.title}')
+        except Exception as e:
+            print(f'[Search] Error processing video: {e}')
             continue
     return entries
 
