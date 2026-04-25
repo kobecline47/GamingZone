@@ -737,15 +737,13 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
 # SETUP — register all slash commands
 # ══════════════════════════════════════════════════════════════════════════════
 
-def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
-    """Register all casino slash commands on the given guild."""
-    gobj = discord.Object(id=guild_id)
+def setup_gambling(bot: commands.Bot) -> None:
+    """Register all casino slash commands globally."""
 
     # ── /casinomenu ───────────────────────────────────────────────────────────
     @bot.tree.command(
         name="casinomenu",
         description="🎰 View all casino games, rules, and your stats",
-        guild=gobj,
     )
     async def cmd_casinomenu(interaction: discord.Interaction):
         _ensure_player(interaction.user.id)
@@ -757,7 +755,6 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
     @bot.tree.command(
         name="setupcasino",
         description="🎰 Create a dedicated casino channel with pinned games menu (Admin only)",
-        guild=gobj,
     )
     async def cmd_setupcasino(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
@@ -828,7 +825,6 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
     @bot.tree.command(
         name="daily",
         description="📅 Claim your free daily PokeCoins (24 h cooldown)",
-        guild=gobj,
     )
     async def cmd_daily(interaction: discord.Interaction):
         uid = interaction.user.id
@@ -856,7 +852,7 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         await interaction.response.send_message(embed=embed)
 
     # ── /slots ────────────────────────────────────────────────────────────────
-    @bot.tree.command(name="slots", description="🎰 Spin the slot machine", guild=gobj)
+    @bot.tree.command(name="slots", description="🎰 Spin the slot machine")
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_slots(interaction: discord.Interaction, bet: int):
         uid = interaction.user.id
@@ -934,7 +930,7 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         )
 
     # ── /blackjack ────────────────────────────────────────────────────────────
-    @bot.tree.command(name="blackjack", description="🃏 Play Blackjack against the dealer", guild=gobj)
+    @bot.tree.command(name="blackjack", description="🃏 Play Blackjack against the dealer")
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_blackjack(interaction: discord.Interaction, bet: int):
         uid = interaction.user.id
@@ -964,7 +960,7 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         await interaction.response.send_message(embed=embed, view=view)
 
     # ── /coinflip ─────────────────────────────────────────────────────────────
-    @bot.tree.command(name="coinflip", description="🪙 Flip a coin — heads or tails!", guild=gobj)
+    @bot.tree.command(name="coinflip", description="🪙 Flip a coin — heads or tails!")
     @app_commands.describe(bet="PokeCoins to bet", choice="heads or tails")
     @app_commands.choices(choice=[
         app_commands.Choice(name="Heads 👑", value="heads"),
@@ -994,7 +990,7 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         )
 
     # ── /roulette ─────────────────────────────────────────────────────────────
-    @bot.tree.command(name="roulette", description="🎡 Spin the roulette wheel!", guild=gobj)
+    @bot.tree.command(name="roulette", description="🎡 Spin the roulette wheel!")
     @app_commands.describe(
         bet="PokeCoins to bet",
         choice="red / black / green  OR  a number 0–36",
@@ -1040,7 +1036,7 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
         )
 
     # ── /dice ─────────────────────────────────────────────────────────────────
-    @bot.tree.command(name="dice", description="🎲 Roll dice against the bot — highest wins!", guild=gobj)
+    @bot.tree.command(name="dice", description="🎲 Roll dice against the bot — highest wins!")
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_dice(interaction: discord.Interaction, bet: int):
         uid = interaction.user.id
@@ -1062,7 +1058,6 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
     @bot.tree.command(
         name="highlow",
         description="🃏 Guess if the next card is higher or lower! (1.9× payout)",
-        guild=gobj,
     )
     @app_commands.describe(bet="PokeCoins to bet", guess="Higher or lower than the current card?")
     @app_commands.choices(guess=[
@@ -1108,7 +1103,6 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
     @bot.tree.command(
         name="plinko",
         description="🎯 Drop the ball through the Plinko board! Up to 3× payout",
-        guild=gobj,
     )
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_plinko(interaction: discord.Interaction, bet: int):
@@ -1174,7 +1168,6 @@ def setup_gambling(bot: commands.Bot, guild_id: int) -> None:
     @bot.tree.command(
         name="heist",
         description="🦹 Plan and execute a multi-stage heist for big PokeCoins!",
-        guild=gobj,
     )
     @app_commands.describe(bet="PokeCoins to risk on the heist", target="Where to rob")
     @app_commands.choices(target=[

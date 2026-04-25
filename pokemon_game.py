@@ -317,7 +317,7 @@ def _make_fighter(data: dict) -> dict:
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
-def setup_pokemon(bot: commands.Bot, guild_id: int) -> None:
+def setup_pokemon(bot: commands.Bot) -> None:
     """Register the /pokemon command group on the bot tree."""
 
     pokemon_group = app_commands.Group(
@@ -629,16 +629,15 @@ def setup_pokemon(bot: commands.Bot, guild_id: int) -> None:
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # Register the group with the guild
-    bot.tree.add_command(pokemon_group, guild=discord.Object(id=guild_id))
+    # Register the group globally
+    bot.tree.add_command(pokemon_group)
 
 
-def setup_pokemon_economy(bot: commands.Bot, guild_id: int) -> None:
+def setup_pokemon_economy(bot: commands.Bot) -> None:
     """Register /pokeshop, /pokedex, /pokepick, /pokewallet, /pokebuy, /pokdaily commands."""
-    gobj = discord.Object(id=guild_id)
 
     # ── /pokewallet ───────────────────────────────────────────────────────────
-    @bot.tree.command(name="pokewallet", description="Check your PokeCoin balance and active Pokemon", guild=gobj)
+    @bot.tree.command(name="pokewallet", description="Check your PokeCoin balance and active Pokemon")
     async def cmd_pokewallet(interaction: discord.Interaction):
         uid = interaction.user.id
         _ensure_player(uid)
@@ -660,7 +659,7 @@ def setup_pokemon_economy(bot: commands.Bot, guild_id: int) -> None:
         await interaction.response.send_message(embed=embed)
 
     # ── /pokdaily ─────────────────────────────────────────────────────────────
-    @bot.tree.command(name="pokdaily", description="Claim your daily PokeCoin reward", guild=gobj)
+    @bot.tree.command(name="pokdaily", description="Claim your daily PokeCoin reward")
     async def cmd_pokdaily(interaction: discord.Interaction):
         uid = interaction.user.id
         _ensure_player(uid)
@@ -686,7 +685,7 @@ def setup_pokemon_economy(bot: commands.Bot, guild_id: int) -> None:
         await interaction.response.send_message(embed=embed)
 
     # ── /pokeshop ─────────────────────────────────────────────────────────────
-    @bot.tree.command(name="pokeshop", description="Browse all Pokemon available for purchase", guild=gobj)
+    @bot.tree.command(name="pokeshop", description="Browse all Pokemon available for purchase")
     async def cmd_pokeshop(interaction: discord.Interaction):
         uid = interaction.user.id
         _ensure_player(uid)
@@ -715,7 +714,7 @@ def setup_pokemon_economy(bot: commands.Bot, guild_id: int) -> None:
         await interaction.response.send_message(embed=embed)
 
     # ── /pokebuy ──────────────────────────────────────────────────────────────
-    @bot.tree.command(name="pokebuy", description="Buy a Pokemon from the shop", guild=gobj)
+    @bot.tree.command(name="pokebuy", description="Buy a Pokemon from the shop")
     @app_commands.describe(pokemon="The Pokemon you want to buy")
     async def cmd_pokebuy(interaction: discord.Interaction, pokemon: str):
         uid = interaction.user.id
@@ -762,7 +761,7 @@ def setup_pokemon_economy(bot: commands.Bot, guild_id: int) -> None:
         ][:25]
 
     # ── /pokepick ─────────────────────────────────────────────────────────────
-    @bot.tree.command(name="pokepick", description="Switch your active Pokemon to one you own", guild=gobj)
+    @bot.tree.command(name="pokepick", description="Switch your active Pokemon to one you own")
     @app_commands.describe(pokemon="The Pokemon to set as active")
     async def cmd_pokepick(interaction: discord.Interaction, pokemon: str):
         uid = interaction.user.id
@@ -798,7 +797,7 @@ def setup_pokemon_economy(bot: commands.Bot, guild_id: int) -> None:
         ][:25]
 
     # ── /pokedex ──────────────────────────────────────────────────────────────
-    @bot.tree.command(name="pokedex", description="View all Pokemon you own", guild=gobj)
+    @bot.tree.command(name="pokedex", description="View all Pokemon you own")
     async def cmd_pokedex(interaction: discord.Interaction):
         uid = interaction.user.id
         _ensure_player(uid)
