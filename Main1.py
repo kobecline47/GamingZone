@@ -1660,9 +1660,13 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(state.current.url, **FFMPEG_OPTS),
-            volume=state.volume
+        # Use FFmpegOpusAudio so discord.py does not need local libopus encoding.
+        # Apply volume in ffmpeg filter since PCMVolumeTransformer is for PCM sources.
+        source = discord.FFmpegOpusAudio(
+            state.current.url,
+            executable=FFMPEG_EXE,
+            before_options=FFMPEG_OPTS['before_options'],
+            options=f"-vn -af volume={state.volume}",
         )
         def after_play(error):
             if error:
@@ -1778,20 +1782,20 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(emoji="🔉", label="Vol -10%", style=discord.ButtonStyle.secondary, row=1)
     async def vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
-        vc = interaction.guild.voice_client
         state.volume = max(0.0, state.volume - 0.1)
-        if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
-            vc.source.volume = state.volume
-        await interaction.response.send_message(f"🔉 Volume: {int(state.volume * 100)}%", ephemeral=True)
+        await interaction.response.send_message(
+            f"🔉 Volume: {int(state.volume * 100)}% (applies immediately to next track)",
+            ephemeral=True,
+        )
 
     @discord.ui.button(emoji="🔊", label="Vol +10%", style=discord.ButtonStyle.secondary, row=1)
     async def vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
-        vc = interaction.guild.voice_client
         state.volume = min(1.0, state.volume + 0.1)
-        if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
-            vc.source.volume = state.volume
-        await interaction.response.send_message(f"🔊 Volume: {int(state.volume * 100)}%", ephemeral=True)
+        await interaction.response.send_message(
+            f"🔊 Volume: {int(state.volume * 100)}% (applies immediately to next track)",
+            ephemeral=True,
+        )
 
     @discord.ui.button(emoji="🔁", label="Autoplay: OFF", style=discord.ButtonStyle.secondary, row=2, custom_id="autoplay_toggle")
     async def autoplay_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2019,10 +2023,7 @@ async def volume(interaction: discord.Interaction, level: int):
         return
     state = get_music_state(interaction.guild.id)
     state.volume = level / 100
-    vc = interaction.guild.voice_client
-    if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
-        vc.source.volume = state.volume
-    await interaction.response.send_message(f"Volume set to {level}%.")
+    await interaction.response.send_message(f"Volume set to {level}% (applies immediately to next track).")
 
 @client.tree.command(name="announce", description="Send an announcement to a specific channel", guild=GUILD_ID)
 @app_commands.default_permissions(manage_messages=True)
