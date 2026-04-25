@@ -1605,42 +1605,71 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     """Fallback: use yt-dlp which handles YouTube restrictions better."""
     try:
         import yt_dlp
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'default_search': 'ytsearch',
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
-            entries = []
-            for entry in info.get('entries', [])[:max_results]:
-                try:
-                    if not entry:
-                        continue
-                    stream_url = entry.get('url')
-                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
-                    # If search returned metadata only, resolve the actual audio stream URL.
-                    if not stream_url or 'youtube.com/watch' in str(stream_url):
-                        resolved = ydl.extract_info(webpage_url, download=False)
-                        stream_url = resolved.get('url')
+        attempts = [
+            {
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'ytsearch',
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            },
+            {
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'ytsearch',
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
+            },
+        ]
 
-                    if not stream_url:
-                        continue
+        queries = [
+            f"ytsearch{max_results}:{query}",
+            f"ytsearchdate{max_results}:{query}",
+        ]
 
-                    entries.append({
-                        'title': entry.get('title', 'Unknown title'),
-                        'url': stream_url,
-                        'webpage_url': webpage_url,
-                        'duration': entry.get('duration', 0),
-                    })
-                    print(f'[yt-dlp] Added: {entry.get("title", "Unknown title")}')
-                except Exception as e:
-                    print(f'[yt-dlp] Error processing entry: {e}')
-                    continue
-            print(f'[yt-dlp] Found {len(entries)} videos for \"{query}\"')
-            return entries if entries else _invidious_search(query, max_results)
+        for idx, ydl_opts in enumerate(attempts, 1):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    for q in queries:
+                        try:
+                            info = ydl.extract_info(q, download=False)
+                            entries = []
+                            for entry in info.get('entries', [])[:max_results]:
+                                try:
+                                    if not entry:
+                                        continue
+                                    stream_url = entry.get('url')
+                                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
+                                    if not stream_url or 'youtube.com/watch' in str(stream_url):
+                                        resolved = ydl.extract_info(webpage_url, download=False)
+                                        stream_url = resolved.get('url')
+                                    if not stream_url:
+                                        continue
+
+                                    entries.append({
+                                        'title': entry.get('title', 'Unknown title'),
+                                        'url': stream_url,
+                                        'webpage_url': webpage_url,
+                                        'duration': entry.get('duration', 0),
+                                    })
+                                    print(f'[yt-dlp] Added: {entry.get("title", "Unknown title")}')
+                                except Exception as e:
+                                    print(f'[yt-dlp] Error processing entry: {e}')
+                                    continue
+
+                            if entries:
+                                print(f'[yt-dlp] Found {len(entries)} videos for \"{query}\" (attempt {idx})')
+                                return entries
+                        except Exception as e:
+                            print(f'[yt-dlp] Query failed ({q}): {e}')
+                            continue
+            except Exception as e:
+                print(f'[yt-dlp] Attempt {idx} failed: {e}')
+                continue
+
+        return _invidious_search(query, max_results)
     except Exception as e:
         print(f'[yt-dlp Error] Failed: {e}')
         return _invidious_search(query, max_results)
