@@ -1531,21 +1531,13 @@ if _platform.system() == "Windows":
         r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
     )
 else:
-    # Try system ffmpeg first, then fall back to static-ffmpeg bundled binary
-    _sys_ffmpeg = _shutil.which("ffmpeg")
-    if _sys_ffmpeg:
-        FFMPEG_EXE = _sys_ffmpeg
-    else:
-        try:
-            import static_ffmpeg
-            static_ffmpeg.add_paths()  # adds bundled binary to PATH
-            FFMPEG_EXE = _shutil.which("ffmpeg") or "ffmpeg"
-        except Exception:
-            FFMPEG_EXE = "ffmpeg"
+    # On Railway/Linux, prefer system ffmpeg from apt package for stability.
+    FFMPEG_EXE = _shutil.which("ffmpeg") or "ffmpeg"
+print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
 
