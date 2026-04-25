@@ -27,6 +27,7 @@ pyngrok==7.2.3
 PyNaCl==1.6.2
 pytubefix==10.3.8
 requests==2.33.1
+static-ffmpeg==2.5
 urllib3==2.6.3
 websockets==16.0
 Werkzeug==3.1.8
