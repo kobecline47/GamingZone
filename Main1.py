@@ -1607,7 +1607,11 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
-    """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
+    """Try pytubefix first; fall back to yt-dlp and Invidious if blocked.
+
+    Important: do not resolve streams here. Stream resolution can trigger anti-bot
+    checks; we resolve a playable URL right before playback instead.
+    """
     try:
         results = Search(query)
     except Exception as e:
@@ -1617,14 +1621,12 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     entries = []
     for yt in results.videos[:max_results]:
         try:
-            stream = yt.streams.filter(only_audio=True).order_by('abr').last()
-            if stream:
-                entries.append({
-                    'title': yt.title,
-                    'url': stream.url,
-                    'webpage_url': yt.watch_url,
-                    'duration': yt.length or 0,
-                })
+            entries.append({
+                'title': yt.title,
+                'url': yt.watch_url,
+                'webpage_url': yt.watch_url,
+                'duration': yt.length or 0,
+            })
         except Exception as e:
             print(f'[Search] pytubefix item failed: {e}')
             continue
@@ -1658,10 +1660,7 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
             },
         ]
 
-        queries = [
-            f"ytsearch{max_results}:{query}",
-            f"ytsearchdate{max_results}:{query}",
-        ]
+        queries = [f"ytsearch{max_results}:{query}"]
 
         for ydl_opts in attempts:
             try:
@@ -1705,6 +1704,91 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     except Exception as e:
         print(f'[yt-dlp] failed: {e}')
         return _invidious_search(query, max_results)
+
+
+def _extract_video_id(url: str) -> str | None:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+        if 'youtu.be' in host:
+            vid = parsed.path.strip('/').split('/')[0]
+            return vid or None
+        if 'youtube.com' in host:
+            qs = urllib.parse.parse_qs(parsed.query)
+            vid = (qs.get('v') or [None])[0]
+            return vid
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_playable_url(url: str) -> str | None:
+    """Resolve a direct audio URL when we only have a YouTube watch URL."""
+    lower = (url or '').lower()
+    if 'googlevideo.com' in lower:
+        return url
+    if 'youtube.com/watch' not in lower and 'youtu.be/' not in lower:
+        return url
+
+    # 1) Try yt-dlp direct extraction from the watch URL.
+    try:
+        import yt_dlp
+        attempts = [
+            {
+                'quiet': True,
+                'no_warnings': True,
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            },
+            {
+                'quiet': True,
+                'no_warnings': True,
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
+            },
+        ]
+        for opts in attempts:
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    audio_url = info.get('url')
+                    if audio_url:
+                        return audio_url
+            except Exception as e:
+                print(f'[Resolve] yt-dlp direct failed: {e}')
+                continue
+    except Exception as e:
+        print(f'[Resolve] yt-dlp unavailable: {e}')
+
+    # 2) Try Invidious stream resolution by video id.
+    vid = _extract_video_id(url)
+    if not vid:
+        return None
+    instances = [
+        'https://inv.nadeko.net',
+        'https://invidious.nerdvpn.de',
+        'https://yewtu.be',
+        'https://invidious.privacydev.net',
+    ]
+    for base in instances:
+        try:
+            details_url = f"{base}/api/v1/videos/{vid}"
+            req = urllib.request.Request(details_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                details = json.loads(resp.read().decode(errors='ignore'))
+            audio_formats = [
+                f for f in details.get('adaptiveFormats', [])
+                if 'audio' in str(f.get('type', '')).lower() and f.get('url')
+            ]
+            if audio_formats:
+                best = max(audio_formats, key=lambda f: int(f.get('bitrate', 0) or 0))
+                return best['url']
+        except Exception as e:
+            print(f'[Resolve] Invidious failed {base}: {e}')
+            continue
+    return None
 
 
 def _invidious_search(query: str, max_results: int) -> list[dict]:
@@ -1796,8 +1880,13 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
+        playable_url = _resolve_playable_url(state.current.url)
+        if not playable_url:
+            print(f"[Music] Could not resolve playable URL for: {state.current.url}")
+            asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+            return
         source = discord.FFmpegOpusAudio(
-            state.current.url,
+            playable_url,
             executable=FFMPEG_OPTS['executable'],
             before_options=FFMPEG_OPTS['before_options'],
             options=f"-vn -af volume={state.volume}",
