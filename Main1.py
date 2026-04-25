@@ -15,7 +15,6 @@ import re
 import urllib.request
 import urllib.parse
 import json
-import base64
 import traceback
 import time
 import nacl.secret  # required for discord voice (PyNaCl)
@@ -1565,49 +1564,14 @@ class GuildMusicState:
         self.autoplay: bool = False
 
 music_states: dict[int, GuildMusicState] = {}
-_YTDLP_COOKIE_FILE: str | None = None
 
 def get_music_state(guild_id: int) -> GuildMusicState:
     if guild_id not in music_states:
         music_states[guild_id] = GuildMusicState()
     return music_states[guild_id]
 
-def _get_ytdlp_cookie_file() -> str | None:
-    """Build a Netscape cookie file from env vars for yt-dlp auth, if provided."""
-    global _YTDLP_COOKIE_FILE
-    if _YTDLP_COOKIE_FILE:
-        return _YTDLP_COOKIE_FILE
-
-    cookie_b64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
-    cookie_txt = os.getenv("YTDLP_COOKIES_TXT", "").strip()
-    if not cookie_b64 and not cookie_txt:
-        return None
-
-    try:
-        if cookie_b64:
-            content = base64.b64decode(cookie_b64).decode("utf-8", errors="ignore")
-        else:
-            content = cookie_txt
-
-        cookie_path = os.path.join(os.path.dirname(__file__), "yt_cookies.txt")
-        with open(cookie_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        _YTDLP_COOKIE_FILE = cookie_path
-        print("[yt-dlp] Loaded YouTube cookies from environment.")
-        return cookie_path
-    except Exception as e:
-        print(f"[yt-dlp] Failed to load cookie env var: {e}")
-        return None
-
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
-    """Try pytubefix first; fall back to yt-dlp if YouTube blocks the bot."""
-    try:
-        results = Search(query)
-        print(f'[Search] Found {len(results.videos)} videos for \"{query}\"')
-    except Exception as e:
-        print(f'[Search Error] pytubefix failed: {e}. Trying yt-dlp...')
-        return _ytdlp_search(query, max_results)
-    
+    results = Search(query)
     entries = []
     for yt in results.videos[:max_results]:
         try:
@@ -1619,154 +1583,8 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
                     'webpage_url': yt.watch_url,
                     'duration': yt.length or 0,
                 })
-                print(f'[Search] Added: {yt.title}')
-            else:
-                print(f'[Search] No audio stream for: {yt.title}')
-        except Exception as e:
-            print(f'[Search] Error with pytubefix, trying yt-dlp: {e}')
-            if 'bot' in str(e).lower():
-                return _ytdlp_search(query, max_results)
+        except Exception:
             continue
-    
-    return entries if entries else _ytdlp_search(query, max_results)
-
-def _ytdlp_search(query: str, max_results: int) -> list[dict]:
-    """Fallback: use yt-dlp which handles YouTube restrictions better."""
-    try:
-        import yt_dlp
-        cookie_file = _get_ytdlp_cookie_file()
-        attempts = [
-            {
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-            },
-            {
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
-            },
-        ]
-
-        if cookie_file:
-            for opts in attempts:
-                opts['cookiefile'] = cookie_file
-
-        queries = [
-            f"ytsearch{max_results}:{query}",
-            f"ytsearchdate{max_results}:{query}",
-        ]
-
-        for idx, ydl_opts in enumerate(attempts, 1):
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    for q in queries:
-                        try:
-                            info = ydl.extract_info(q, download=False)
-                            entries = []
-                            for entry in info.get('entries', [])[:max_results]:
-                                try:
-                                    if not entry:
-                                        continue
-                                    stream_url = entry.get('url')
-                                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
-                                    if not stream_url or 'youtube.com/watch' in str(stream_url):
-                                        resolved = ydl.extract_info(webpage_url, download=False)
-                                        stream_url = resolved.get('url')
-                                    if not stream_url:
-                                        continue
-
-                                    entries.append({
-                                        'title': entry.get('title', 'Unknown title'),
-                                        'url': stream_url,
-                                        'webpage_url': webpage_url,
-                                        'duration': entry.get('duration', 0),
-                                    })
-                                    print(f'[yt-dlp] Added: {entry.get("title", "Unknown title")}')
-                                except Exception as e:
-                                    print(f'[yt-dlp] Error processing entry: {e}')
-                                    continue
-
-                            if entries:
-                                print(f'[yt-dlp] Found {len(entries)} videos for \"{query}\" (attempt {idx})')
-                                return entries
-                        except Exception as e:
-                            print(f'[yt-dlp] Query failed ({q}): {e}')
-                            continue
-            except Exception as e:
-                print(f'[yt-dlp] Attempt {idx} failed: {e}')
-                continue
-
-        return _invidious_search(query, max_results)
-    except Exception as e:
-        print(f'[yt-dlp Error] Failed: {e}')
-        return _invidious_search(query, max_results)
-
-def _invidious_search(query: str, max_results: int) -> list[dict]:
-    """Last-resort fallback: search/play via public Invidious instances."""
-    instances = [
-        'https://invidious.nerdvpn.de',
-        'https://invidious.jing.rocks',
-        'https://inv.nadeko.net',
-        'https://yewtu.be',
-    ]
-    for base in instances:
-        try:
-            search_url = (
-                f"{base}/api/v1/search?q={urllib.parse.quote(query)}"
-                f"&type=video&sort_by=relevance"
-            )
-            req = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                data = json.loads(resp.read().decode(errors='ignore'))
-
-            entries: list[dict] = []
-            for item in data:
-                if item.get('type') != 'video':
-                    continue
-                vid = item.get('videoId')
-                if not vid:
-                    continue
-
-                try:
-                    details_url = f"{base}/api/v1/videos/{vid}"
-                    req2 = urllib.request.Request(details_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req2, timeout=6) as resp2:
-                        details = json.loads(resp2.read().decode(errors='ignore'))
-
-                    audio_formats = [
-                        f for f in details.get('adaptiveFormats', [])
-                        if 'audio' in str(f.get('type', '')).lower() and f.get('url')
-                    ]
-                    if not audio_formats:
-                        continue
-                    best_audio = max(audio_formats, key=lambda f: int(f.get('bitrate', 0) or 0))
-
-                    entries.append({
-                        'title': item.get('title', 'Unknown title'),
-                        'url': best_audio['url'],
-                        'webpage_url': f"https://www.youtube.com/watch?v={vid}",
-                        'duration': int(item.get('lengthSeconds') or 0),
-                    })
-                    if len(entries) >= max_results:
-                        break
-                except Exception as e:
-                    print(f'[Invidious] Could not resolve audio for {vid}: {e}')
-                    continue
-
-            if entries:
-                print(f'[Invidious] Found {len(entries)} videos for \"{query}\" via {base}')
-                return entries
-        except Exception as e:
-            print(f'[Invidious] Instance failed {base}: {e}')
-            continue
-    print(f'[Invidious] No playable results for \"{query}\"')
     return []
 
 def _yt_suggestions(query: str) -> list[str]:
