@@ -1524,15 +1524,33 @@ from pytubefix import Search, YouTube as PyTube
 
 import platform as _platform
 import shutil as _shutil
+def _resolve_ffmpeg_executable() -> str:
+    if _platform.system() == "Windows":
+        return (
+            r"C:\Users\kobec\AppData\Local\Microsoft\WinGet\Packages"
+            r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+            r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
+        )
+
+    system_ffmpeg = _shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+        bundled_ffmpeg = _shutil.which("ffmpeg")
+        if bundled_ffmpeg:
+            return bundled_ffmpeg
+    except Exception as e:
+        print(f"[Music] static-ffmpeg fallback unavailable: {e}")
+
+    return "ffmpeg"
+
 if _platform.system() == "Windows":
-    FFMPEG_EXE = (
-        r"C:\Users\kobec\AppData\Local\Microsoft\WinGet\Packages"
-        r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-        r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
-    )
+    FFMPEG_EXE = _resolve_ffmpeg_executable()
 else:
-    # On Railway/Linux, prefer system ffmpeg from apt package for stability.
-    FFMPEG_EXE = _shutil.which("ffmpeg") or "ffmpeg"
+    FFMPEG_EXE = _resolve_ffmpeg_executable()
 print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
 
 FFMPEG_OPTS = {
