@@ -15,6 +15,7 @@ import re
 import urllib.request
 import urllib.parse
 import json
+import base64
 import traceback
 import time
 import nacl.secret  # required for discord voice (PyNaCl)
@@ -1564,11 +1565,39 @@ class GuildMusicState:
         self.autoplay: bool = False
 
 music_states: dict[int, GuildMusicState] = {}
+_YTDLP_COOKIE_FILE: str | None = None
 
 def get_music_state(guild_id: int) -> GuildMusicState:
     if guild_id not in music_states:
         music_states[guild_id] = GuildMusicState()
     return music_states[guild_id]
+
+def _get_ytdlp_cookie_file() -> str | None:
+    """Build a Netscape cookie file from env vars for yt-dlp auth, if provided."""
+    global _YTDLP_COOKIE_FILE
+    if _YTDLP_COOKIE_FILE:
+        return _YTDLP_COOKIE_FILE
+
+    cookie_b64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    cookie_txt = os.getenv("YTDLP_COOKIES_TXT", "").strip()
+    if not cookie_b64 and not cookie_txt:
+        return None
+
+    try:
+        if cookie_b64:
+            content = base64.b64decode(cookie_b64).decode("utf-8", errors="ignore")
+        else:
+            content = cookie_txt
+
+        cookie_path = os.path.join(os.path.dirname(__file__), "yt_cookies.txt")
+        with open(cookie_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        _YTDLP_COOKIE_FILE = cookie_path
+        print("[yt-dlp] Loaded YouTube cookies from environment.")
+        return cookie_path
+    except Exception as e:
+        print(f"[yt-dlp] Failed to load cookie env var: {e}")
+        return None
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     """Try pytubefix first; fall back to yt-dlp if YouTube blocks the bot."""
@@ -1605,6 +1634,7 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     """Fallback: use yt-dlp which handles YouTube restrictions better."""
     try:
         import yt_dlp
+        cookie_file = _get_ytdlp_cookie_file()
         attempts = [
             {
                 'quiet': True,
@@ -1623,6 +1653,10 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                 'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
             },
         ]
+
+        if cookie_file:
+            for opts in attempts:
+                opts['cookiefile'] = cookie_file
 
         queries = [
             f"ytsearch{max_results}:{query}",
