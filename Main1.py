@@ -1556,14 +1556,11 @@ def _resolve_ffmpeg_executable() -> str:
     if system_ffmpeg:
         return system_ffmpeg
 
-    try:
-        import static_ffmpeg
-        static_ffmpeg.add_paths()
-        bundled_ffmpeg = _shutil.which("ffmpeg")
-        if bundled_ffmpeg:
-            return bundled_ffmpeg
-    except Exception as e:
-        print(f"[Music] static-ffmpeg fallback unavailable: {e}")
+    # On Railway/Linux, prefer system ffmpeg from apt packages. The static build
+    # has shown instability with some remote media URLs.
+    if _platform.system() != "Windows":
+        print("[Music] System ffmpeg not found on PATH; falling back to 'ffmpeg'.")
+        return "ffmpeg"
 
     return "ffmpeg"
 
@@ -1575,8 +1572,8 @@ print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
-    'before_options': '-nostdin -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -q:a 5 -ac 2 -ar 48000',
+    'before_options': '-nostdin',
+    'options': '-vn',
 }
 
 class SongEntry:
@@ -1799,9 +1796,11 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(state.current.url, **FFMPEG_OPTS),
-            volume=state.volume,
+        source = discord.FFmpegOpusAudio(
+            state.current.url,
+            executable=FFMPEG_OPTS['executable'],
+            before_options=FFMPEG_OPTS['before_options'],
+            options=f"-vn -af volume={state.volume}",
         )
         def after_play(error):
             if error:
