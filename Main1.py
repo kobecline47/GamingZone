@@ -323,6 +323,8 @@ class Client(commands.Bot):
             print(f'Synced {len(synced_global)} global slash commands.')
             for g in self.guilds:
                 try:
+                    # Ensure global commands are available immediately in each guild.
+                    self.tree.copy_global_to(guild=g)
                     synced_guild = await self.tree.sync(guild=g)
                     print(f'Synced {len(synced_guild)} slash commands to guild {g.id}')
                 except Exception as e:
@@ -2289,6 +2291,143 @@ async def setupticketchannel(interaction: discord.Interaction, channel: discord.
     await channel.send(embed=embed, view=OpenTicketView())
     await interaction.response.send_message(f"Ticket panel posted in {channel.mention}.", ephemeral=True)
     await _log_admin_cmd(interaction, "setupticketchannel", f"Panel posted in {channel.mention}")
+
+# ── Ticket Admin Commands ─────────────────────────────────────────────────────
+@client.tree.command(name="ticketlist", description="List all currently open tickets (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def ticketlist(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    if not OPEN_TICKETS:
+        await interaction.response.send_message("No tickets are currently open.", ephemeral=True)
+        return
+    lines = []
+    for uid, cid in OPEN_TICKETS.items():
+        member = interaction.guild.get_member(uid)
+        ch = interaction.guild.get_channel(cid)
+        name = member.mention if member else f"`{uid}`"
+        chan = ch.mention if ch else f"`#{cid}` *(deleted?)*"
+        lines.append(f"Ticket {name} -> {chan}")
+    embed = discord.Embed(
+        title=f"Open Tickets ({len(OPEN_TICKETS)})",
+        description="\n".join(lines),
+        color=0x5865F2,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="closeticket", description="Force-close a ticket channel (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The ticket channel to close", reason="Reason for closing")
+async def closeticket(interaction: discord.Interaction, channel: discord.TextChannel, reason: str = "Closed by admin"):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
+    if log_ch:
+        msgs = [m async for m in channel.history(limit=200, oldest_first=True)]
+        transcript = "\n".join(
+            f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
+            for m in msgs if not m.author.bot or m.content
+        )
+        embed = discord.Embed(title=f"Ticket Force-Closed - #{channel.name}", color=0xE74C3C)
+        embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
+        embed.add_field(name="Closed by", value=interaction.user.mention)
+        embed.add_field(name="Reason", value=reason)
+        embed.timestamp = discord.utils.utcnow()
+        await log_ch.send(embed=embed)
+    for uid, cid in list(OPEN_TICKETS.items()):
+        if cid == channel.id:
+            del OPEN_TICKETS[uid]
+            break
+    channel_name = channel.name
+    await channel.delete(reason=f"Force closed by {interaction.user}: {reason}")
+    await interaction.followup.send(f"Ticket #{channel_name} closed.", ephemeral=True)
+    await _log_admin_cmd(interaction, "closeticket", f"#{channel_name} - {reason}")
+
+
+@client.tree.command(name="addticketstaff", description="Give a role access to all ticket channels (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(role="The staff role to grant ticket access")
+async def addticketstaff(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    cat = discord.utils.get(interaction.guild.categories, name=TICKET_CATEGORY_NAME)
+    if not cat:
+        await interaction.followup.send(f"No {TICKET_CATEGORY_NAME} category found. Run /setupticketchannel first.", ephemeral=True)
+        return
+    await cat.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
+    updated = 0
+    for ch in cat.text_channels:
+        await ch.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
+        updated += 1
+    await interaction.followup.send(
+        f"{role.mention} can now see all ticket channels ({updated} existing channels updated).", ephemeral=True
+    )
+    await _log_admin_cmd(interaction, "addticketstaff", f"{role.name} granted ticket access")
+
+
+@client.tree.command(name="nukechannel", description="Delete all messages in a channel (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="Channel to nuke (defaults to current channel)", amount="Max messages to delete (default: 100, max: 1000)")
+async def nukechannel(interaction: discord.Interaction, channel: discord.TextChannel = None, amount: int = 100):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    target = channel or interaction.channel
+    amount = max(1, min(amount, 1000))
+    await interaction.response.defer(ephemeral=True)
+    deleted = await target.purge(limit=amount)
+    await interaction.followup.send(f"Nuked {len(deleted)} messages from {target.mention}.", ephemeral=True)
+    await _log_admin_cmd(interaction, "nukechannel", f"{len(deleted)} messages deleted in {target.mention}")
+
+
+@client.tree.command(name="setupchat", description="Post a styled embed in a channel - rules, welcome, info (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    channel="Channel to post the embed in",
+    title="Embed title",
+    description="Embed body text (use \\n for new lines)",
+    color="Hex color e.g. 5865F2 (optional, defaults to blue)",
+    image_url="Optional image URL to attach to the embed",
+)
+async def setupchat(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str,
+    description: str,
+    color: str = "5865F2",
+    image_url: str = None,
+):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    try:
+        col = int(color.lstrip("#"), 16)
+    except ValueError:
+        col = 0x5865F2
+    embed = discord.Embed(
+        title=title,
+        description=description.replace("\\n", "\n"),
+        color=col,
+    )
+    embed.set_footer(text=f"Posted by {interaction.user.display_name}")
+    if image_url:
+        embed.set_image(url=image_url)
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"Embed posted in {channel.mention}.", ephemeral=True)
+    await _log_admin_cmd(interaction, "setupchat", f"Embed posted in {channel.mention}: \"{title}\"")
+
+
+@client.tree.command(name="movechannel", description="Move a channel to a different category (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="Channel to move", category="Exact name of the destination category")
+async def cmd_movechannel(interaction: discord.Interaction, channel: discord.TextChannel, category: str):
+    await movechannel(interaction, channel, category)
 
 # ── Reaction Role Commands ────────────────────────────────────────────────────
 @client.tree.command(name="reactionrole", description="Add a reaction role to a message (Admin only)", guild=GUILD_ID)
