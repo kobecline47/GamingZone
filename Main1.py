@@ -6,6 +6,11 @@ import random
 import asyncio
 import collections
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass
 import re
 import urllib.request
 import urllib.parse
@@ -30,6 +35,10 @@ GUILD_ID_2 = discord.Object(id=1495449662755442698)
 
 
 class Client(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._feature_cmds_registered = False
+
     async def on_member_join(self, member: discord.Member):
         # ── Invite tracking ───────────────────────────────────────────────
         try:
@@ -226,6 +235,7 @@ class Client(commands.Bot):
         member = guild.get_member(payload.user_id)
         if role and member and not member.bot:
             await member.add_roles(role, reason="Reaction role")
+            await log_role_change(guild, member, role, added=True, source=f"Reaction {emoji_str}")
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         if payload.message_id not in REACTION_ROLES:
@@ -241,6 +251,7 @@ class Client(commands.Bot):
         member = guild.get_member(payload.user_id)
         if role and member and not member.bot:
             await member.remove_roles(role, reason="Reaction role removed")
+            await log_role_change(guild, member, role, added=False, source=f"Reaction {emoji_str}")
 
     async def on_ready(self):
         print(f'Logged on as {self.user}!')
@@ -252,6 +263,7 @@ class Client(commands.Bot):
                 print(f'Failed to load Opus: {e}')
         try:
             # Register persistent views so buttons survive restarts
+            client.add_view(GamerVerifyView())
             client.add_view(GameRoleView())
             client.add_view(TicketView())
             client.add_view(OpenTicketView())
@@ -262,50 +274,201 @@ class Client(commands.Bot):
                     INVITE_CACHE[guild.id] = {inv.code: inv for inv in invites}
                 except Exception:
                     pass
-            # Start background tasks
-            giveaway_check.start()
-            streamer_check.start()
-            free_games_check.start()
-            empty_vc_cleanup.start()
-            # Register Pokemon battle commands
-            pokemon_game.setup_pokemon(self, GUILD_ID.id)
-            pokemon_game.setup_pokemon_economy(self, GUILD_ID.id)
-            # Register casino gambling commands
-            gambling.setup_gambling(self, GUILD_ID.id)
-            # Wipe all global commands so old duplicates disappear from Discord
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-            print('Global commands cleared.')
-            # Sync current commands to guild 1
-            synced = await self.tree.sync(guild=GUILD_ID)
-            print(f'Synced {len(synced)} slash commands to guild {GUILD_ID.id}')
-            # Copy all guild 1 commands to guild 2 and sync
-            for cmd in self.tree.get_commands(guild=GUILD_ID):
+            # Start background tasks once
+            if not giveaway_check.is_running():
+                giveaway_check.start()
+            if not streamer_check.is_running():
+                streamer_check.start()
+            if not free_games_check.is_running():
+                free_games_check.start()
+            if not empty_vc_cleanup.is_running():
+                empty_vc_cleanup.start()
+
+            # Register grouped feature commands once (global)
+            if not self._feature_cmds_registered:
+                pokemon_game.setup_pokemon(self)
+                pokemon_game.setup_pokemon_economy(self)
+                gambling.setup_gambling(self)
+                self._feature_cmds_registered = True
+
+            # Ensure private log channels exist in all guilds
+            for g in self.guilds:
                 try:
-                    self.tree.add_command(cmd, guild=GUILD_ID_2, override=True)
-                except Exception:
-                    pass
-            pokemon_game.setup_pokemon(self, GUILD_ID_2.id)
-            pokemon_game.setup_pokemon_economy(self, GUILD_ID_2.id)
-            gambling.setup_gambling(self, GUILD_ID_2.id)
-            synced2 = await self.tree.sync(guild=GUILD_ID_2)
-            print(f'Synced {len(synced2)} slash commands to guild {GUILD_ID_2.id}')
+                    await _ensure_log_channels(g)
+                    await _ensure_feature_channels(g)
+                    await _post_verify_embed(g)
+                except Exception as e:
+                    print(f"[Logs] Could not create channels in {g.name}: {e}")
+
+            # Global sync plus per-guild fast sync so new servers get commands immediately
+            synced_global = await self.tree.sync()
+            print(f'Synced {len(synced_global)} global slash commands.')
+            for g in self.guilds:
+                try:
+                    synced_guild = await self.tree.sync(guild=g)
+                    print(f'Synced {len(synced_guild)} slash commands to guild {g.id}')
+                except Exception as e:
+                    print(f"[Sync] Could not sync guild {g.id}: {e}")
             # Inject the running event loop into the dashboard now that the bot is connected
             dashboard._state["bot_loop"] = asyncio.get_event_loop()
         except Exception as e:
             print(f'Error syncing commands: {e}')
+
+    async def on_guild_join(self, guild: discord.Guild):
+        try:
+            await _ensure_log_channels(guild)
+            await _ensure_feature_channels(guild)
+            await _post_verify_embed(guild)
+            synced = await self.tree.sync(guild=guild)
+            print(f"[Guild Join] Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
+        except Exception as e:
+            print(f"[Guild Join] Setup/sync failed for {guild.name} ({guild.id}): {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 intents.guilds = True
 intents.members = True
+intents.presences = True
 intents.moderation = True
 
 client = Client(command_prefix="!", intents=intents)
 
 LOG_CHANNEL_ID = 1495573126304497735
+MOD_LOG_NAME  = "mod-logs"   # admin-only mod action log
+ROLE_LOG_NAME = "role-logs"  # admin-only role assignment log
+GAMBLING_CHANNEL_NAME = "casino-floor"   # dedicated casino text channel
+POKEMON_CHANNEL_NAME  = "pokemon-battle" # dedicated pokemon battle channel
+GAMER_ROLE_NAME       = "Gamer"          # role granted on verification — unlocks feature channels
+VERIFY_CHANNEL_NAME   = "✅-verify"       # visible to unverified; hidden once Gamer role is granted
+MUSIC_CATEGORY_NAME   = "♦┃𝙏𝙚𝙭𝙩 𝘾𝙝𝙖𝙣𝙣𝙚𝙡𝙨┃♦"  # category where music-channel is created
 WHITELIST: set[int] = set()  # stores whitelisted user IDs
+
+
+async def _ensure_log_channels(guild: discord.Guild) -> None:
+    """Create mod-logs and role-logs with admin-only visibility if they don't exist."""
+    admin_ow = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, embed_links=True, read_message_history=True
+        ),
+    }
+    for role in guild.roles:
+        if role.permissions.administrator:
+            admin_ow[role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=False, read_message_history=True
+            )
+    for ch_name, topic in [
+        (MOD_LOG_NAME,  "🔨 Private admin log — every mod command is recorded here."),
+        (ROLE_LOG_NAME, "🏷️ Private role log — all role picks from embeds are recorded here."),
+    ]:
+        if not discord.utils.get(guild.text_channels, name=ch_name):
+            await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic)
+            print(f"[Logs] Created #{ch_name} in {guild.name}")
+
+async def _ensure_feature_channels(guild: discord.Guild) -> None:
+    """Auto-create casino, pokemon-battle, and music-channel locked to the Gamer role."""
+    # Get or create the Gamer role
+    gamer_role = discord.utils.get(guild.roles, name=GAMER_ROLE_NAME)
+    if not gamer_role:
+        gamer_role = await guild.create_role(
+            name=GAMER_ROLE_NAME,
+            colour=discord.Colour.green(),
+            reason="Auto-created: grants access to feature channels after verification",
+        )
+        print(f"[Verify] Created @{GAMER_ROLE_NAME} role in {guild.name}")
+
+    # @everyone cannot see these channels; only Gamer role members can
+    restricted_ow = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        gamer_role: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, embed_links=True, read_message_history=True
+        ),
+    }
+    # Find the target category for the music channel (case-insensitive match)
+    music_category = discord.utils.find(
+        lambda c: c.name.lower() == MUSIC_CATEGORY_NAME.lower(), guild.categories
+    )
+
+    channels = [
+        (GAMBLING_CHANNEL_NAME, "🎰 Use all casino commands here! /slots /blackjack /poker /crash and more", None),
+        (POKEMON_CHANNEL_NAME,  "⚔️ Challenge others to Pokemon battles here! /pokemon battle", None),
+        (MUSIC_CHANNEL_NAME,    "🎵 Request music and use all music commands here! /play /skip /queue", music_category if music_category else None),
+    ]
+    for ch_name, topic, category in channels:
+        ch = discord.utils.get(guild.text_channels, name=ch_name)
+        if ch:
+            # Update existing channel perms (and move to correct category if set)
+            edit_kwargs = {"overwrites": restricted_ow}
+            if category and ch.category != category:
+                edit_kwargs["category"] = category
+            await ch.edit(**edit_kwargs)
+        else:
+            ch = await guild.create_text_channel(ch_name, overwrites=restricted_ow, topic=topic, category=category)
+            print(f"[Channels] Created #{ch_name} in {guild.name}" + (f" under '{category.name}'" if category else ""))
+
+    # Verify channel: visible to @everyone, hidden once they have the Gamer role
+    # Admins always keep visibility so they can manage it
+    verify_ow = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True, send_messages=False, read_message_history=True
+        ),
+        gamer_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, embed_links=True, read_message_history=True
+        ),
+    }
+    for role in guild.roles:
+        if role.permissions.administrator:
+            verify_ow[role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True
+            )
+    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    if verify_ch:
+        await verify_ch.edit(overwrites=verify_ow)
+    else:
+        verify_ch = await guild.create_text_channel(
+            VERIFY_CHANNEL_NAME,
+            overwrites=verify_ow,
+            topic="🟢 Click the button to verify and unlock the server!",
+        )
+        print(f"[Channels] Created #{VERIFY_CHANNEL_NAME} in {guild.name}")
+
+async def _post_verify_embed(guild: discord.Guild) -> None:
+    """Post the verification embed in #verify (visible to new members, hidden after they verify)."""
+    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    if not verify_ch:
+        return
+
+    # Don't repost if there's already a bot message with the verify embed
+    try:
+        async for msg in verify_ch.history(limit=20):
+            if msg.author == guild.me and msg.embeds and msg.embeds[0].title and "✅" in msg.embeds[0].title:
+                return
+    except Exception:
+        pass
+
+    embed = discord.Embed(
+        title="✅  Welcome — Verify to Get Access!",
+        description=(
+            f"Click the button below to receive the **@{GAMER_ROLE_NAME}** role.\n\n"
+            "Once verified you'll unlock:\n"
+            f"🎰 **#{GAMBLING_CHANNEL_NAME}** — Casino games\n"
+            f"⚔️ **#{POKEMON_CHANNEL_NAME}** — Pokemon battles\n"
+            f"🎵 **#{MUSIC_CHANNEL_NAME}** — Music commands\n\n"
+            "*This channel will disappear once you verify — out of sight, out of mind!*"
+        ),
+        color=0x2ECC71,
+    )
+    embed.set_footer(text="GamingZoneBot • Click once to verify")
+    try:
+        await verify_ch.send(embed=embed, view=GamerVerifyView())
+        print(f"[Verify] Posted verification embed in #{VERIFY_CHANNEL_NAME} in {guild.name}")
+    except Exception as e:
+        print(f"[Verify] Could not post embed in {guild.name}: {e}")
 
 # ── Auto-Moderation ───────────────────────────────────────────────────────────
 BANNED_WORDS: set[str] = {
@@ -386,7 +549,29 @@ STREAMER_CHANNEL_NAME = "streamer-alerts"
 
 # ── Free Games ────────────────────────────────────────────────────────────────
 FREE_GAMES_CHANNEL_NAME = "free-games"
+_FREE_GAMES_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "posted_free_games.json")
 POSTED_FREE_GAMES: set[int] = set()  # app IDs already announced
+
+def _load_posted_games() -> None:
+    """Load previously posted game IDs from disk so we never repost them."""
+    global POSTED_FREE_GAMES
+    if not os.path.exists(_FREE_GAMES_SAVE):
+        return
+    try:
+        with open(_FREE_GAMES_SAVE, "r", encoding="utf-8") as f:
+            POSTED_FREE_GAMES = set(json.load(f))
+    except Exception as e:
+        print(f"[FreeGames] Warning: could not load posted games list — {e}")
+
+def _save_posted_games() -> None:
+    """Persist posted game IDs to disk."""
+    try:
+        with open(_FREE_GAMES_SAVE, "w", encoding="utf-8") as f:
+            json.dump(list(POSTED_FREE_GAMES), f)
+    except Exception as e:
+        print(f"[FreeGames] Warning: could not save posted games list — {e}")
+
+_load_posted_games()
 
 # ── Personal Space (private temp voice channels) ──────────────────────────────
 # guild_id -> lobby voice channel ID that triggers creation
@@ -444,6 +629,43 @@ class TicketCloseButton(discord.ui.Button):
                 break
         await asyncio.sleep(5)
         await ch.delete(reason="Ticket closed")
+
+# ── Gamer Verification Button ───────────────────────────────────────────────────────────────
+class GamerVerifyButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Verify — Get Access",
+            style=discord.ButtonStyle.success,
+            custom_id="gamer_verify",
+            emoji="✅",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        member = interaction.guild.get_member(interaction.user.id)
+        gamer_role = discord.utils.get(interaction.guild.roles, name=GAMER_ROLE_NAME)
+        if not gamer_role:
+            await interaction.response.send_message(
+                "❌ The Gamer role doesn't exist yet — ask an admin to run `/setupchannels`.",
+                ephemeral=True,
+            )
+            return
+        if gamer_role in member.roles:
+            await interaction.response.send_message(
+                "✅ You're already verified and have full access!", ephemeral=True
+            )
+            return
+        await member.add_roles(gamer_role, reason="Self-verification via embed button")
+        await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
+        await interaction.response.send_message(
+            f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!",
+            ephemeral=True,
+        )
+
+class GamerVerifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(GamerVerifyButton())
+
 
 class TicketView(discord.ui.View):
     def __init__(self):
@@ -517,15 +739,12 @@ async def empty_vc_cleanup():
             if vc.id in protected_ids:
                 continue
             if len(vc.members) == 0:
-                # Only delete if it was a Personal Space channel OR was created by a non-admin
-                # (check: channel has non-default overwrites, meaning someone customised it)
-                is_personal_space = vc.id in PERSONAL_SPACE_CHANNELS
-                has_custom_overwrites = len(vc.overwrites) > 1  # more than just @everyone
-                if is_personal_space or has_custom_overwrites:
+                # Only delete channels that were explicitly created by the Personal Space system
+                if vc.id in PERSONAL_SPACE_CHANNELS:
                     try:
                         PERSONAL_SPACE_CHANNELS.pop(vc.id, None)
-                        await vc.delete(reason="Empty user-created voice channel — auto-cleaned")
-                        print(f"[VCCleanup] Deleted empty channel: #{vc.name} in {guild.name}")
+                        await vc.delete(reason="Empty Personal Space channel — auto-cleaned")
+                        print(f"[VCCleanup] Deleted empty Personal Space channel: #{vc.name} in {guild.name}")
                     except Exception as e:
                         print(f"[VCCleanup] Could not delete #{vc.name}: {e}")
 
@@ -846,6 +1065,7 @@ async def free_games_check():
     if new_games:
         for g in new_games:
             POSTED_FREE_GAMES.add(g["id"])
+        _save_posted_games()
         await _post_free_games(ch, new_games)
     # else: no new games — don't spam the channel
 
@@ -875,12 +1095,14 @@ class GameRoleButton(discord.ui.Button):
                 f"🚪 You left **{self.game}** — channels are now hidden.",
                 ephemeral=True
             )
+            await log_role_change(interaction.guild, member, role, added=False, source="Game Role Button")
         else:
             await member.add_roles(role, reason="Game channel toggle")
             await interaction.response.send_message(
                 f"✅ You joined **{self.game}** — channels are now visible!",
                 ephemeral=True
             )
+            await log_role_change(interaction.guild, member, role, added=True, source="Game Role Button")
 
 class GameRoleView(discord.ui.View):
     def __init__(self):
@@ -1080,17 +1302,54 @@ async def get_mod_log_channel(guild: discord.Guild):
     return channel
 
 async def log_action(interaction: discord.Interaction, action: str, target: str, reason: str = None):
+    # Send to legacy LOG_CHANNEL_ID if present
     channel = await get_mod_log_channel(interaction.guild)
-    if not channel:
-        return
-    description = f"**Action:** {action}\n**Target:** {target}\n**Moderator:** {interaction.user.mention}"
+    description = f"**Action:** {action}\n**Target:** {target}\n**Moderator:** {interaction.user.mention} (`{interaction.user.id}`)"
     if reason:
         description += f"\n**Reason:** {reason}"
-    embed = discord.Embed(title="Moderation Action", description=description, color=0xFF0000)
-    embed.set_footer(text=f"Channel: {interaction.channel.name}")
-    await channel.send(embed=embed)
+    embed = discord.Embed(title="🔨 Mod Action", description=description, color=0xFF4444)
+    embed.set_footer(text=f"Channel: #{interaction.channel.name}")
+    embed.timestamp = discord.utils.utcnow()
+    if channel:
+        await channel.send(embed=embed)
+    # Also send to the private mod-logs channel
+    mod_log = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_NAME)
+    if mod_log and mod_log != channel:
+        await mod_log.send(embed=embed)
+
+
+async def log_role_change(guild: discord.Guild, member: discord.Member,
+                          role: discord.Role, added: bool, source: str) -> None:
+    """Log a role add/remove to the private #role-logs channel."""
+    ch = discord.utils.get(guild.text_channels, name=ROLE_LOG_NAME)
+    if not ch:
+        return
+    color  = 0x2ECC71 if added else 0xE74C3C
+    action = "➕ Role Added" if added else "➖ Role Removed"
+    embed  = discord.Embed(title=f"🏷️ {action}", color=color)
+    embed.add_field(name="Member",  value=f"{member.mention} (`{member.id}`)",  inline=True)
+    embed.add_field(name="Role",    value=f"{role.mention} (`{role.name}`)",    inline=True)
+    embed.add_field(name="Source",  value=source,                                inline=True)
+    embed.timestamp = discord.utils.utcnow()
+    await ch.send(embed=embed)
+
+
+async def _log_admin_cmd(interaction: discord.Interaction, cmd: str, details: str = "") -> None:
+    """Log any admin-only command to the private #mod-logs channel."""
+    ch = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_NAME)
+    if not ch:
+        return
+    embed = discord.Embed(title=f"⚙️ Admin Command: `/{cmd}`", color=0x5865F2)
+    embed.add_field(name="Admin",   value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+    embed.add_field(name="Channel", value=f"<#{interaction.channel_id}>",                          inline=True)
+    if details:
+        embed.add_field(name="Details", value=details, inline=False)
+    embed.timestamp = discord.utils.utcnow()
+    await ch.send(embed=embed)
+
 
 @client.tree.command(name="ban", description="Ban a server member", guild=GUILD_ID)
+@app_commands.default_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
     if not interaction.user.guild_permissions.ban_members:
         await interaction.response.send_message("You don't have permission to ban members.", ephemeral=True)
@@ -1103,6 +1362,7 @@ async def ban(interaction: discord.Interaction, user: discord.Member, reason: st
     await log_action(interaction, "Ban", f"{user} ({user.id})", reason)
 
 @client.tree.command(name="unban", description="Unban a user by their ID", guild=GUILD_ID)
+@app_commands.default_permissions(ban_members=True)
 async def unban(interaction: discord.Interaction, user_id: str, reason: str = "No reason provided"):
     if not interaction.user.guild_permissions.ban_members:
         await interaction.response.send_message("You don't have permission to unban members.", ephemeral=True)
@@ -1122,6 +1382,7 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "N
     await log_action(interaction, "Unban", f"{ban_entry.user} ({uid})", reason)
 
 @client.tree.command(name="banlist", description="Show all currently banned users", guild=GUILD_ID)
+@app_commands.default_permissions(ban_members=True)
 async def banlist(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.ban_members:
         await interaction.response.send_message("You don't have permission to view the ban list.", ephemeral=True)
@@ -1149,6 +1410,7 @@ async def banlist(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 @client.tree.command(name="kick", description="Kick a server member", guild=GUILD_ID)
+@app_commands.default_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
     if not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message("You don't have permission to kick members.", ephemeral=True)
@@ -1161,6 +1423,7 @@ async def kick(interaction: discord.Interaction, user: discord.Member, reason: s
     await log_action(interaction, "Kick", f"{user} ({user.id})", reason)
 
 @client.tree.command(name="mute", description="Mute a member for a number of seconds", guild=GUILD_ID)
+@app_commands.default_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, user: discord.Member, duration: int = 60):
     if not interaction.user.guild_permissions.moderate_members:
         await interaction.response.send_message("You don't have permission to mute members.", ephemeral=True)
@@ -1173,6 +1436,7 @@ async def mute(interaction: discord.Interaction, user: discord.Member, duration:
     await log_action(interaction, "Mute", f"{user} ({user.id})", f"Duration: {duration} seconds")
 
 @client.tree.command(name="unmute", description="Unmute a member", guild=GUILD_ID)
+@app_commands.default_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, user: discord.Member):
     if not interaction.user.guild_permissions.moderate_members:
         await interaction.response.send_message("You don't have permission to unmute members.", ephemeral=True)
@@ -1182,6 +1446,7 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
     await log_action(interaction, "Unmute", f"{user} ({user.id})")
 
 @client.tree.command(name="timeout", description="Timeout a member for a set number of hours and minutes", guild=GUILD_ID)
+@app_commands.default_permissions(moderate_members=True)
 async def timeout_member(interaction: discord.Interaction, user: discord.Member, hours: int = 0, minutes: int = 0, reason: str = "No reason provided"):
     if not interaction.user.guild_permissions.moderate_members:
         await interaction.response.send_message("You don't have permission to timeout members.", ephemeral=True)
@@ -1198,6 +1463,7 @@ async def timeout_member(interaction: discord.Interaction, user: discord.Member,
     await log_action(interaction, "Timeout", f"{user} ({user.id})", f"{hours}h {minutes}m — {reason}")
 
 @client.tree.command(name="whitelist", description="Whitelist a member to protect them from mod actions", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def whitelist(interaction: discord.Interaction, user: discord.Member):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You don't have permission to whitelist members.", ephemeral=True)
@@ -1207,6 +1473,7 @@ async def whitelist(interaction: discord.Interaction, user: discord.Member):
     await log_action(interaction, "Whitelist", f"{user} ({user.id})")
 
 @client.tree.command(name="unwhitelist", description="Remove a member from the whitelist", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def unwhitelist(interaction: discord.Interaction, user: discord.Member):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You don't have permission to manage the whitelist.", ephemeral=True)
@@ -1216,12 +1483,14 @@ async def unwhitelist(interaction: discord.Interaction, user: discord.Member):
     await log_action(interaction, "Unwhitelist", f"{user} ({user.id})")
 
 @client.tree.command(name="clear", description="Clear messages from the channel", guild=GUILD_ID)
+@app_commands.default_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, amount: int = 10):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("You don't have permission to manage messages.", ephemeral=True)
         return
+    await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount) # pyright: ignore[reportAttributeAccessIssue]
-    await interaction.response.send_message(f'Cleared {len(deleted)} messages.', ephemeral=True)
+    await interaction.followup.send(f'Cleared {len(deleted)} messages.', ephemeral=True)
     await log_action(interaction, "Clear", f"Channel: {interaction.channel.name}", f"Deleted: {len(deleted)} messages")
 
 # ── Music System ─────────────────────────────────────────────────────────────
@@ -1259,6 +1528,7 @@ class GuildMusicState:
         self.current: SongEntry | None = None
         self.voice_client: discord.VoiceClient | None = None
         self.volume: float = 0.5
+        self.now_playing_msg: discord.Message | None = None
 
 music_states: dict[int, GuildMusicState] = {}
 
@@ -1317,6 +1587,7 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
     play_next(guild_id, loop)
+    await _post_music_panel(guild_id)
 
 async def search_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
     if not current or len(current) < 2:
@@ -1334,11 +1605,126 @@ async def search_autocomplete(interaction: discord.Interaction, current: str) ->
     except Exception:
         return []
 
-MUSIC_CHANNEL_NAME = "music-channel"
+MUSIC_CHANNEL_NAME = "🎵┃music-commands"
+
+
+class MusicControlView(discord.ui.View):
+    """Persistent music control panel posted in #music-channel."""
+
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(emoji="⏸", label="Pause/Resume", style=discord.ButtonStyle.primary, row=0)
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if not vc:
+            await interaction.response.send_message("Not connected to voice.", ephemeral=True)
+            return
+        if vc.is_playing():
+            vc.pause()
+            await interaction.response.send_message("⏸ Paused.", ephemeral=True)
+        elif vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("▶️ Resumed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏭", label="Skip", style=discord.ButtonStyle.secondary, row=0)
+    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if not vc or (not vc.is_playing() and not vc.is_paused()):
+            await interaction.response.send_message("Nothing to skip.", ephemeral=True)
+            return
+        vc.stop()
+        await interaction.response.send_message("⏭ Skipped.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏹", label="Stop", style=discord.ButtonStyle.danger, row=0)
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        vc = interaction.guild.voice_client
+        if not vc:
+            await interaction.response.send_message("Not connected to voice.", ephemeral=True)
+            return
+        state.queue.clear()
+        state.current = None
+        vc.stop()
+        await interaction.response.send_message("⏹ Stopped and queue cleared.", ephemeral=True)
+
+    @discord.ui.button(emoji="📋", label="Queue", style=discord.ButtonStyle.secondary, row=1)
+    async def queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        if not state.current and not state.queue:
+            await interaction.response.send_message("The queue is empty.", ephemeral=True)
+            return
+        desc = ""
+        if state.current:
+            desc += f"**Now Playing:** [{state.current.title}]({state.current.webpage_url}) `{state.current.format_duration()}`\n\n"
+        for i, entry in enumerate(state.queue, 1):
+            desc += f"`{i}.` [{entry.title}]({entry.webpage_url}) `{entry.format_duration()}`\n"
+            if i >= 10:
+                remaining = len(state.queue) - 10
+                if remaining:
+                    desc += f"*...and {remaining} more*"
+                break
+        embed = discord.Embed(title="📋 Music Queue", description=desc, color=0x9B59B6)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(emoji="🔉", label="Vol -10%", style=discord.ButtonStyle.secondary, row=1)
+    async def vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        vc = interaction.guild.voice_client
+        state.volume = max(0.0, state.volume - 0.1)
+        if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
+            vc.source.volume = state.volume
+        await interaction.response.send_message(f"🔉 Volume: {int(state.volume * 100)}%", ephemeral=True)
+
+    @discord.ui.button(emoji="🔊", label="Vol +10%", style=discord.ButtonStyle.secondary, row=1)
+    async def vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        vc = interaction.guild.voice_client
+        state.volume = min(1.0, state.volume + 0.1)
+        if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
+            vc.source.volume = state.volume
+        await interaction.response.send_message(f"🔊 Volume: {int(state.volume * 100)}%", ephemeral=True)
+
+
+async def _post_music_panel(guild_id: int):
+    """Delete the old Now Playing panel and post a fresh one with control buttons."""
+    state = get_music_state(guild_id)
+    guild = client.get_guild(guild_id)
+    if not guild:
+        return
+    music_ch = discord.utils.get(guild.text_channels, name=MUSIC_CHANNEL_NAME)
+    if not music_ch:
+        return
+    # Delete previous panel
+    if state.now_playing_msg:
+        try:
+            await state.now_playing_msg.delete()
+        except Exception:
+            pass
+        state.now_playing_msg = None
+    if not state.current:
+        return
+    embed = discord.Embed(
+        title="🎵 Now Playing",
+        description=f"[{state.current.title}]({state.current.webpage_url})",
+        color=0x1DB954,
+    )
+    embed.add_field(name="Duration", value=state.current.format_duration())
+    embed.add_field(name="Requested by", value=state.current.requester.mention)
+    embed.add_field(name="Volume", value=f"{int(state.volume * 100)}%")
+    q = len(state.queue)
+    if q:
+        embed.set_footer(text=f"{q} song{'s' if q != 1 else ''} in queue")
+    state.now_playing_msg = await music_ch.send(embed=embed, view=MusicControlView(guild_id))
+
 
 def _is_music_channel(interaction: discord.Interaction) -> bool:
     """Returns True if the interaction is in the designated music channel."""
-    return interaction.channel.name == MUSIC_CHANNEL_NAME
+    ch = discord.utils.get(interaction.guild.text_channels, name=MUSIC_CHANNEL_NAME)
+    return interaction.channel.id == (ch.id if ch else -1)
 
 async def _require_music_channel(interaction: discord.Interaction) -> bool:
     """Sends an error and returns False if not in music-channel."""
@@ -1388,10 +1774,8 @@ async def play(interaction: discord.Interaction, query: str):
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
             play_next(interaction.guild.id, asyncio.get_running_loop())
-            embed = discord.Embed(title="Now Playing", description=f"[{entry.title}]({entry.webpage_url})", color=0x1DB954)
-            embed.add_field(name="Duration", value=entry.format_duration())
-            embed.add_field(name="Requested by", value=entry.requester.mention)
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(f"▶️ Starting **{entry.title}** — see the player below!", ephemeral=True)
+            await _post_music_panel(interaction.guild.id)
         else:
             embed = discord.Embed(title="Added to Queue", description=f"[{entry.title}]({entry.webpage_url})", color=0x3498DB)
             embed.add_field(name="Position", value=len(state.queue))
@@ -1513,12 +1897,14 @@ async def volume(interaction: discord.Interaction, level: int):
     await interaction.response.send_message(f"Volume set to {level}%.")
 
 @client.tree.command(name="announce", description="Send an announcement to a specific channel", guild=GUILD_ID)
+@app_commands.default_permissions(manage_messages=True)
 async def announce(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("You don't have permission to make announcements.", ephemeral=True)
         return
     await channel.send(message)
     await interaction.response.send_message(f"Announcement sent to {channel.mention}.", ephemeral=True)
+    await _log_admin_cmd(interaction, "announce", f"Channel: {channel.mention}")
 
 # ── Gaming Community Commands ─────────────────────────────────────────────────
 
@@ -1565,6 +1951,7 @@ async def gamertags_view(interaction: discord.Interaction, user: discord.Member 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @client.tree.command(name="personalspace", description="Set up the Personal Space system — creates a lobby VC that spawns private rooms (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(category="Category to create the lobby in (optional — uses default if omitted)")
 async def personalspace(interaction: discord.Interaction, category: str = ""):
     if not interaction.user.guild_permissions.administrator:
@@ -1628,6 +2015,7 @@ async def personalspace(interaction: discord.Interaction, category: str = ""):
         await interaction.followup.send(f"❌ Failed to create lobby: {e}", ephemeral=True)
 
 @client.tree.command(name="setupgames", description="Create game roles, channels, and the game selector (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def setupgames(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You need Administrator permission to set up game channels.", ephemeral=True)
@@ -1703,6 +2091,9 @@ async def setupgames(interaction: discord.Interaction):
     if created_channels:
         lines.append(f"**Channels created:** {', '.join(created_channels)}")
     await interaction.followup.send("\n".join(lines))
+    await _log_admin_cmd(interaction, "setupgames",
+                         f"Roles: {', '.join(created_roles) or 'none new'} | "
+                         f"Channels: {', '.join(created_channels) or 'none new'}")
 
 # ── Level / XP Commands ───────────────────────────────────────────────────────
 @client.tree.command(name="rank", description="Check your text level and XP", guild=GUILD_ID)
@@ -1756,6 +2147,7 @@ async def invites(interaction: discord.Interaction, user: discord.Member = None)
 
 # ── Ticket Commands ───────────────────────────────────────────────────────────
 @client.tree.command(name="setupticketchannel", description="Post the ticket panel in a channel (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def setupticketchannel(interaction: discord.Interaction, channel: discord.TextChannel):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
@@ -1768,9 +2160,11 @@ async def setupticketchannel(interaction: discord.Interaction, channel: discord.
     embed.set_footer(text="One ticket per member at a time.")
     await channel.send(embed=embed, view=OpenTicketView())
     await interaction.response.send_message(f"Ticket panel posted in {channel.mention}.", ephemeral=True)
+    await _log_admin_cmd(interaction, "setupticketchannel", f"Panel posted in {channel.mention}")
 
 # ── Reaction Role Commands ────────────────────────────────────────────────────
 @client.tree.command(name="reactionrole", description="Add a reaction role to a message (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def reactionrole(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
@@ -1786,9 +2180,11 @@ async def reactionrole(interaction: discord.Interaction, message_id: str, emoji:
     await interaction.response.send_message(
         f"✅ Reaction role set: {emoji} → {role.mention} on message `{mid}`.", ephemeral=True
     )
+    await _log_admin_cmd(interaction, "reactionrole", f"{emoji} → {role.mention} on message `{mid}`")
 
 # ── Giveaway Commands ─────────────────────────────────────────────────────────
 @client.tree.command(name="giveaway", description="Start a giveaway (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def giveaway(interaction: discord.Interaction, prize: str, duration_minutes: int, winners: int = 1):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
@@ -1809,6 +2205,7 @@ async def giveaway(interaction: discord.Interaction, prize: str, duration_minute
     await interaction.response.send_message("Giveaway started!", ephemeral=True)
     msg = await interaction.channel.send(embed=embed)
     await msg.add_reaction("🎉")
+    await _log_admin_cmd(interaction, "giveaway", f"Prize: **{prize}** | Winners: {winners} | Duration: {duration_minutes}m")
     GIVEAWAYS[msg.id] = {
         "channel_id": interaction.channel.id,
         "end_time":   end_time,
@@ -1819,6 +2216,7 @@ async def giveaway(interaction: discord.Interaction, prize: str, duration_minute
     }
 
 @client.tree.command(name="endgiveaway", description="End a giveaway early (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def endgiveaway(interaction: discord.Interaction, message_id: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
@@ -1833,9 +2231,11 @@ async def endgiveaway(interaction: discord.Interaction, message_id: str):
         return
     GIVEAWAYS[mid]["end_time"] = 0  # trigger on next loop
     await interaction.response.send_message("Giveaway will end on the next check cycle (~30 seconds).", ephemeral=True)
+    await _log_admin_cmd(interaction, "endgiveaway", f"Message ID: `{mid}`")
 
 # ── Streamer Alert Commands ───────────────────────────────────────────────────
 @client.tree.command(name="addstreamer", description="Add a streamer to follow (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 @discord.app_commands.choices(platform=[
     discord.app_commands.Choice(name="Twitch",  value="twitch"),
     discord.app_commands.Choice(name="YouTube", value="youtube"),
@@ -1854,8 +2254,10 @@ async def addstreamer(interaction: discord.Interaction, username: str, platform:
         f"✅ Now following **{username}** on **{platform.title()}**. Alerts go to #{STREAMER_CHANNEL_NAME}.",
         ephemeral=True,
     )
+    await _log_admin_cmd(interaction, "addstreamer", f"{username} ({platform.title()})")
 
 @client.tree.command(name="removestreamer", description="Stop following a streamer (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def removestreamer(interaction: discord.Interaction, username: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
@@ -1864,6 +2266,7 @@ async def removestreamer(interaction: discord.Interaction, username: str):
     STREAMERS[:] = [s for s in STREAMERS if s["name"].lower() != username.lower()]
     if len(STREAMERS) < before:
         await interaction.response.send_message(f"✅ Removed **{username}** from streamer alerts.", ephemeral=True)
+        await _log_admin_cmd(interaction, "removestreamer", f"Removed: {username}")
     else:
         await interaction.response.send_message(f"No streamer named **{username}** found.", ephemeral=True)
 
@@ -2015,6 +2418,7 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @client.tree.command(name="setupfreegames", description="Create #free-games and post current Steam deals now (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def setupfreegames(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
@@ -2049,12 +2453,194 @@ async def setupfreegames(interaction: discord.Interaction):
 
     for game in games:
         POSTED_FREE_GAMES.add(game["id"])
+    _save_posted_games()
     await _post_free_games(ch, games)
 
     await interaction.followup.send(
         f"{'✅ Posted **' + str(len(games)) + '** free game(s) with images and claim buttons.' if games else '⚠️ No free games found right now.'} The channel auto-updates every 4 hours.",
         ephemeral=True,
     )
+    await _log_admin_cmd(interaction, "setupfreegames", f"Channel: {ch.mention} | Games posted: {len(games)}")
+
+
+@client.tree.command(name="setupchannels", description="Create the casino, Pokémon battle, and music channels (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def setupchannels(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    await _ensure_feature_channels(guild)
+    await _post_verify_embed(guild)
+    all_chs = [
+        discord.utils.get(guild.text_channels, name=n)
+        for n in (GAMBLING_CHANNEL_NAME, POKEMON_CHANNEL_NAME, MUSIC_CHANNEL_NAME)
+    ]
+    mentions = ", ".join(ch.mention for ch in all_chs if ch)
+    await interaction.followup.send(
+        f"✅ Channels set up with **@{GAMER_ROLE_NAME}**-only access: {mentions}\n"
+        f"**#{VERIFY_CHANNEL_NAME}** created — visible to new members, hidden after they verify.",
+        ephemeral=True,
+    )
+    await _log_admin_cmd(interaction, "setupchannels", f"Channels: {mentions}")
+
+
+@client.tree.command(name="setupverify", description="Create (or reset) the #✅-verify channel with the verification embed (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def setupverify(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    # Ensure the Gamer role exists and verify channel has correct perms
+    gamer_role = discord.utils.get(guild.roles, name=GAMER_ROLE_NAME)
+    if not gamer_role:
+        gamer_role = await guild.create_role(
+            name=GAMER_ROLE_NAME,
+            colour=discord.Colour.green(),
+            reason="Auto-created by /setupverify",
+        )
+
+    verify_ow = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True, send_messages=False, read_message_history=True
+        ),
+        gamer_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, embed_links=True, read_message_history=True
+        ),
+    }
+    for role in guild.roles:
+        if role.permissions.administrator:
+            verify_ow[role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True
+            )
+
+    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    if verify_ch:
+        await verify_ch.edit(overwrites=verify_ow, topic="🟢 Click the button to verify and unlock the server!")
+        created = False
+    else:
+        verify_ch = await guild.create_text_channel(
+            VERIFY_CHANNEL_NAME,
+            overwrites=verify_ow,
+            topic="🟢 Click the button to verify and unlock the server!",
+        )
+        created = True
+
+    # Post the verification embed (clears old bot embeds first so it's always fresh)
+    try:
+        async for msg in verify_ch.history(limit=50):
+            if msg.author == guild.me and msg.embeds:
+                await msg.delete()
+    except Exception:
+        pass
+
+    embed = discord.Embed(
+        title="✅  Welcome — Verify to Get Access!",
+        description=(
+            f"Click the button below to receive the **@{GAMER_ROLE_NAME}** role.\n\n"
+            "Once verified you'll unlock:\n"
+            f"🎰 **#{GAMBLING_CHANNEL_NAME}** — Casino games\n"
+            f"⚔️ **#{POKEMON_CHANNEL_NAME}** — Pokemon battles\n"
+            f"🎵 **#{MUSIC_CHANNEL_NAME}** — Music commands\n\n"
+            "*This channel will disappear once you verify — out of sight, out of mind!*"
+        ),
+        color=0x2ECC71,
+    )
+    embed.set_footer(text="GamingZoneBot • Click once to verify")
+    await verify_ch.send(embed=embed, view=GamerVerifyView())
+
+    action = "Created" if created else "Reset"
+    await interaction.followup.send(
+        f"✅ {action} {verify_ch.mention} — permissions updated and verification embed posted.",
+        ephemeral=True,
+    )
+    await _log_admin_cmd(interaction, "setupverify", f"{action} #{VERIFY_CHANNEL_NAME}")
+
+
+@client.tree.command(name="createchannel", description="Create a new text channel (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    name="Name of the new channel (no spaces — use dashes)",
+    category="Optional: name of an existing category to place it in",
+    private="If True, only admins can see it; if False, visible to everyone",
+)
+async def createchannel(
+    interaction: discord.Interaction,
+    name: str,
+    private: bool = False,
+    category: str = "",
+):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    # Sanitise name
+    channel_name = name.lower().replace(" ", "-")
+
+    # Resolve category if provided
+    cat_obj = None
+    if category:
+        cat_obj = discord.utils.get(guild.categories, name=category)
+        if cat_obj is None:
+            await interaction.followup.send(f"❌ No category named **{category}** found.", ephemeral=True)
+            return
+
+    # Build permission overwrites
+    if private:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        for role in guild.roles:
+            if role.permissions.administrator:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    else:
+        game_overwrites = {
+            everyone: discord.PermissionOverwrite(view_channel=False),
+            role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, connect=True, speak=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        # Admins always see game channels
+        for r in guild.roles:
+            if r.permissions.administrator:
+                game_overwrites[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, connect=True, speak=True)
+
+        # Create or update text channel
+        safe_name = game.lower().replace(" ", "-")
+        text_ch = discord.utils.get(category.text_channels, name=safe_name)
+        if not text_ch:
+            await guild.create_text_channel(safe_name, category=category, overwrites=game_overwrites, reason="Game channel setup")
+            created_channels.append(f"#{safe_name}")
+        else:
+            await text_ch.edit(overwrites=game_overwrites)
+
+        # Create or update voice channel
+        voice_ch = discord.utils.get(category.voice_channels, name=game)
+        if not voice_ch:
+            await guild.create_voice_channel(game, category=category, overwrites=game_overwrites, reason="Game channel setup")
+            created_channels.append(f"🔊 {game}")
+        else:
+            await voice_ch.edit(overwrites=game_overwrites)
+async def movechannel(interaction: discord.Interaction, channel: discord.TextChannel, category: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    cat_obj = discord.utils.find(lambda c: c.name.lower() == category.lower(), guild.categories)
+    if cat_obj is None:
+        await interaction.followup.send(f"❌ No category named **{category}** found. Check the exact name and try again.", ephemeral=True)
+        return
+    await channel.edit(category=cat_obj)
+    await interaction.followup.send(f"✅ Moved {channel.mention} to category **{cat_obj.name}**.", ephemeral=True)
+    await _log_admin_cmd(interaction, "movechannel", f"{channel.mention} → {cat_obj.name}")
 
 
 # Start web dashboard before bot connects so Railway's health check passes immediately

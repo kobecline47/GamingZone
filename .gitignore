@@ -25,3 +25,57 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Windows home directory folders - not part of this project
+AppData/
+Contacts/
+Desktop/
+Documents/
+Downloads/
+Favorites/
+iCloudDrive/
+iCloudPhotos/
+Links/
+Music/
+OneDrive/
+Pictures/
+Saved Games/
+Searches/
+Videos/
+ansel/
+templates/
+
+# Windows home directory files
+NTUSER.DAT
+NTUSER.DAT*
+ntuser.dat*
+ntuser.ini
+*.TM.blf
+*.TMContainer*
+*.regtrans-ms
+.gitconfig
+.railway/
+.copilot/
+
+# Backup files
+*.bak
+*.bak-multiserver
+
+# Misc data/config files
+bump_reminder_settings.json
+casino_data.json
+currency.json
+dashboard_admins.json
+dashboard_exec_history.json
+dashboard_exec_settings.json
+dashboard_presence_seen.json
+pokemon_data.json
+posted_free_games.json
+promotion_stats.json
+ticket_settings.json
+job_started.txt
+output.txt
+startup_capture.txt
+startup_output.txt
+sync_capture.txt
+start_bot_timestamped.ps1
