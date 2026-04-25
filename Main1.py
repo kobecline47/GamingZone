@@ -1731,12 +1731,15 @@ def _get_ytdlp_auth_opts() -> dict:
     """Build yt-dlp auth options from environment variables.
 
     Supported env vars:
-    - YTDLP_COOKIES_TXT: absolute path to Netscape-format cookies.txt
+    - YTDLP_COOKIES_FILE or YTDLP_COOKIES_TXT: absolute path to Netscape-format cookies.txt
     - YTDLP_COOKIES_B64: base64-encoded cookies.txt content
     """
     opts: dict = {}
 
-    cookies_path = os.getenv('YTDLP_COOKIES_TXT', '').strip()
+    cookies_path = (
+        os.getenv('YTDLP_COOKIES_FILE', '').strip()
+        or os.getenv('YTDLP_COOKIES_TXT', '').strip()
+    )
     cookies_b64 = os.getenv('YTDLP_COOKIES_B64', '').strip()
 
     if cookies_path and os.path.exists(cookies_path):
