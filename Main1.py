@@ -18,6 +18,7 @@ import json
 import traceback
 import time
 import ctypes.util
+import tempfile
 import nacl.secret  # required for discord voice (PyNaCl)
 import davey        # required for discord voice (DAVE E2EE protocol)
 import dashboard
@@ -1577,12 +1578,13 @@ FFMPEG_OPTS = {
 }
 
 class SongEntry:
-    def __init__(self, title: str, url: str, webpage_url: str, duration: int, requester: discord.Member):
+    def __init__(self, title: str, url: str, webpage_url: str, duration: int, requester: discord.Member, local_path: str | None = None):
         self.title = title
         self.url = url
         self.webpage_url = webpage_url
         self.duration = duration
         self.requester = requester
+        self.local_path = local_path
 
     def format_duration(self) -> str:
         m, s = divmod(self.duration, 60)
@@ -1608,19 +1610,32 @@ def get_music_state(guild_id: int) -> GuildMusicState:
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     results = Search(query)
     entries = []
+    temp_dir = os.path.join(tempfile.gettempdir(), "gzbot_audio")
+    os.makedirs(temp_dir, exist_ok=True)
     for yt in results.videos[:max_results]:
         try:
             stream = yt.streams.filter(only_audio=True).order_by('abr').last()
             if stream:
+                local_path = stream.download(output_path=temp_dir, skip_existing=False)
                 entries.append({
                     'title': yt.title,
                     'url': stream.url,
                     'webpage_url': yt.watch_url,
                     'duration': yt.length or 0,
+                    'local_path': local_path,
                 })
         except Exception:
             continue
     return entries
+
+def _cleanup_song_file(song: SongEntry | None) -> None:
+    if not song or not song.local_path:
+        return
+    try:
+        if os.path.exists(song.local_path):
+            os.remove(song.local_path)
+    except Exception as e:
+        print(f"[Music] Could not remove temp audio file: {e}")
 
 def _yt_suggestions(query: str) -> list[str]:
     """Fetch YouTube search autocomplete suggestions via the public Google suggest API."""
@@ -1641,21 +1656,22 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(
-                state.current.url,
-                executable=FFMPEG_OPTS['executable'],
-                before_options=FFMPEG_OPTS['before_options'],
-                options=FFMPEG_OPTS['options'],
-            ),
-            volume=state.volume,
+        input_source = state.current.local_path or state.current.url
+        source = discord.FFmpegOpusAudio(
+            input_source,
+            executable=FFMPEG_EXE,
+            before_options=FFMPEG_OPTS['before_options'],
+            options=f"-vn -af volume={state.volume}",
         )
         def after_play(error):
             if error:
                 print(f'[Music] Player error: {error}')
+            finished_song = state.current
+            _cleanup_song_file(finished_song)
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
         state.voice_client.play(source, after=after_play)
     else:
+        _cleanup_song_file(state.current)
         state.current = None
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
@@ -1883,7 +1899,8 @@ async def play(interaction: discord.Interaction, query: str):
             url=r['url'],
             webpage_url=r.get('webpage_url', ''),
             duration=r.get('duration', 0),
-            requester=interaction.user
+            requester=interaction.user,
+            local_path=r.get('local_path'),
         )
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
