@@ -1579,12 +1579,13 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
+    """Try pytubefix first; fall back to yt-dlp if YouTube blocks the bot."""
     try:
         results = Search(query)
         print(f'[Search] Found {len(results.videos)} videos for \"{query}\"')
     except Exception as e:
-        print(f'[Search Error] Failed to search YouTube: {e}')
-        return []
+        print(f'[Search Error] pytubefix failed: {e}. Trying yt-dlp...')
+        return _ytdlp_search(query, max_results)
     
     entries = []
     for yt in results.videos[:max_results]:
@@ -1601,9 +1602,44 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
             else:
                 print(f'[Search] No audio stream for: {yt.title}')
         except Exception as e:
-            print(f'[Search] Error processing video: {e}')
+            print(f'[Search] Error with pytubefix, trying yt-dlp: {e}')
+            if 'bot' in str(e).lower():
+                return _ytdlp_search(query, max_results)
             continue
-    return entries
+    
+    return entries if entries else _ytdlp_search(query, max_results)
+
+def _ytdlp_search(query: str, max_results: int) -> list[dict]:
+    """Fallback: use yt-dlp which handles YouTube restrictions better."""
+    try:
+        import yt_dlp
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'default_search': 'ytsearch',
+            'extract_flat': 'in_playlist',
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            entries = []
+            for entry in info.get('entries', [])[:max_results]:
+                try:
+                    vid_id = entry['id']
+                    entries.append({
+                        'title': entry['title'],
+                        'url': f'https://www.youtube.com/watch?v={vid_id}',
+                        'webpage_url': f'https://www.youtube.com/watch?v={vid_id}',
+                        'duration': entry.get('duration', 0),
+                    })
+                    print(f'[yt-dlp] Added: {entry["title"]}')
+                except Exception as e:
+                    print(f'[yt-dlp] Error processing entry: {e}')
+                    continue
+            print(f'[yt-dlp] Found {len(entries)} videos for \"{query}\"')
+            return entries
+    except Exception as e:
+        print(f'[yt-dlp Error] Failed: {e}')
+        return []
 
 def _yt_suggestions(query: str) -> list[str]:
     """Fetch YouTube search autocomplete suggestions via the public Google suggest API."""

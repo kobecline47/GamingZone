@@ -25,10 +25,12 @@ pycparser==3.0
 pycryptodomex==3.23.0
 pyngrok==7.2.3
 PyNaCl==1.6.2
-pytubefix==10.3.8
+pytubefix
 requests==2.33.1
 static-ffmpeg==2.5
 urllib3==2.6.3
+yt-dlp
+yt-dlp
 websockets==16.0
 Werkzeug==3.1.8
 yarl==1.23.0
