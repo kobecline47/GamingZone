@@ -1612,19 +1612,15 @@ def get_music_state(guild_id: int) -> GuildMusicState:
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     results = Search(query)
     entries = []
-    temp_dir = os.path.join(tempfile.gettempdir(), "gzbot_audio")
-    os.makedirs(temp_dir, exist_ok=True)
     for yt in results.videos[:max_results]:
         try:
             stream = yt.streams.filter(only_audio=True).order_by('abr').last()
             if stream:
-                local_path = stream.download(output_path=temp_dir, skip_existing=False)
                 entries.append({
                     'title': yt.title,
                     'url': stream.url,
                     'webpage_url': yt.watch_url,
                     'duration': yt.length or 0,
-                    'local_path': local_path,
                 })
         except Exception:
             continue
@@ -1658,22 +1654,16 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        input_source = state.current.local_path or state.current.url
-        source = discord.FFmpegOpusAudio(
-            input_source,
-            executable=FFMPEG_EXE,
-            before_options=FFMPEG_OPTS['before_options'],
-            options=f"-vn -af volume={state.volume}",
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(state.current.url, **FFMPEG_OPTS),
+            volume=state.volume,
         )
         def after_play(error):
             if error:
                 print(f'[Music] Player error: {error}')
-            finished_song = state.current
-            _cleanup_song_file(finished_song)
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
         state.voice_client.play(source, after=after_play)
     else:
-        _cleanup_song_file(state.current)
         state.current = None
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
@@ -1902,7 +1892,6 @@ async def play(interaction: discord.Interaction, query: str):
             webpage_url=r.get('webpage_url', ''),
             duration=r.get('duration', 0),
             requester=interaction.user,
-            local_path=r.get('local_path'),
         )
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
