@@ -1617,21 +1617,33 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
             'quiet': True,
             'no_warnings': True,
             'default_search': 'ytsearch',
-            'extract_flat': 'in_playlist',
+            'format': 'bestaudio/best',
+            'noplaylist': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
+            info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
             entries = []
             for entry in info.get('entries', [])[:max_results]:
                 try:
-                    vid_id = entry['id']
+                    if not entry:
+                        continue
+                    stream_url = entry.get('url')
+                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
+                    # If search returned metadata only, resolve the actual audio stream URL.
+                    if not stream_url or 'youtube.com/watch' in str(stream_url):
+                        resolved = ydl.extract_info(webpage_url, download=False)
+                        stream_url = resolved.get('url')
+
+                    if not stream_url:
+                        continue
+
                     entries.append({
-                        'title': entry['title'],
-                        'url': f'https://www.youtube.com/watch?v={vid_id}',
-                        'webpage_url': f'https://www.youtube.com/watch?v={vid_id}',
+                        'title': entry.get('title', 'Unknown title'),
+                        'url': stream_url,
+                        'webpage_url': webpage_url,
                         'duration': entry.get('duration', 0),
                     })
-                    print(f'[yt-dlp] Added: {entry["title"]}')
+                    print(f'[yt-dlp] Added: {entry.get("title", "Unknown title")}')
                 except Exception as e:
                     print(f'[yt-dlp] Error processing entry: {e}')
                     continue
