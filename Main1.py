@@ -1648,10 +1648,71 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                     print(f'[yt-dlp] Error processing entry: {e}')
                     continue
             print(f'[yt-dlp] Found {len(entries)} videos for \"{query}\"')
-            return entries
+            return entries if entries else _invidious_search(query, max_results)
     except Exception as e:
         print(f'[yt-dlp Error] Failed: {e}')
-        return []
+        return _invidious_search(query, max_results)
+
+def _invidious_search(query: str, max_results: int) -> list[dict]:
+    """Last-resort fallback: search/play via public Invidious instances."""
+    instances = [
+        'https://invidious.nerdvpn.de',
+        'https://invidious.jing.rocks',
+        'https://inv.nadeko.net',
+        'https://yewtu.be',
+    ]
+    for base in instances:
+        try:
+            search_url = (
+                f"{base}/api/v1/search?q={urllib.parse.quote(query)}"
+                f"&type=video&sort_by=relevance"
+            )
+            req = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode(errors='ignore'))
+
+            entries: list[dict] = []
+            for item in data:
+                if item.get('type') != 'video':
+                    continue
+                vid = item.get('videoId')
+                if not vid:
+                    continue
+
+                try:
+                    details_url = f"{base}/api/v1/videos/{vid}"
+                    req2 = urllib.request.Request(details_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req2, timeout=6) as resp2:
+                        details = json.loads(resp2.read().decode(errors='ignore'))
+
+                    audio_formats = [
+                        f for f in details.get('adaptiveFormats', [])
+                        if 'audio' in str(f.get('type', '')).lower() and f.get('url')
+                    ]
+                    if not audio_formats:
+                        continue
+                    best_audio = max(audio_formats, key=lambda f: int(f.get('bitrate', 0) or 0))
+
+                    entries.append({
+                        'title': item.get('title', 'Unknown title'),
+                        'url': best_audio['url'],
+                        'webpage_url': f"https://www.youtube.com/watch?v={vid}",
+                        'duration': int(item.get('lengthSeconds') or 0),
+                    })
+                    if len(entries) >= max_results:
+                        break
+                except Exception as e:
+                    print(f'[Invidious] Could not resolve audio for {vid}: {e}')
+                    continue
+
+            if entries:
+                print(f'[Invidious] Found {len(entries)} videos for \"{query}\" via {base}')
+                return entries
+        except Exception as e:
+            print(f'[Invidious] Instance failed {base}: {e}')
+            continue
+    print(f'[Invidious] No playable results for \"{query}\"')
+    return []
 
 def _yt_suggestions(query: str) -> list[str]:
     """Fetch YouTube search autocomplete suggestions via the public Google suggest API."""
