@@ -533,6 +533,12 @@ INVITE_COUNTS: dict[int, dict[int, int]]            = {}  # guild_id -> {inviter
 OPEN_TICKETS: dict[int, int] = {}  # user_id -> channel_id
 TICKET_CATEGORY_NAME = "Support Tickets"
 TICKET_LOG_NAME      = "ticket-logs"
+_TICKET_LOCKS: dict[int, asyncio.Lock] = {}  # per-user lock prevents race condition duplicates
+
+def _get_ticket_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _TICKET_LOCKS:
+        _TICKET_LOCKS[user_id] = asyncio.Lock()
+    return _TICKET_LOCKS[user_id]
 
 # ── Reaction Roles ────────────────────────────────────────────────────────────
 # message_id -> {emoji_str -> role_id}
@@ -679,38 +685,57 @@ class OpenTicketButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         member = interaction.user
         guild  = interaction.guild
-        if member.id in OPEN_TICKETS:
-            ch = guild.get_channel(OPEN_TICKETS[member.id])
-            if ch:
-                await interaction.response.send_message(f"You already have an open ticket: {ch.mention}", ephemeral=True)
-                return
-        cat = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
-        if not cat:
-            cat = await guild.create_category(TICKET_CATEGORY_NAME)
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-        }
-        # give mods access too
-        for role in guild.roles:
-            if role.permissions.manage_channels:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        ch = await guild.create_text_channel(
-            f"ticket-{member.name}",
-            category=cat,
-            overwrites=overwrites,
-            reason="Support ticket",
-        )
-        OPEN_TICKETS[member.id] = ch.id
-        embed = discord.Embed(
-            title="🎫 Support Ticket",
-            description=f"Hello {member.mention}! Describe your issue and a staff member will assist you.\n\nClick **Close Ticket** when resolved.",
-            color=0x5865F2,
-        )
-        embed.set_footer(text="Do not share personal information.")
-        await ch.send(embed=embed, view=TicketView())
-        await interaction.response.send_message(f"Ticket created: {ch.mention}", ephemeral=True)
+        lock   = _get_ticket_lock(member.id)
+
+        # Defer immediately to prevent Discord timeout while we acquire the lock
+        await interaction.response.defer(ephemeral=True)
+
+        async with lock:
+            # Check in-memory tracking first
+            if member.id in OPEN_TICKETS:
+                ch = guild.get_channel(OPEN_TICKETS[member.id])
+                if ch:
+                    await interaction.followup.send(f"You already have an open ticket: {ch.mention}", ephemeral=True)
+                    return
+                else:
+                    # Channel was deleted without going through close flow — clean up
+                    del OPEN_TICKETS[member.id]
+
+            # Also scan the actual category in case the bot restarted and lost memory
+            cat = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
+            if cat:
+                existing = discord.utils.get(cat.text_channels, name=f"ticket-{member.name}")
+                if existing:
+                    OPEN_TICKETS[member.id] = existing.id
+                    await interaction.followup.send(f"You already have an open ticket: {existing.mention}", ephemeral=True)
+                    return
+            else:
+                cat = await guild.create_category(TICKET_CATEGORY_NAME)
+
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            }
+            # give mods access too
+            for role in guild.roles:
+                if role.permissions.manage_channels:
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            ch = await guild.create_text_channel(
+                f"ticket-{member.name}",
+                category=cat,
+                overwrites=overwrites,
+                reason="Support ticket",
+            )
+            OPEN_TICKETS[member.id] = ch.id
+            embed = discord.Embed(
+                title="🎫 Support Ticket",
+                description=f"Hello {member.mention}! Describe your issue and a staff member will assist you.\n\nClick **Close Ticket** when resolved.",
+                color=0x5865F2,
+            )
+            embed.set_footer(text="Do not share personal information.")
+            await ch.send(embed=embed, view=TicketView())
+            await interaction.followup.send(f"🎫 Ticket created: {ch.mention}", ephemeral=True)
 
 class OpenTicketView(discord.ui.View):
     def __init__(self):
