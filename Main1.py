@@ -1523,6 +1523,7 @@ async def clear(interaction: discord.Interaction, amount: int = 10):
 from pytubefix import Search, YouTube as PyTube
 
 import platform as _platform
+import shutil as _shutil
 if _platform.system() == "Windows":
     FFMPEG_EXE = (
         r"C:\Users\kobec\AppData\Local\Microsoft\WinGet\Packages"
@@ -1530,7 +1531,8 @@ if _platform.system() == "Windows":
         r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
     )
 else:
-    FFMPEG_EXE = "ffmpeg"  # installed system-wide on Linux/Railway
+    # Use shutil.which so the Nix/system-installed binary is found regardless of PATH order
+    FFMPEG_EXE = _shutil.which("ffmpeg") or "ffmpeg"
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
