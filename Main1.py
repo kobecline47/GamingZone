@@ -1644,37 +1644,21 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
 
         base_opts = _get_ytdlp_auth_opts()
 
-        attempts = [
-            {
-                **base_opts,
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['web', 'tv_embedded']}},
-            },
-            {
-                **base_opts,
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['android']}},
-            },
-            {
-                **base_opts,
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'noplaylist': True,
-            },
-        ]
+        # Use extract_flat=True so yt-dlp returns ONLY metadata (title/id/duration)
+        # without trying to resolve formats. Format resolution happens later in _resolve_playable_url.
+        search_opts = {
+            **base_opts,
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'noplaylist': True,
+            'skip_download': True,
+        }
 
-        # Search for more candidates than needed so we can skip restricted videos
-        search_count = max(max_results * 3, 5)
+        # Fetch more candidates than needed so restricted videos can be skipped
+        search_count = max(max_results * 3, 9)
         queries = [f"ytsearch{search_count}:{query}"]
+        attempts = [search_opts]
 
         for ydl_opts in attempts:
             try:
@@ -1789,7 +1773,7 @@ def _resolve_playable_url(url: str) -> str | None:
                 'no_warnings': True,
                 'format': 'bestaudio/best',
                 'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['web', 'tv_embedded']}},
+                'extractor_args': {'youtube': {'player_client': ['web']}},
             },
             {
                 **base_opts,
@@ -1797,7 +1781,7 @@ def _resolve_playable_url(url: str) -> str | None:
                 'no_warnings': True,
                 'format': 'bestaudio/best',
                 'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['android']}},
+                'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
             },
             {
                 **base_opts,
