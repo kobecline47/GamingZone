@@ -17,6 +17,7 @@ import urllib.parse
 import json
 import traceback
 import time
+import ctypes.util
 import nacl.secret  # required for discord voice (PyNaCl)
 import davey        # required for discord voice (DAVE E2EE protocol)
 import dashboard
@@ -257,8 +258,24 @@ class Client(commands.Bot):
         print(f'Logged on as {self.user}!')
         if not discord.opus.is_loaded():
             try:
-                discord.opus._load_default()
+                opus_lib = None
+                if _platform.system() == "Windows":
+                    discord.opus._load_default()
+                else:
+                    for candidate in (ctypes.util.find_library("opus"), "libopus.so.0", "libopus.so"):
+                        if not candidate:
+                            continue
+                        try:
+                            discord.opus.load_opus(candidate)
+                            opus_lib = candidate
+                            break
+                        except Exception:
+                            continue
+                    if not discord.opus.is_loaded():
+                        discord.opus._load_default()
                 print('Opus loaded successfully.')
+                if opus_lib:
+                    print(f'Loaded Opus library: {opus_lib}')
             except Exception as e:
                 print(f'Failed to load Opus: {e}')
         try:
@@ -1624,13 +1641,14 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        # Use FFmpegOpusAudio so discord.py does not need local libopus encoding.
-        # Apply volume in ffmpeg filter since PCMVolumeTransformer is for PCM sources.
-        source = discord.FFmpegOpusAudio(
-            state.current.url,
-            executable=FFMPEG_EXE,
-            before_options=FFMPEG_OPTS['before_options'],
-            options=f"-vn -af volume={state.volume}",
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(
+                state.current.url,
+                executable=FFMPEG_OPTS['executable'],
+                before_options=FFMPEG_OPTS['before_options'],
+                options=FFMPEG_OPTS['options'],
+            ),
+            volume=state.volume,
         )
         def after_play(error):
             if error:
