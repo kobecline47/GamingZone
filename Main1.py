@@ -1672,7 +1672,9 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
             },
         ]
 
-        queries = [f"ytsearch{max_results}:{query}"]
+        # Search for more candidates than needed so we can skip restricted videos
+        search_count = max(max_results * 3, 5)
+        queries = [f"ytsearch{search_count}:{query}"]
 
         for ydl_opts in attempts:
             try:
@@ -1681,27 +1683,21 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                         try:
                             info = ydl.extract_info(q, download=False)
                             entries = []
-                            for entry in info.get('entries', [])[:max_results]:
+                            for entry in (info.get('entries') or []):
                                 if not entry:
                                     continue
-                                try:
-                                    stream_url = entry.get('url')
-                                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
-                                    if not stream_url or 'youtube.com/watch' in str(stream_url):
-                                        resolved = ydl.extract_info(webpage_url, download=False)
-                                        stream_url = resolved.get('url')
-                                    if not stream_url:
-                                        continue
-
-                                    entries.append({
-                                        'title': entry.get('title', 'Unknown title'),
-                                        'url': stream_url,
-                                        'webpage_url': webpage_url,
-                                        'duration': entry.get('duration', 0),
-                                    })
-                                except Exception as e:
-                                    print(f'[yt-dlp] entry failed: {e}')
+                                vid_id = entry.get('id', '')
+                                webpage_url = entry.get('webpage_url') or (f"https://www.youtube.com/watch?v={vid_id}" if vid_id else '')
+                                if not webpage_url:
                                     continue
+                                entries.append({
+                                    'title': entry.get('title', 'Unknown title'),
+                                    'url': webpage_url,
+                                    'webpage_url': webpage_url,
+                                    'duration': entry.get('duration', 0),
+                                })
+                                if len(entries) >= max_results:
+                                    break
 
                             if entries:
                                 return entries
@@ -1776,6 +1772,11 @@ def _resolve_playable_url(url: str) -> str | None:
         return url
     if 'youtube.com/watch' not in lower and 'youtu.be/' not in lower:
         return url
+
+    # 0) If the URL is already a direct audio stream (not a YouTube page), use it as-is.
+    if url and not any(x in url for x in ('youtube.com/watch', 'youtu.be/', 'youtube.com/shorts')):
+        if url.startswith('http') and '.' in url:
+            return url
 
     # 1) Try yt-dlp direct extraction from the watch URL.
     try:
@@ -2220,18 +2221,27 @@ async def play(interaction: discord.Interaction, query: str):
         else:
             state.voice_client = vc
 
-        results = await search_youtube(query, max_results=1)
+        results = await search_youtube(query, max_results=5)
         if not results:
             await interaction.followup.send("No results found.")
             return
-        r = results[0]
-        entry = SongEntry(
-            title=r.get('title', 'Unknown'),
-            url=r['url'],
-            webpage_url=r.get('webpage_url', ''),
-            duration=r.get('duration', 0),
-            requester=interaction.user,
-        )
+        entry = None
+        for r in results:
+            candidate = SongEntry(
+                title=r.get('title', 'Unknown'),
+                url=r['url'],
+                webpage_url=r.get('webpage_url', ''),
+                duration=r.get('duration', 0),
+                requester=interaction.user,
+            )
+            test_url = await asyncio.get_running_loop().run_in_executor(None, lambda c=candidate: _resolve_playable_url(c.url))
+            if test_url:
+                candidate.url = test_url
+                entry = candidate
+                break
+        if not entry:
+            await interaction.followup.send("Couldn't find a playable version of that song. Try a different search.")
+            return
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
             play_next(interaction.guild.id, asyncio.get_running_loop())
