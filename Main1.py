@@ -1497,11 +1497,15 @@ async def clear(interaction: discord.Interaction, amount: int = 10):
 
 from pytubefix import Search, YouTube as PyTube
 
-FFMPEG_EXE = (
-    r"C:\Users\kobec\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-    r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
-)
+import platform as _platform
+if _platform.system() == "Windows":
+    FFMPEG_EXE = (
+        r"C:\Users\kobec\AppData\Local\Microsoft\WinGet\Packages"
+        r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+        r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
+    )
+else:
+    FFMPEG_EXE = "ffmpeg"  # installed system-wide on Linux/Railway
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
