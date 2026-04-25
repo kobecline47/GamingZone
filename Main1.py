@@ -1573,8 +1573,8 @@ print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
-    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
+    'before_options': '-nostdin -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -q:a 5 -ac 2 -ar 48000',
 }
 
 class SongEntry:
