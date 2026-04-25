@@ -265,7 +265,7 @@ def _bj_embed(
         embed.add_field(name="⚡ CASINO BONUS", value="🎊 **3× MULTIPLIER** applied!", inline=False)
     if hide_dealer:
         embed.set_footer(
-            text="Hit ▸ draw  |  Stand ▸ end turn  |  Double ▸ 2× bet + 1 card  |  Split ▸ split pairs"
+            text="👊 Hit = draw  •  ✋ Stand = end turn  •  💰 Double = 2× bet + 1 card  •  ✂️ Split = split pairs"
         )
     return embed
 

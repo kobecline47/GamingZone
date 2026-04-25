@@ -1634,7 +1634,7 @@ class MusicControlView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild_id = guild_id
 
-    @discord.ui.button(emoji="⏸", label="Pause/Resume", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="⏸️", label="Pause/Resume", style=discord.ButtonStyle.primary, row=0)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if not vc:
@@ -1642,23 +1642,23 @@ class MusicControlView(discord.ui.View):
             return
         if vc.is_playing():
             vc.pause()
-            await interaction.response.send_message("⏸ Paused.", ephemeral=True)
+            await interaction.response.send_message("⏸️ Paused.", ephemeral=True)
         elif vc.is_paused():
             vc.resume()
             await interaction.response.send_message("▶️ Resumed.", ephemeral=True)
         else:
             await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏭", label="Skip", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏭️", label="Skip", style=discord.ButtonStyle.secondary, row=0)
     async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if not vc or (not vc.is_playing() and not vc.is_paused()):
             await interaction.response.send_message("Nothing to skip.", ephemeral=True)
             return
         vc.stop()
-        await interaction.response.send_message("⏭ Skipped.", ephemeral=True)
+        await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏹", label="Stop", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏹️", label="Stop", style=discord.ButtonStyle.danger, row=0)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
         vc = interaction.guild.voice_client
@@ -1668,7 +1668,7 @@ class MusicControlView(discord.ui.View):
         state.queue.clear()
         state.current = None
         vc.stop()
-        await interaction.response.send_message("⏹ Stopped and queue cleared.", ephemeral=True)
+        await interaction.response.send_message("⏹️ Stopped and queue cleared.", ephemeral=True)
 
     @discord.ui.button(emoji="📋", label="Queue", style=discord.ButtonStyle.secondary, row=1)
     async def queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
