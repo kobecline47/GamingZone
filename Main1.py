@@ -1529,6 +1529,7 @@ class GuildMusicState:
         self.voice_client: discord.VoiceClient | None = None
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
+        self.autoplay: bool = False
 
 music_states: dict[int, GuildMusicState] = {}
 
@@ -1586,6 +1587,24 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
         state.current = None
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
+    state = get_music_state(guild_id)
+    # If queue is empty and autoplay is on, fetch a related song
+    if not state.queue and state.autoplay and state.current:
+        try:
+            related = await search_youtube(state.current.title, max_results=2)
+            # Skip the first result if it's the same title
+            for r in related:
+                if r['title'].lower() != state.current.title.lower():
+                    state.queue.append(SongEntry(
+                        title=r['title'],
+                        url=r['url'],
+                        webpage_url=r['webpage_url'],
+                        duration=r['duration'],
+                        requester=state.current.requester,
+                    ))
+                    break
+        except Exception:
+            pass
     play_next(guild_id, loop)
     await _post_music_panel(guild_id)
 
@@ -1688,6 +1707,18 @@ class MusicControlView(discord.ui.View):
             vc.source.volume = state.volume
         await interaction.response.send_message(f"🔊 Volume: {int(state.volume * 100)}%", ephemeral=True)
 
+    @discord.ui.button(emoji="🔁", label="Autoplay: OFF", style=discord.ButtonStyle.secondary, row=2, custom_id="autoplay_toggle")
+    async def autoplay_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        state.autoplay = not state.autoplay
+        button.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
+        button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
+            f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {'I\'ll queue related songs automatically!' if state.autoplay else ''}",
+            ephemeral=True
+        )
+
 
 async def _post_music_panel(guild_id: int):
     """Delete the old Now Playing panel and post a fresh one with control buttons."""
@@ -1716,9 +1747,20 @@ async def _post_music_panel(guild_id: int):
     embed.add_field(name="Requested by", value=state.current.requester.mention)
     embed.add_field(name="Volume", value=f"{int(state.volume * 100)}%")
     q = len(state.queue)
+    footer_parts = []
     if q:
-        embed.set_footer(text=f"{q} song{'s' if q != 1 else ''} in queue")
-    state.now_playing_msg = await music_ch.send(embed=embed, view=MusicControlView(guild_id))
+        footer_parts.append(f"{q} song{'s' if q != 1 else ''} in queue")
+    if state.autoplay:
+        footer_parts.append("🔁 Autoplay ON")
+    if footer_parts:
+        embed.set_footer(text="  •  ".join(footer_parts))
+    view = MusicControlView(guild_id)
+    # Reflect autoplay state on the button
+    for child in view.children:
+        if getattr(child, "custom_id", None) == "autoplay_toggle":
+            child.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
+            child.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
+    state.now_playing_msg = await music_ch.send(embed=embed, view=view)
 
 
 def _is_music_channel(interaction: discord.Interaction) -> bool:
