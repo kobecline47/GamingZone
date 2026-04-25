@@ -1603,7 +1603,7 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
                 })
         except Exception:
             continue
-    return []
+    return entries
 
 def _yt_suggestions(query: str) -> list[str]:
     """Fetch YouTube search autocomplete suggestions via the public Google suggest API."""
