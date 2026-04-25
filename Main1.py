@@ -17,6 +17,7 @@ import urllib.parse
 import json
 import traceback
 import time
+import base64
 import ctypes.util
 import tempfile
 import nacl.secret  # required for discord voice (PyNaCl)
@@ -1641,8 +1642,11 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     try:
         import yt_dlp
 
+        base_opts = _get_ytdlp_auth_opts()
+
         attempts = [
             {
+                **base_opts,
                 'quiet': True,
                 'no_warnings': True,
                 'default_search': 'ytsearch',
@@ -1651,6 +1655,7 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                 'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
             },
             {
+                **base_opts,
                 'quiet': True,
                 'no_warnings': True,
                 'default_search': 'ytsearch',
@@ -1722,6 +1727,38 @@ def _extract_video_id(url: str) -> str | None:
     return None
 
 
+def _get_ytdlp_auth_opts() -> dict:
+    """Build yt-dlp auth options from environment variables.
+
+    Supported env vars:
+    - YTDLP_COOKIES_TXT: absolute path to Netscape-format cookies.txt
+    - YTDLP_COOKIES_B64: base64-encoded cookies.txt content
+    """
+    opts: dict = {}
+
+    cookies_path = os.getenv('YTDLP_COOKIES_TXT', '').strip()
+    cookies_b64 = os.getenv('YTDLP_COOKIES_B64', '').strip()
+
+    if cookies_path and os.path.exists(cookies_path):
+        opts['cookiefile'] = cookies_path
+        print(f"[yt-dlp] Using cookie file: {cookies_path}")
+        return opts
+
+    if cookies_b64:
+        try:
+            raw = base64.b64decode(cookies_b64)
+            tmp_path = os.path.join(tempfile.gettempdir(), 'ytdlp_cookies.txt')
+            with open(tmp_path, 'wb') as f:
+                f.write(raw)
+            opts['cookiefile'] = tmp_path
+            print(f"[yt-dlp] Using cookie file from YTDLP_COOKIES_B64: {tmp_path}")
+            return opts
+        except Exception as e:
+            print(f"[yt-dlp] Failed to decode YTDLP_COOKIES_B64: {e}")
+
+    return opts
+
+
 def _resolve_playable_url(url: str) -> str | None:
     """Resolve a direct audio URL when we only have a YouTube watch URL."""
     lower = (url or '').lower()
@@ -1733,8 +1770,10 @@ def _resolve_playable_url(url: str) -> str | None:
     # 1) Try yt-dlp direct extraction from the watch URL.
     try:
         import yt_dlp
+        base_opts = _get_ytdlp_auth_opts()
         attempts = [
             {
+                **base_opts,
                 'quiet': True,
                 'no_warnings': True,
                 'format': 'bestaudio/best',
@@ -1742,6 +1781,7 @@ def _resolve_playable_url(url: str) -> str | None:
                 'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
             },
             {
+                **base_opts,
                 'quiet': True,
                 'no_warnings': True,
                 'format': 'bestaudio/best',
@@ -1793,12 +1833,7 @@ def _resolve_playable_url(url: str) -> str | None:
 
 def _invidious_search(query: str, max_results: int) -> list[dict]:
     """Last fallback using public Invidious instances."""
-    instances = [
-        'https://invidious.nerdvpn.de',
-        'https://invidious.jing.rocks',
-        'https://inv.nadeko.net',
-        'https://yewtu.be',
-    ]
+    instances = _get_invidious_instances()
 
     for base in instances:
         try:
@@ -1851,6 +1886,61 @@ def _invidious_search(query: str, max_results: int) -> list[dict]:
             continue
 
     return []
+
+
+def _get_invidious_instances() -> list[str]:
+    """Return a list of likely working Invidious instances.
+
+    We fetch the public registry first, then append static fallbacks.
+    """
+    static_fallbacks = [
+        'https://inv.nadeko.net',
+        'https://invidious.nerdvpn.de',
+        'https://yewtu.be',
+        'https://invidious.privacydev.net',
+        'https://invidious.fdn.fr',
+        'https://iv.ggtyler.dev',
+    ]
+
+    discovered: list[str] = []
+    try:
+        req = urllib.request.Request(
+            'https://api.invidious.io/instances.json?sort_by=health',
+            headers={'User-Agent': 'Mozilla/5.0'},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode(errors='ignore'))
+
+        for row in data:
+            try:
+                domain = row[0]
+                meta = row[1]
+                if not isinstance(meta, dict):
+                    continue
+                if not meta.get('api', False):
+                    continue
+                if meta.get('type') == 'onion':
+                    continue
+                uri = meta.get('uri') or f"https://{domain}"
+                if not str(uri).startswith('https://'):
+                    continue
+                discovered.append(uri.rstrip('/'))
+                if len(discovered) >= 12:
+                    break
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[Invidious] Could not fetch instance registry: {e}")
+
+    combined = discovered + static_fallbacks
+    deduped: list[str] = []
+    seen = set()
+    for inst in combined:
+        if inst in seen:
+            continue
+        seen.add(inst)
+        deduped.append(inst)
+    return deduped
 
 def _cleanup_song_file(song: SongEntry | None) -> None:
     if not song or not song.local_path:
