@@ -1624,6 +1624,14 @@ FFMPEG_OPTS = {
     'options': '-vn -q:a 5 -ac 2 -ar 48000',
 }
 
+YTDL_STREAM_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'noplaylist': True,
+    'format': 'bestaudio/best',
+    'extractor_args': {'youtube': {'player_client': ['android', 'web', 'tv_embedded']}},
+}
+
 class SongEntry:
     def __init__(self, title: str, url: str, webpage_url: str, duration: int, requester: discord.Member, local_path: str | None = None):
         self.title = title
@@ -1868,24 +1876,112 @@ async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
 
+
+def _ffmpeg_candidate_paths() -> list[str]:
+    candidates: list[str] = []
+
+    env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
+    if env_ffmpeg:
+        candidates.append(env_ffmpeg)
+
+    if FFMPEG_EXE:
+        candidates.append(FFMPEG_EXE)
+
+    for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+        candidates.append(path)
+
+    wh = _shutil.which("ffmpeg")
+    if wh:
+        candidates.append(wh)
+
+    try:
+        import imageio_ffmpeg
+
+        imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if imageio_exe:
+            candidates.append(imageio_exe)
+    except Exception:
+        pass
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item and item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
+
+
+def _extract_stream_url(song: SongEntry) -> str | None:
+    """Resolve a fresh playable audio URL right before playback."""
+    target = song.webpage_url or song.url
+    if not target:
+        return None
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL(YTDL_STREAM_OPTS) as ydl:
+            info = ydl.extract_info(target, download=False)
+            if info and info.get('url'):
+                return info['url']
+    except Exception as e:
+        print(f"[Music] yt-dlp stream resolve failed for {song.title}: {e}")
+
+    return song.url or None
+
 def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        input_source = state.current.local_path or state.current.url
-        source = discord.FFmpegOpusAudio(
-            input_source,
-            executable=FFMPEG_EXE,
-            before_options=FFMPEG_OPTS['before_options'],
-            options=f"-vn -af volume={state.volume}",
-        )
-        def after_play(error):
-            if error:
-                print(f'[Music] Player error: {error}')
+        try:
+            stream_url = _extract_stream_url(state.current)
+            if not stream_url:
+                raise RuntimeError("No playable stream URL could be resolved")
+
+            audio = None
+            last_error: Exception | None = None
+            for ffmpeg_exe in _ffmpeg_candidate_paths():
+                if ffmpeg_exe != "ffmpeg" and not os.path.exists(ffmpeg_exe):
+                    continue
+                try:
+                    audio = discord.FFmpegPCMAudio(
+                        stream_url,
+                        executable=ffmpeg_exe,
+                        before_options=FFMPEG_OPTS['before_options'],
+                        options=FFMPEG_OPTS['options'],
+                    )
+                    print(f"[Music] Using FFmpeg candidate: {ffmpeg_exe}")
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(f"[Music] FFmpeg candidate failed ({ffmpeg_exe}): {e}")
+
+            if audio is None:
+                raise RuntimeError(f"No working ffmpeg executable found. Last error: {last_error}")
+
+            volume_factor = max(0.1, min(2.0, state.volume))
+            source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
+
+            def after_play(error):
+                if error:
+                    print(f'[Music] Player error on "{state.current.title}": {error}')
+                finished_song = state.current
+                _cleanup_song_file(finished_song)
+                asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+
+            print(f'[Music] Now playing: {state.current.title}')
+            state.voice_client.play(source, after=after_play)
+        except Exception as e:
+            print(
+                f"[Music] Failed to create audio source for {state.current.title}: {e} | "
+                f"FFMPEG_EXE={FFMPEG_EXE} | "
+                f"Candidates={_ffmpeg_candidate_paths()} | "
+                f"PATH={os.getenv('PATH', '')}"
+            )
             finished_song = state.current
             _cleanup_song_file(finished_song)
+            state.current = None
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
-        state.voice_client.play(source, after=after_play)
     else:
         _cleanup_song_file(state.current)
         state.current = None
