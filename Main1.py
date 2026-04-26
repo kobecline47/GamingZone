@@ -1610,25 +1610,194 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
-    results = Search(query)
+    """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
+    try:
+        results = Search(query)
+    except Exception as e:
+        print(f'[Search Error] pytubefix failed: {e}. Trying yt-dlp...')
+        return _ytdlp_search(query, max_results)
+
     entries = []
-    temp_dir = os.path.join(tempfile.gettempdir(), "gzbot_audio")
-    os.makedirs(temp_dir, exist_ok=True)
     for yt in results.videos[:max_results]:
         try:
             stream = yt.streams.filter(only_audio=True).order_by('abr').last()
             if stream:
-                local_path = stream.download(output_path=temp_dir, skip_existing=False)
                 entries.append({
                     'title': yt.title,
                     'url': stream.url,
                     'webpage_url': yt.watch_url,
                     'duration': yt.length or 0,
-                    'local_path': local_path,
                 })
-        except Exception:
+        except Exception as e:
+            print(f'[Search] pytubefix item failed: {e}')
             continue
-    return entries
+
+    if entries:
+        return entries
+    return _ytdlp_search(query, max_results)
+
+
+def _ytdlp_search(query: str, max_results: int) -> list[dict]:
+    """Fallback: use yt-dlp search and resolve a playable audio URL."""
+    try:
+        import yt_dlp
+
+        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        base_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'default_search': 'ytsearch',
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'http_headers': {'User-Agent': 'Mozilla/5.0'},
+            'source_address': '0.0.0.0',
+        }
+        if cookiefile and os.path.exists(cookiefile):
+            base_opts['cookiefile'] = cookiefile
+            print(f"[yt-dlp] Using cookie file: {cookiefile}")
+
+        attempts = [
+            {
+                **base_opts,
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            },
+            {
+                **base_opts,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
+            },
+            {
+                **base_opts,
+                'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'web']}},
+            },
+        ]
+
+        queries = [
+            f"ytsearch{max_results}:{query}",
+            f"ytsearch{max_results}:{query} audio",
+        ]
+
+        for ydl_opts in attempts:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    for q in queries:
+                        try:
+                            info = ydl.extract_info(q, download=False)
+                            entries = []
+                            for entry in info.get('entries', [])[:max_results]:
+                                if not entry:
+                                    continue
+                                try:
+                                    stream_url = entry.get('url')
+                                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
+                                    if not stream_url or 'youtube.com/watch' in str(stream_url):
+                                        resolved = ydl.extract_info(webpage_url, download=False)
+                                        stream_url = resolved.get('url')
+                                    if not stream_url:
+                                        continue
+
+                                    entries.append({
+                                        'title': entry.get('title', 'Unknown title'),
+                                        'url': stream_url,
+                                        'webpage_url': webpage_url,
+                                        'duration': entry.get('duration', 0),
+                                    })
+                                except Exception as e:
+                                    print(f'[yt-dlp] entry failed: {e}')
+                                    continue
+
+                            if entries:
+                                return entries
+                        except Exception as e:
+                            print(f'[yt-dlp] query failed ({q}): {e}')
+                            continue
+            except Exception as e:
+                print(f'[yt-dlp] attempt failed: {e}')
+                continue
+
+        return _invidious_search(query, max_results)
+    except Exception as e:
+        print(f'[yt-dlp] failed: {e}')
+        return _invidious_search(query, max_results)
+
+
+def _invidious_search(query: str, max_results: int) -> list[dict]:
+    """Last fallback using public Invidious instances."""
+    instances = [
+        'https://inv.nadeko.net',
+        'https://invidious.privacyredirect.com',
+        'https://invidious.fdn.fr',
+        'https://invidious.projectsegfau.lt',
+        'https://yewtu.be',
+    ]
+
+    for base in instances:
+        try:
+            search_url = (
+                f"{base}/api/v1/search?q={urllib.parse.quote(query)}"
+                f"&type=video&sort_by=relevance"
+            )
+            req = urllib.request.Request(
+                search_url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode(errors='ignore'))
+
+            entries = []
+            for item in data:
+                if item.get('type') != 'video':
+                    continue
+                vid = item.get('videoId')
+                if not vid:
+                    continue
+
+                try:
+                    details_url = f"{base}/api/v1/videos/{vid}"
+                    req2 = urllib.request.Request(
+                        details_url,
+                        headers={
+                            'User-Agent': 'Mozilla/5.0',
+                            'Accept': 'application/json',
+                        },
+                    )
+                    with urllib.request.urlopen(req2, timeout=6) as resp2:
+                        details = json.loads(resp2.read().decode(errors='ignore'))
+
+                    audio_formats = [
+                        f for f in details.get('adaptiveFormats', [])
+                        if 'audio' in str(f.get('type', '')).lower() and f.get('url')
+                    ]
+                    if not audio_formats:
+                        audio_formats = [
+                            f for f in details.get('formatStreams', [])
+                            if 'audio' in str(f.get('type', '')).lower() and f.get('url')
+                        ]
+                    if not audio_formats:
+                        continue
+                    best_audio = max(audio_formats, key=lambda f: int(f.get('bitrate', 0) or 0))
+
+                    entries.append({
+                        'title': item.get('title', 'Unknown title'),
+                        'url': best_audio['url'],
+                        'webpage_url': f"https://www.youtube.com/watch?v={vid}",
+                        'duration': int(item.get('lengthSeconds') or 0),
+                    })
+                    if len(entries) >= max_results:
+                        break
+                except Exception as e:
+                    print(f'[Invidious] resolve failed for {vid}: {e}')
+                    continue
+
+            if entries:
+                return entries
+        except Exception as e:
+            print(f'[Invidious] instance failed {base}: {e}')
+            continue
+
+    return []
 
 def _cleanup_song_file(song: SongEntry | None) -> None:
     if not song or not song.local_path:
@@ -1893,7 +2062,10 @@ async def play(interaction: discord.Interaction, query: str):
 
         results = await search_youtube(query, max_results=1)
         if not results:
-            await interaction.followup.send("No results found.")
+            await interaction.followup.send(
+                "No playable results found right now. YouTube is likely rate-limiting bot traffic. "
+                "If this persists on Railway, set `YTDLP_COOKIES_PATH` to a valid cookies.txt file path and retry."
+            )
             return
         r = results[0]
         entry = SongEntry(
