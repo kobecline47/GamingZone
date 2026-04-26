@@ -18,9 +18,17 @@ Upgrades v2:
 import random
 import asyncio
 import time
+import io
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 
 from pokemon_game import _wallet, _ensure_player, WALLETS
 
@@ -278,6 +286,92 @@ def _bj_color(status: str) -> int:
     return 0x5865F2
 
 
+def _bj_render_image_file(
+    player: list[tuple[str, str]],
+    dealer: list[tuple[str, str]],
+    hide_dealer: bool,
+) -> discord.File | None:
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return None
+
+    card_w, card_h = 78, 112
+    gap = 14
+    side = 22
+    top = 18
+    row_gap = 34
+    label_h = 18
+
+    visible_dealer = dealer if not hide_dealer else dealer[:1] + [dealer[1]]
+    max_cards = max(len(player), len(visible_dealer), 2)
+    width = side * 2 + max_cards * card_w + (max_cards - 1) * gap
+    height = top * 2 + label_h + card_h + row_gap + label_h + card_h + 18
+
+    img = Image.new("RGB", (width, height), (9, 61, 46))
+    draw = ImageDraw.Draw(img)
+
+    draw.rounded_rectangle((6, 6, width - 6, height - 6), radius=18, outline=(88, 170, 132), width=3)
+
+    try:
+        font_rank = ImageFont.truetype("DejaVuSans.ttf", 18)
+        font_center = ImageFont.truetype("DejaVuSans.ttf", 24)
+        font_label = ImageFont.truetype("DejaVuSans.ttf", 14)
+    except Exception:
+        font_rank = ImageFont.load_default()
+        font_center = ImageFont.load_default()
+        font_label = ImageFont.load_default()
+
+    def suit_color(suit: str) -> tuple[int, int, int]:
+        if "♥" in suit or "♦" in suit:
+            return (210, 44, 44)
+        return (28, 28, 28)
+
+    def draw_card(x: int, y: int, rank: str, suit: str, hidden: bool = False) -> None:
+        if hidden:
+            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=9, fill=(28, 110, 78), outline=(72, 180, 128), width=2)
+            draw.text((x + 25, y + 44), "🂠", fill=(228, 243, 235), font=font_center)
+            return
+
+        draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=9, fill=(247, 247, 247), outline=(36, 140, 92), width=2)
+        c = suit_color(suit)
+        suit_char = "♥" if "♥" in suit else "♦" if "♦" in suit else "♣" if "♣" in suit else "♠"
+        draw.text((x + 8, y + 6), rank, fill=c, font=font_rank)
+        draw.text((x + card_w // 2 - 8, y + card_h // 2 - 12), suit_char, fill=c, font=font_center)
+        draw.text((x + card_w - 20, y + card_h - 24), rank, fill=c, font=font_rank)
+
+    draw.text((side, top), "Dealer", fill=(222, 241, 230), font=font_label)
+    y_dealer = top + label_h
+    for i, (r, s) in enumerate(dealer):
+        x = side + i * (card_w + gap)
+        draw_card(x, y_dealer, r, s, hidden=(hide_dealer and i == 1))
+
+    draw.text((side, y_dealer + card_h + row_gap - 16), "You", fill=(222, 241, 230), font=font_label)
+    y_player = y_dealer + card_h + row_gap
+    for i, (r, s) in enumerate(player):
+        x = side + i * (card_w + gap)
+        draw_card(x, y_player, r, s, hidden=False)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="blackjack_table.png")
+
+
+def _bj_embed_with_image(
+    player: list,
+    dealer: list,
+    bet: int,
+    uid: int,
+    status: str = "",
+    hide_dealer: bool = True,
+    bonus: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = _bj_embed(player, dealer, bet, uid, status, hide_dealer=hide_dealer, bonus=bonus)
+    img_file = _bj_render_image_file(player, dealer, hide_dealer)
+    if img_file:
+        embed.set_image(url="attachment://blackjack_table.png")
+    return embed, img_file
+
+
 def _bj_embed(
     player: list, dealer: list, bet: int, uid: int,
     status: str = "", hide_dealer: bool = True, bonus: bool = False,
@@ -348,10 +442,14 @@ class BlackjackView(discord.ui.View):
             WALLETS[uid] = _wallet(uid) - self.bet
             _record_loss(uid, self.bet)
             status = f"💥 **BUST!** Over 21 — lost **{self.bet:,}** PokeCoins."
-            embed  = _bj_embed(
+            embed, img_file = _bj_embed_with_image(
                 self.player, self.dealer, self.bet, uid, status, hide_dealer=False
             )
-            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.response.edit_message(
+                embed=embed,
+                view=self,
+                attachments=[img_file] if img_file else [],
+            )
             return
 
         # Dealer draws to soft 17
@@ -376,11 +474,15 @@ class BlackjackView(discord.ui.View):
             _record_loss(uid, self.bet)
             status = f"💸 **LOSE** — −**{self.bet:,}** PokeCoins."
 
-        embed = _bj_embed(
+        embed, img_file = _bj_embed_with_image(
             self.player, self.dealer, self.bet, uid,
             status, hide_dealer=False, bonus=bonus,
         )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self,
+            attachments=[img_file] if img_file else [],
+        )
 
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.uid:
@@ -402,10 +504,14 @@ class BlackjackView(discord.ui.View):
             await self._resolve(interaction)
         else:
             self._refresh_split()
-            embed = _bj_embed(
+            embed, img_file = _bj_embed_with_image(
                 self.player, self.dealer, self.bet, self.uid, "🎯 Card drawn — your move!"
             )
-            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.response.edit_message(
+                embed=embed,
+                view=self,
+                attachments=[img_file] if img_file else [],
+            )
 
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.danger, emoji="✋")
     async def stand(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -442,11 +548,15 @@ class BlackjackView(discord.ui.View):
         # Simple split: keep first card, draw fresh second card
         self.player = [self.player[0], self.deck.pop()]
         self._refresh_split()
-        embed = _bj_embed(
+        embed, img_file = _bj_embed_with_image(
             self.player, self.dealer, self.bet, self.uid,
             "✂️ Split! New hand dealt — your move!",
         )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self,
+            attachments=[img_file] if img_file else [],
+        )
 
     async def on_timeout(self) -> None:
         self._disable_all()
@@ -987,17 +1097,23 @@ def setup_gambling(bot: commands.Bot) -> None:
             win, bonus = _bonus_roll(uid, base)
             WALLETS[uid] = _wallet(uid) + win
             _record_win(uid, win)
-            embed = _bj_embed(
+            embed, img_file = _bj_embed_with_image(
                 player, dealer, bet, uid,
                 f"🎉 **BLACKJACK!** Won **{win:,} PokeCoins**!"
                 + (" 🌟 **3× BONUS!**" if bonus else ""),
                 hide_dealer=False, bonus=bonus,
             )
-            await interaction.response.send_message(embed=embed)
+            if img_file:
+                await interaction.response.send_message(embed=embed, file=img_file)
+            else:
+                await interaction.response.send_message(embed=embed)
             return
         view  = BlackjackView(uid, bet, player, dealer, deck)
-        embed = _bj_embed(player, dealer, bet, uid, "🎯 Your move!")
-        await interaction.response.send_message(embed=embed, view=view)
+        embed, img_file = _bj_embed_with_image(player, dealer, bet, uid, "🎯 Your move!")
+        if img_file:
+            await interaction.response.send_message(embed=embed, view=view, file=img_file)
+        else:
+            await interaction.response.send_message(embed=embed, view=view)
 
     # ── /coinflip ─────────────────────────────────────────────────────────────
     @bot.tree.command(name="coinflip", description="🪙 Flip a coin — heads or tails!")
