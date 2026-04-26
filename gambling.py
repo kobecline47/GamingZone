@@ -226,9 +226,41 @@ def _hand_value(hand: list[tuple[str, str]]) -> int:
 
 
 def _fmt_hand(hand: list[tuple[str, str]], hide_second: bool = False) -> str:
-    if hide_second and len(hand) >= 2:
-        return f"`{hand[0][0]}{hand[0][1]}` `🂠 ?`"
-    return "  ".join(f"`{r}{s}`" for r, s in hand)
+    def _card_lines(rank: str, suit: str) -> list[str]:
+        rank_l = rank.ljust(2)
+        rank_r = rank.rjust(2)
+        return [
+            ".-------.",
+            f"|{rank_l}     |",
+            f"|   {suit}   |",
+            f"|     {rank_r}|",
+            "'-------'",
+        ]
+
+    def _hidden_lines() -> list[str]:
+        return [
+            ".-------.",
+            "|░░░░░░░|",
+            "|░ 🂠 ░|",
+            "|░░░░░░░|",
+            "'-------'",
+        ]
+
+    cards: list[list[str]] = []
+    for i, (r, s) in enumerate(hand):
+        if hide_second and i == 1:
+            cards.append(_hidden_lines())
+        else:
+            cards.append(_card_lines(r, s))
+
+    if not cards:
+        return "(no cards)"
+
+    rows: list[str] = []
+    for row_idx in range(5):
+        rows.append("  ".join(card[row_idx] for card in cards))
+
+    return "```\n" + "\n".join(rows) + "\n```"
 
 
 def _bj_color(status: str) -> int:
