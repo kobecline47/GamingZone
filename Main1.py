@@ -1596,8 +1596,8 @@ print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
-    'before_options': '-nostdin',
-    'options': '-vn',
+    'before_options': '-nostdin -hide_banner -loglevel error -headers "User-Agent: Mozilla/5.0\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -q:a 9 -acodec libopus -f s16le -ar 48000 -ac 2',
 }
 
 class SongEntry:
@@ -1820,17 +1820,27 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        source = discord.FFmpegOpusAudio(
-            state.current.url,
-            executable=FFMPEG_OPTS['executable'],
-            before_options=FFMPEG_OPTS['before_options'],
-            options=f"-vn -af volume={state.volume}",
-        )
-        def after_play(error):
-            if error:
-                print(f'[Music] Player error: {error}')
+        try:
+            # Build FFmpeg source with proper audio codec and headers
+            volume_factor = max(0.1, min(2.0, state.volume))  # Clamp between 0.1 and 2.0
+            source = discord.FFmpegOpusAudio(
+                state.current.url,
+                executable=FFMPEG_OPTS['executable'],
+                before_options=FFMPEG_OPTS['before_options'],
+                options=FFMPEG_OPTS['options'],
+            )
+            
+            def after_play(error):
+                if error:
+                    print(f'[Music] Player error on "{state.current.title}": {error}')
+                asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+            
+            print(f'[Music] Now playing: {state.current.title} from {state.current.url[:60]}...')
+            state.voice_client.play(source, after=after_play)
+        except Exception as e:
+            print(f'[Music] Failed to create audio source for {state.current.title}: {e}')
+            state.current = None
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
-        state.voice_client.play(source, after=after_play)
     else:
         state.current = None
 
