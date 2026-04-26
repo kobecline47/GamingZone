@@ -230,20 +230,20 @@ def _fmt_hand(hand: list[tuple[str, str]], hide_second: bool = False) -> str:
         rank_l = rank.ljust(2)
         rank_r = rank.rjust(2)
         return [
-            ".-------.",
-            f"|{rank_l}     |",
-            f"|   {suit}   |",
-            f"|     {rank_r}|",
-            "'-------'",
+            "╭───────╮",
+            f"│{rank_l}     │",
+            f"│   {suit}   │",
+            f"│     {rank_r}│",
+            "╰───────╯",
         ]
 
     def _hidden_lines() -> list[str]:
         return [
-            ".-------.",
-            "|░░░░░░░|",
-            "|░ 🂠 ░|",
-            "|░░░░░░░|",
-            "'-------'",
+            "╭───────╮",
+            "│░░░░░░░│",
+            "│░  🂠  ░│",
+            "│░░░░░░░│",
+            "╰───────╯",
         ]
 
     cards: list[list[str]] = []
@@ -260,7 +260,15 @@ def _fmt_hand(hand: list[tuple[str, str]], hide_second: bool = False) -> str:
     for row_idx in range(5):
         rows.append("  ".join(card[row_idx] for card in cards))
 
-    return "```\n" + "\n".join(rows) + "\n```"
+    width = max(len(r) for r in rows) + 2
+    framed = [
+        "╭" + "─" * width + "╮",
+    ]
+    for r in rows:
+        framed.append("│ " + r.ljust(width - 2) + " │")
+    framed.append("╰" + "─" * width + "╯")
+
+    return "```\n" + "\n".join(framed) + "\n```"
 
 
 def _bj_color(status: str) -> int:
