@@ -1614,6 +1614,7 @@ if _platform.system() == "Windows":
 else:
     FFMPEG_EXE = _resolve_ffmpeg_executable()
 print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
+print("[Music] Build marker: deploy-temp e3891c3+diag")
 
 if FFMPEG_EXE == "ffmpeg" and not _shutil.which("ffmpeg"):
     print("[Music] WARNING: ffmpeg binary not available. Set FFMPEG_PATH or ensure apt package installation on Railway.")
@@ -1910,6 +1911,9 @@ def _ffmpeg_candidate_paths() -> list[str]:
             deduped.append(item)
             seen.add(item)
     return deduped
+
+
+print(f"[Music] Startup FFmpeg candidates: {_ffmpeg_candidate_paths()}")
 
 
 def _extract_stream_url(song: SongEntry) -> str | None:
