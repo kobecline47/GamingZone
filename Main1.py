@@ -1597,7 +1597,15 @@ print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
     'before_options': '-nostdin -hide_banner -loglevel error -headers "User-Agent: Mozilla/5.0\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -q:a 9 -acodec libopus -f s16le -ar 48000 -ac 2',
+    'options': '-vn',
+}
+
+YTDL_STREAM_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'noplaylist': True,
+    'format': 'bestaudio/best',
+    'extractor_args': {'youtube': {'player_client': ['android', 'web', 'tv_embedded']}},
 }
 
 class SongEntry:
@@ -1816,26 +1824,49 @@ async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
 
+
+def _extract_stream_url(song: SongEntry) -> str | None:
+    """Resolve a fresh playable audio URL right before FFmpeg playback."""
+    target = song.webpage_url or song.url
+    if not target:
+        return None
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL(YTDL_STREAM_OPTS) as ydl:
+            info = ydl.extract_info(target, download=False)
+            if info and info.get('url'):
+                return info['url']
+    except Exception as e:
+        print(f"[Music] yt-dlp stream resolve failed for {song.title}: {e}")
+
+    # Fallback to previously stored URL if extraction fails.
+    return song.url or None
+
 def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
         try:
-            # Build FFmpeg source with proper audio codec and headers
-            volume_factor = max(0.1, min(2.0, state.volume))  # Clamp between 0.1 and 2.0
-            source = discord.FFmpegOpusAudio(
-                state.current.url,
+            stream_url = _extract_stream_url(state.current)
+            if not stream_url:
+                raise RuntimeError("No playable stream URL could be resolved")
+
+            audio = discord.FFmpegPCMAudio(
+                stream_url,
                 executable=FFMPEG_OPTS['executable'],
                 before_options=FFMPEG_OPTS['before_options'],
                 options=FFMPEG_OPTS['options'],
             )
+            volume_factor = max(0.1, min(2.0, state.volume))
+            source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
             
             def after_play(error):
                 if error:
                     print(f'[Music] Player error on "{state.current.title}": {error}')
                 asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
             
-            print(f'[Music] Now playing: {state.current.title} from {state.current.url[:60]}...')
+            print(f'[Music] Now playing: {state.current.title}')
             state.voice_client.play(source, after=after_play)
         except Exception as e:
             print(f'[Music] Failed to create audio source for {state.current.title}: {e}')
