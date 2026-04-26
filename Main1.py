@@ -1544,6 +1544,21 @@ from pytubefix import Search, YouTube as PyTube
 
 import platform as _platform
 import shutil as _shutil
+
+
+def _is_usable_ffmpeg(path: str | None) -> bool:
+    if not path:
+        return False
+    if not os.path.exists(path):
+        return False
+    try:
+        import subprocess
+        subprocess.run([path, "-version"], capture_output=True, text=True, timeout=8, check=False)
+        return True
+    except Exception:
+        return False
+
+
 def _resolve_ffmpeg_executable() -> str:
     if _platform.system() == "Windows":
         return (
@@ -1553,33 +1568,42 @@ def _resolve_ffmpeg_executable() -> str:
         )
 
     for candidate in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
-        if os.path.exists(candidate):
+        if _is_usable_ffmpeg(candidate):
             return candidate
 
     system_ffmpeg = _shutil.which("ffmpeg")
-    if system_ffmpeg and os.path.exists(system_ffmpeg):
+    if _is_usable_ffmpeg(system_ffmpeg):
         return system_ffmpeg
 
     try:
         import static_ffmpeg
         static_ffmpeg.add_paths()
         bundled_ffmpeg = _shutil.which("ffmpeg")
-        if bundled_ffmpeg and os.path.exists(bundled_ffmpeg):
+        if _is_usable_ffmpeg(bundled_ffmpeg):
             return bundled_ffmpeg
+        try:
+            # Ensure binaries are fetched if PATH injection alone didn't expose ffmpeg.
+            from static_ffmpeg.run import get_or_fetch_platform_executables_else_raise
+            ffmpeg_path, _ = get_or_fetch_platform_executables_else_raise()
+            if _is_usable_ffmpeg(ffmpeg_path):
+                print(f"[Music] Using static-ffmpeg binary: {ffmpeg_path}")
+                return ffmpeg_path
+        except Exception as fetch_err:
+            print(f"[Music] static-ffmpeg fetch failed: {fetch_err}")
     except Exception as e:
         print(f"[Music] static-ffmpeg fallback unavailable: {e}")
 
     try:
         import imageio_ffmpeg
         imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        if imageio_exe and os.path.exists(imageio_exe):
+        if _is_usable_ffmpeg(imageio_exe):
             print(f"[Music] Using imageio-ffmpeg binary: {imageio_exe}")
             return imageio_exe
     except Exception as e:
         print(f"[Music] imageio-ffmpeg fallback unavailable: {e}")
 
     env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
-    if env_ffmpeg and os.path.exists(env_ffmpeg):
+    if _is_usable_ffmpeg(env_ffmpeg):
         return env_ffmpeg
 
     print(f"[Music] FFmpeg resolution failed. PATH={os.getenv('PATH', '')}")
