@@ -1557,14 +1557,14 @@ def _resolve_ffmpeg_executable() -> str:
             return candidate
 
     system_ffmpeg = _shutil.which("ffmpeg")
-    if system_ffmpeg:
+    if system_ffmpeg and os.path.exists(system_ffmpeg):
         return system_ffmpeg
 
     try:
         import static_ffmpeg
         static_ffmpeg.add_paths()
         bundled_ffmpeg = _shutil.which("ffmpeg")
-        if bundled_ffmpeg:
+        if bundled_ffmpeg and os.path.exists(bundled_ffmpeg):
             return bundled_ffmpeg
     except Exception as e:
         print(f"[Music] static-ffmpeg fallback unavailable: {e}")
@@ -1578,6 +1578,11 @@ def _resolve_ffmpeg_executable() -> str:
     except Exception as e:
         print(f"[Music] imageio-ffmpeg fallback unavailable: {e}")
 
+    env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
+    if env_ffmpeg and os.path.exists(env_ffmpeg):
+        return env_ffmpeg
+
+    print(f"[Music] FFmpeg resolution failed. PATH={os.getenv('PATH', '')}")
     return "ffmpeg"
 
 if _platform.system() == "Windows":
@@ -1585,6 +1590,9 @@ if _platform.system() == "Windows":
 else:
     FFMPEG_EXE = _resolve_ffmpeg_executable()
 print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
+
+if FFMPEG_EXE == "ffmpeg" and not _shutil.which("ffmpeg"):
+    print("[Music] WARNING: ffmpeg binary not available. Set FFMPEG_PATH or ensure apt package installation on Railway.")
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
