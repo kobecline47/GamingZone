@@ -1568,6 +1568,16 @@ from pytubefix import Search, YouTube as PyTube
 
 import platform as _platform
 import shutil as _shutil
+
+
+def _is_usable_ffmpeg(path: str | None) -> bool:
+    if not path:
+        return False
+    if not os.path.exists(path):
+        return False
+    return True
+
+
 def _resolve_ffmpeg_executable() -> str:
     if _platform.system() == "Windows":
         return (
@@ -1576,15 +1586,46 @@ def _resolve_ffmpeg_executable() -> str:
             r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
         )
 
+    for candidate in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+        if _is_usable_ffmpeg(candidate):
+            return candidate
+
     system_ffmpeg = _shutil.which("ffmpeg")
-    if system_ffmpeg:
+    if _is_usable_ffmpeg(system_ffmpeg):
         return system_ffmpeg
 
-    # On Railway/Linux, prefer system ffmpeg from apt packages. The static build
-    # has shown instability with some remote media URLs.
-    if _platform.system() != "Windows":
-        print("[Music] System ffmpeg not found on PATH; falling back to 'ffmpeg'.")
-        return "ffmpeg"
+    try:
+        import static_ffmpeg
+
+        static_ffmpeg.add_paths()
+        bundled_ffmpeg = _shutil.which("ffmpeg")
+        if _is_usable_ffmpeg(bundled_ffmpeg):
+            return bundled_ffmpeg
+        try:
+            from static_ffmpeg.run import get_or_fetch_platform_executables_else_raise
+
+            fetched_ffmpeg, _ = get_or_fetch_platform_executables_else_raise()
+            if _is_usable_ffmpeg(fetched_ffmpeg):
+                print(f"[Music] Using static-ffmpeg binary: {fetched_ffmpeg}")
+                return fetched_ffmpeg
+        except Exception as fetch_err:
+            print(f"[Music] static-ffmpeg fetch failed: {fetch_err}")
+    except Exception as e:
+        print(f"[Music] static-ffmpeg fallback unavailable: {e}")
+
+    try:
+        import imageio_ffmpeg
+
+        imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if _is_usable_ffmpeg(imageio_exe):
+            print(f"[Music] Using imageio-ffmpeg binary: {imageio_exe}")
+            return imageio_exe
+    except Exception as e:
+        print(f"[Music] imageio-ffmpeg fallback unavailable: {e}")
+
+    env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
+    if _is_usable_ffmpeg(env_ffmpeg):
+        return env_ffmpeg
 
     return "ffmpeg"
 
@@ -1593,6 +1634,51 @@ if _platform.system() == "Windows":
 else:
     FFMPEG_EXE = _resolve_ffmpeg_executable()
 print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
+
+
+def _ffmpeg_candidate_paths() -> list[str]:
+    candidates: list[str] = []
+
+    env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
+    if env_ffmpeg:
+        candidates.append(env_ffmpeg)
+
+    if FFMPEG_EXE:
+        candidates.append(FFMPEG_EXE)
+
+    for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+        candidates.append(path)
+
+    wh = _shutil.which("ffmpeg")
+    if wh:
+        candidates.append(wh)
+
+    try:
+        from static_ffmpeg.run import get_or_fetch_platform_executables_else_raise
+
+        fetched_ffmpeg, _ = get_or_fetch_platform_executables_else_raise()
+        if fetched_ffmpeg:
+            candidates.append(fetched_ffmpeg)
+    except Exception as e:
+        print(f"[Music] static-ffmpeg candidate fetch failed: {e}")
+
+    try:
+        import imageio_ffmpeg
+
+        imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if imageio_exe:
+            candidates.append(imageio_exe)
+    except Exception:
+        pass
+
+    # Preserve order while removing duplicates.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item and item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
@@ -1880,12 +1966,27 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
             if not stream_url:
                 raise RuntimeError("No playable stream URL could be resolved")
 
-            audio = discord.FFmpegPCMAudio(
-                stream_url,
-                executable=FFMPEG_OPTS['executable'],
-                before_options=FFMPEG_OPTS['before_options'],
-                options=FFMPEG_OPTS['options'],
-            )
+            audio = None
+            last_error: Exception | None = None
+            for ffmpeg_exe in _ffmpeg_candidate_paths():
+                if ffmpeg_exe != "ffmpeg" and not os.path.exists(ffmpeg_exe):
+                    continue
+                try:
+                    audio = discord.FFmpegPCMAudio(
+                        stream_url,
+                        executable=ffmpeg_exe,
+                        before_options=FFMPEG_OPTS['before_options'],
+                        options=FFMPEG_OPTS['options'],
+                    )
+                    print(f"[Music] Using FFmpeg candidate: {ffmpeg_exe}")
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(f"[Music] FFmpeg candidate failed ({ffmpeg_exe}): {e}")
+
+            if audio is None:
+                raise RuntimeError(f"No working ffmpeg executable found. Last error: {last_error}")
+
             volume_factor = max(0.1, min(2.0, state.volume))
             source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
             
@@ -1897,7 +1998,12 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
             print(f'[Music] Now playing: {state.current.title}')
             state.voice_client.play(source, after=after_play)
         except Exception as e:
-            print(f'[Music] Failed to create audio source for {state.current.title}: {e}')
+            print(
+                f"[Music] Failed to create audio source for {state.current.title}: {e} | "
+                f"FFMPEG_EXE={FFMPEG_EXE} | "
+                f"Candidates={_ffmpeg_candidate_paths()} | "
+                f"PATH={os.getenv('PATH', '')}"
+            )
             state.current = None
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
     else:
