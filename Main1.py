@@ -1552,6 +1552,10 @@ def _resolve_ffmpeg_executable() -> str:
             r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe"
         )
 
+    for candidate in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+        if os.path.exists(candidate):
+            return candidate
+
     system_ffmpeg = _shutil.which("ffmpeg")
     if system_ffmpeg:
         return system_ffmpeg
@@ -1564,6 +1568,15 @@ def _resolve_ffmpeg_executable() -> str:
             return bundled_ffmpeg
     except Exception as e:
         print(f"[Music] static-ffmpeg fallback unavailable: {e}")
+
+    try:
+        import imageio_ffmpeg
+        imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if imageio_exe and os.path.exists(imageio_exe):
+            print(f"[Music] Using imageio-ffmpeg binary: {imageio_exe}")
+            return imageio_exe
+    except Exception as e:
+        print(f"[Music] imageio-ffmpeg fallback unavailable: {e}")
 
     return "ffmpeg"
 
