@@ -294,27 +294,33 @@ def _bj_render_image_file(
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
 
-    card_w, card_h = 78, 112
-    gap = 14
-    side = 22
-    top = 18
-    row_gap = 34
-    label_h = 18
+    card_w, card_h = 92, 132
+    gap = 20
+    side = 26
+    top = 22
+    row_gap = 42
+    label_h = 22
 
     visible_dealer = dealer if not hide_dealer else dealer[:1] + [dealer[1]]
     max_cards = max(len(player), len(visible_dealer), 2)
     width = side * 2 + max_cards * card_w + (max_cards - 1) * gap
-    height = top * 2 + label_h + card_h + row_gap + label_h + card_h + 18
+    height = top * 2 + label_h + card_h + row_gap + label_h + card_h + 24
 
-    img = Image.new("RGB", (width, height), (9, 61, 46))
+    img = Image.new("RGBA", (width, height), (7, 48, 36, 255))
     draw = ImageDraw.Draw(img)
 
-    draw.rounded_rectangle((6, 6, width - 6, height - 6), radius=18, outline=(88, 170, 132), width=3)
+    # Subtle felt panel layers for depth.
+    draw.rounded_rectangle((3, 3, width - 3, height - 3), radius=22, fill=(10, 66, 49, 255), outline=(88, 170, 132, 235), width=3)
+    draw.rounded_rectangle((12, 12, width - 12, height - 12), radius=18, fill=(8, 58, 44, 255), outline=(43, 108, 82, 220), width=2)
+
+    # Very light felt texture lines.
+    for y in range(18, height - 18, 8):
+        draw.line((18, y, width - 18, y), fill=(16, 78, 58, 32), width=1)
 
     try:
-        font_rank = ImageFont.truetype("DejaVuSans.ttf", 18)
-        font_center = ImageFont.truetype("DejaVuSans.ttf", 24)
-        font_label = ImageFont.truetype("DejaVuSans.ttf", 14)
+        font_rank = ImageFont.truetype("DejaVuSans.ttf", 22)
+        font_center = ImageFont.truetype("DejaVuSans.ttf", 30)
+        font_label = ImageFont.truetype("DejaVuSans.ttf", 16)
     except Exception:
         font_rank = ImageFont.load_default()
         font_center = ImageFont.load_default()
@@ -325,33 +331,47 @@ def _bj_render_image_file(
             return (210, 44, 44)
         return (28, 28, 28)
 
+    def _draw_card_glow(x: int, y: int, glow_rgb: tuple[int, int, int]) -> None:
+        glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        for spread, alpha in ((10, 52), (7, 78), (4, 110)):
+            gd.rounded_rectangle(
+                (x - spread, y - spread, x + card_w + spread, y + card_h + spread),
+                radius=12 + spread,
+                outline=(glow_rgb[0], glow_rgb[1], glow_rgb[2], alpha),
+                width=2,
+            )
+        img.alpha_composite(glow)
+
     def draw_card(x: int, y: int, rank: str, suit: str, hidden: bool = False) -> None:
         if hidden:
-            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=9, fill=(28, 110, 78), outline=(72, 180, 128), width=2)
-            draw.text((x + 25, y + 44), "🂠", fill=(228, 243, 235), font=font_center)
+            _draw_card_glow(x, y, (76, 190, 142))
+            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=11, fill=(26, 110, 79, 255), outline=(96, 208, 160, 255), width=3)
+            draw.text((x + 31, y + 49), "🂠", fill=(228, 243, 235), font=font_center)
             return
 
-        draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=9, fill=(247, 247, 247), outline=(36, 140, 92), width=2)
+        _draw_card_glow(x, y, (118, 225, 174))
+        draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=11, fill=(248, 248, 248, 255), outline=(56, 176, 120, 255), width=3)
         c = suit_color(suit)
         suit_char = "♥" if "♥" in suit else "♦" if "♦" in suit else "♣" if "♣" in suit else "♠"
-        draw.text((x + 8, y + 6), rank, fill=c, font=font_rank)
-        draw.text((x + card_w // 2 - 8, y + card_h // 2 - 12), suit_char, fill=c, font=font_center)
-        draw.text((x + card_w - 20, y + card_h - 24), rank, fill=c, font=font_rank)
+        draw.text((x + 9, y + 7), rank, fill=c, font=font_rank)
+        draw.text((x + card_w // 2 - 10, y + card_h // 2 - 14), suit_char, fill=c, font=font_center)
+        draw.text((x + card_w - 26, y + card_h - 30), rank, fill=c, font=font_rank)
 
-    draw.text((side, top), "Dealer", fill=(222, 241, 230), font=font_label)
+    draw.text((side, top), "Dealer", fill=(226, 245, 235), font=font_label)
     y_dealer = top + label_h
     for i, (r, s) in enumerate(dealer):
         x = side + i * (card_w + gap)
         draw_card(x, y_dealer, r, s, hidden=(hide_dealer and i == 1))
 
-    draw.text((side, y_dealer + card_h + row_gap - 16), "You", fill=(222, 241, 230), font=font_label)
+    draw.text((side, y_dealer + card_h + row_gap - 18), "You", fill=(226, 245, 235), font=font_label)
     y_player = y_dealer + card_h + row_gap
     for i, (r, s) in enumerate(player):
         x = side + i * (card_w + gap)
         draw_card(x, y_player, r, s, hidden=False)
 
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.convert("RGB").save(buf, format="PNG")
     buf.seek(0)
     return discord.File(buf, filename="blackjack_table.png")
 
