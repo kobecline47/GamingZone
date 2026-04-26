@@ -323,8 +323,7 @@ class Client(commands.Bot):
             print(f'Synced {len(synced_global)} global slash commands.')
             for g in self.guilds:
                 try:
-                    # Ensure global commands are available immediately in each guild.
-                    self.tree.copy_global_to(guild=g)
+                    # Sync guild-only commands without copying globals into guild scope.
                     synced_guild = await self.tree.sync(guild=g)
                     print(f'Synced {len(synced_guild)} slash commands to guild {g.id}')
                 except Exception as e:
