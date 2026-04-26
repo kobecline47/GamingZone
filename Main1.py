@@ -1671,28 +1671,38 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     try:
         import yt_dlp
 
+        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        base_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'default_search': 'ytsearch',
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'http_headers': {'User-Agent': 'Mozilla/5.0'},
+            'source_address': '0.0.0.0',
+        }
+        if cookiefile and os.path.exists(cookiefile):
+            base_opts['cookiefile'] = cookiefile
+            print(f"[yt-dlp] Using cookie file: {cookiefile}")
+
         attempts = [
             {
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'format': 'bestaudio/best',
-                'noplaylist': True,
+                **base_opts,
                 'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
             },
             {
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch',
-                'format': 'bestaudio/best',
-                'noplaylist': True,
+                **base_opts,
                 'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
+            },
+            {
+                **base_opts,
+                'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'web']}},
             },
         ]
 
         queries = [
             f"ytsearch{max_results}:{query}",
-            f"ytsearchdate{max_results}:{query}",
+            f"ytsearch{max_results}:{query} audio",
         ]
 
         for ydl_opts in attempts:
@@ -1742,9 +1752,10 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
 def _invidious_search(query: str, max_results: int) -> list[dict]:
     """Last fallback using public Invidious instances."""
     instances = [
-        'https://invidious.nerdvpn.de',
-        'https://invidious.jing.rocks',
         'https://inv.nadeko.net',
+        'https://invidious.privacyredirect.com',
+        'https://invidious.fdn.fr',
+        'https://invidious.projectsegfau.lt',
         'https://yewtu.be',
     ]
 
@@ -1754,7 +1765,13 @@ def _invidious_search(query: str, max_results: int) -> list[dict]:
                 f"{base}/api/v1/search?q={urllib.parse.quote(query)}"
                 f"&type=video&sort_by=relevance"
             )
-            req = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = urllib.request.Request(
+                search_url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                },
+            )
             with urllib.request.urlopen(req, timeout=6) as resp:
                 data = json.loads(resp.read().decode(errors='ignore'))
 
@@ -1768,7 +1785,13 @@ def _invidious_search(query: str, max_results: int) -> list[dict]:
 
                 try:
                     details_url = f"{base}/api/v1/videos/{vid}"
-                    req2 = urllib.request.Request(details_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    req2 = urllib.request.Request(
+                        details_url,
+                        headers={
+                            'User-Agent': 'Mozilla/5.0',
+                            'Accept': 'application/json',
+                        },
+                    )
                     with urllib.request.urlopen(req2, timeout=6) as resp2:
                         details = json.loads(resp2.read().decode(errors='ignore'))
 
@@ -1776,6 +1799,11 @@ def _invidious_search(query: str, max_results: int) -> list[dict]:
                         f for f in details.get('adaptiveFormats', [])
                         if 'audio' in str(f.get('type', '')).lower() and f.get('url')
                     ]
+                    if not audio_formats:
+                        audio_formats = [
+                            f for f in details.get('formatStreams', [])
+                            if 'audio' in str(f.get('type', '')).lower() and f.get('url')
+                        ]
                     if not audio_formats:
                         continue
                     best_audio = max(audio_formats, key=lambda f: int(f.get('bitrate', 0) or 0))
@@ -2092,7 +2120,10 @@ async def play(interaction: discord.Interaction, query: str):
 
         results = await search_youtube(query, max_results=1)
         if not results:
-            await interaction.followup.send("No results found.")
+            await interaction.followup.send(
+                "No playable results found right now. YouTube is likely rate-limiting bot traffic. "
+                "If this persists on Railway, set `YTDLP_COOKIES_PATH` to a valid cookies.txt file path and retry."
+            )
             return
         r = results[0]
         entry = SongEntry(
