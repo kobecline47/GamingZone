@@ -17,7 +17,6 @@ import urllib.parse
 import json
 import traceback
 import time
-import base64
 import ctypes.util
 import tempfile
 import nacl.secret  # required for discord voice (PyNaCl)
@@ -314,8 +313,9 @@ class Client(commands.Bot):
             for g in self.guilds:
                 try:
                     await _ensure_log_channels(g)
-                    await _ensure_feature_channels(g)
-                    await _post_verify_embed(g)
+                    # Don't auto-create feature channels on restart — only when admin runs /setupchannels
+                    # await _ensure_feature_channels(g)
+                    # await _post_verify_embed(g)
                 except Exception as e:
                     print(f"[Logs] Could not create channels in {g.name}: {e}")
 
@@ -338,7 +338,7 @@ class Client(commands.Bot):
     async def on_guild_join(self, guild: discord.Guild):
         try:
             await _ensure_log_channels(guild)
-            await _ensure_feature_channels(guild)
+            # Feature channels will be created manually via /setupchannels admin command
             await _post_verify_embed(guild)
             synced = await self.tree.sync(guild=guild)
             print(f"[Guild Join] Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
@@ -668,25 +668,48 @@ class GamerVerifyButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        member = interaction.guild.get_member(interaction.user.id)
-        gamer_role = discord.utils.get(interaction.guild.roles, name=GAMER_ROLE_NAME)
-        if not gamer_role:
+        try:
+            member = interaction.guild.get_member(interaction.user.id)
+            if not member:
+                # Member not cached — fetch from API
+                try:
+                    member = await interaction.guild.fetch_member(interaction.user.id)
+                except discord.NotFound:
+                    await interaction.response.send_message(
+                        "❌ Could not find your member data. Try rejoining the server.",
+                        ephemeral=True,
+                    )
+                    return
+            
+            gamer_role = discord.utils.get(interaction.guild.roles, name=GAMER_ROLE_NAME)
+            if not gamer_role:
+                await interaction.response.send_message(
+                    "❌ The Gamer role doesn't exist yet — ask an admin to run `/setupchannels`.",
+                    ephemeral=True,
+                )
+                return
+            
+            if gamer_role in member.roles:
+                await interaction.response.send_message(
+                    "✅ You're already verified and have full access!", ephemeral=True
+                )
+                return
+            
+            await member.add_roles(gamer_role, reason="Self-verification via embed button")
+            await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
             await interaction.response.send_message(
-                "❌ The Gamer role doesn't exist yet — ask an admin to run `/setupchannels`.",
+                f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!",
                 ephemeral=True,
             )
-            return
-        if gamer_role in member.roles:
-            await interaction.response.send_message(
-                "✅ You're already verified and have full access!", ephemeral=True
-            )
-            return
-        await member.add_roles(gamer_role, reason="Self-verification via embed button")
-        await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
-        await interaction.response.send_message(
-            f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!",
-            ephemeral=True,
-        )
+        except Exception as e:
+            print(f"[Verify Button] Error: {e}")
+            try:
+                await interaction.response.send_message(
+                    f"❌ Verification failed: {str(e)[:100]}",
+                    ephemeral=True,
+                )
+            except:
+                pass
 
 class GamerVerifyView(discord.ui.View):
     def __init__(self):
@@ -1608,11 +1631,7 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
-    """Try pytubefix first; fall back to yt-dlp and Invidious if blocked.
-
-    Important: do not resolve streams here. Stream resolution can trigger anti-bot
-    checks; we resolve a playable URL right before playback instead.
-    """
+    """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
     try:
         results = Search(query)
     except Exception as e:
@@ -1622,12 +1641,14 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     entries = []
     for yt in results.videos[:max_results]:
         try:
-            entries.append({
-                'title': yt.title,
-                'url': yt.watch_url,
-                'webpage_url': yt.watch_url,
-                'duration': yt.length or 0,
-            })
+            stream = yt.streams.filter(only_audio=True).order_by('abr').last()
+            if stream:
+                entries.append({
+                    'title': yt.title,
+                    'url': stream.url,
+                    'webpage_url': yt.watch_url,
+                    'duration': yt.length or 0,
+                })
         except Exception as e:
             print(f'[Search] pytubefix item failed: {e}')
             continue
@@ -1642,23 +1663,29 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     try:
         import yt_dlp
 
-        base_opts = _get_ytdlp_auth_opts()
+        attempts = [
+            {
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'ytsearch',
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            },
+            {
+                'quiet': True,
+                'no_warnings': True,
+                'default_search': 'ytsearch',
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
+            },
+        ]
 
-        # Use extract_flat=True so yt-dlp returns ONLY metadata (title/id/duration)
-        # without trying to resolve formats. Format resolution happens later in _resolve_playable_url.
-        search_opts = {
-            **base_opts,
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-            'noplaylist': True,
-            'skip_download': True,
-        }
-
-        # Fetch more candidates than needed so restricted videos can be skipped
-        search_count = max(max_results * 3, 9)
-        queries = [f"ytsearch{search_count}:{query}"]
-        attempts = [search_opts]
+        queries = [
+            f"ytsearch{max_results}:{query}",
+            f"ytsearchdate{max_results}:{query}",
+        ]
 
         for ydl_opts in attempts:
             try:
@@ -1667,21 +1694,27 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                         try:
                             info = ydl.extract_info(q, download=False)
                             entries = []
-                            for entry in (info.get('entries') or []):
+                            for entry in info.get('entries', [])[:max_results]:
                                 if not entry:
                                     continue
-                                vid_id = entry.get('id', '')
-                                webpage_url = entry.get('webpage_url') or (f"https://www.youtube.com/watch?v={vid_id}" if vid_id else '')
-                                if not webpage_url:
+                                try:
+                                    stream_url = entry.get('url')
+                                    webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
+                                    if not stream_url or 'youtube.com/watch' in str(stream_url):
+                                        resolved = ydl.extract_info(webpage_url, download=False)
+                                        stream_url = resolved.get('url')
+                                    if not stream_url:
+                                        continue
+
+                                    entries.append({
+                                        'title': entry.get('title', 'Unknown title'),
+                                        'url': stream_url,
+                                        'webpage_url': webpage_url,
+                                        'duration': entry.get('duration', 0),
+                                    })
+                                except Exception as e:
+                                    print(f'[yt-dlp] entry failed: {e}')
                                     continue
-                                entries.append({
-                                    'title': entry.get('title', 'Unknown title'),
-                                    'url': webpage_url,
-                                    'webpage_url': webpage_url,
-                                    'duration': entry.get('duration', 0),
-                                })
-                                if len(entries) >= max_results:
-                                    break
 
                             if entries:
                                 return entries
@@ -1698,143 +1731,14 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
         return _invidious_search(query, max_results)
 
 
-def _extract_video_id(url: str) -> str | None:
-    try:
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.netloc.lower()
-        if 'youtu.be' in host:
-            vid = parsed.path.strip('/').split('/')[0]
-            return vid or None
-        if 'youtube.com' in host:
-            qs = urllib.parse.parse_qs(parsed.query)
-            vid = (qs.get('v') or [None])[0]
-            return vid
-    except Exception:
-        return None
-    return None
-
-
-def _get_ytdlp_auth_opts() -> dict:
-    """Build yt-dlp auth options from environment variables.
-
-    Supported env vars:
-    - YTDLP_COOKIES_FILE or YTDLP_COOKIES_TXT: absolute path to Netscape-format cookies.txt
-    - YTDLP_COOKIES_B64: base64-encoded cookies.txt content
-    """
-    opts: dict = {}
-
-    cookies_path = (
-        os.getenv('YTDLP_COOKIES_FILE', '').strip()
-        or os.getenv('YTDLP_COOKIES_TXT', '').strip()
-    )
-    cookies_b64 = os.getenv('YTDLP_COOKIES_B64', '').strip()
-
-    if cookies_path and os.path.exists(cookies_path):
-        opts['cookiefile'] = cookies_path
-        print(f"[yt-dlp] Using cookie file: {cookies_path}")
-        return opts
-
-    if cookies_b64:
-        try:
-            raw = base64.b64decode(cookies_b64)
-            tmp_path = os.path.join(tempfile.gettempdir(), 'ytdlp_cookies.txt')
-            with open(tmp_path, 'wb') as f:
-                f.write(raw)
-            opts['cookiefile'] = tmp_path
-            print(f"[yt-dlp] Using cookie file from YTDLP_COOKIES_B64: {tmp_path}")
-            return opts
-        except Exception as e:
-            print(f"[yt-dlp] Failed to decode YTDLP_COOKIES_B64: {e}")
-
-    return opts
-
-
-def _resolve_playable_url(url: str) -> str | None:
-    """Resolve a direct audio URL when we only have a YouTube watch URL."""
-    lower = (url or '').lower()
-    if 'googlevideo.com' in lower:
-        return url
-    if 'youtube.com/watch' not in lower and 'youtu.be/' not in lower:
-        return url
-
-    # 0) If the URL is already a direct audio stream (not a YouTube page), use it as-is.
-    if url and not any(x in url for x in ('youtube.com/watch', 'youtu.be/', 'youtube.com/shorts')):
-        if url.startswith('http') and '.' in url:
-            return url
-
-    # 1) Try yt-dlp direct extraction from the watch URL.
-    try:
-        import yt_dlp
-        base_opts = _get_ytdlp_auth_opts()
-        attempts = [
-            {
-                **base_opts,
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['web']}},
-            },
-            {
-                **base_opts,
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
-            },
-            {
-                **base_opts,
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-            },
-        ]
-        for opts in attempts:
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    audio_url = info.get('url')
-                    if audio_url:
-                        return audio_url
-            except Exception as e:
-                print(f'[Resolve] yt-dlp direct failed: {e}')
-                continue
-    except Exception as e:
-        print(f'[Resolve] yt-dlp unavailable: {e}')
-
-    # 2) Try Invidious stream resolution by video id.
-    vid = _extract_video_id(url)
-    if not vid:
-        return None
-    instances = [
-        'https://inv.nadeko.net',
-        'https://invidious.nerdvpn.de',
-        'https://yewtu.be',
-        'https://invidious.privacydev.net',
-    ]
-    for base in instances:
-        try:
-            details_url = f"{base}/api/v1/videos/{vid}"
-            req = urllib.request.Request(details_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                details = json.loads(resp.read().decode(errors='ignore'))
-            audio_formats = [
-                f for f in details.get('adaptiveFormats', [])
-                if 'audio' in str(f.get('type', '')).lower() and f.get('url')
-            ]
-            if audio_formats:
-                best = max(audio_formats, key=lambda f: int(f.get('bitrate', 0) or 0))
-                return best['url']
-        except Exception as e:
-            print(f'[Resolve] Invidious failed {base}: {e}')
-            continue
-    return None
-
-
 def _invidious_search(query: str, max_results: int) -> list[dict]:
     """Last fallback using public Invidious instances."""
-    instances = _get_invidious_instances()
+    instances = [
+        'https://invidious.nerdvpn.de',
+        'https://invidious.jing.rocks',
+        'https://inv.nadeko.net',
+        'https://yewtu.be',
+    ]
 
     for base in instances:
         try:
@@ -1888,61 +1792,6 @@ def _invidious_search(query: str, max_results: int) -> list[dict]:
 
     return []
 
-
-def _get_invidious_instances() -> list[str]:
-    """Return a list of likely working Invidious instances.
-
-    We fetch the public registry first, then append static fallbacks.
-    """
-    static_fallbacks = [
-        'https://inv.nadeko.net',
-        'https://invidious.nerdvpn.de',
-        'https://yewtu.be',
-        'https://invidious.privacydev.net',
-        'https://invidious.fdn.fr',
-        'https://iv.ggtyler.dev',
-    ]
-
-    discovered: list[str] = []
-    try:
-        req = urllib.request.Request(
-            'https://api.invidious.io/instances.json?sort_by=health',
-            headers={'User-Agent': 'Mozilla/5.0'},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode(errors='ignore'))
-
-        for row in data:
-            try:
-                domain = row[0]
-                meta = row[1]
-                if not isinstance(meta, dict):
-                    continue
-                if not meta.get('api', False):
-                    continue
-                if meta.get('type') == 'onion':
-                    continue
-                uri = meta.get('uri') or f"https://{domain}"
-                if not str(uri).startswith('https://'):
-                    continue
-                discovered.append(uri.rstrip('/'))
-                if len(discovered) >= 12:
-                    break
-            except Exception:
-                continue
-    except Exception as e:
-        print(f"[Invidious] Could not fetch instance registry: {e}")
-
-    combined = discovered + static_fallbacks
-    deduped: list[str] = []
-    seen = set()
-    for inst in combined:
-        if inst in seen:
-            continue
-        seen.add(inst)
-        deduped.append(inst)
-    return deduped
-
 def _cleanup_song_file(song: SongEntry | None) -> None:
     if not song or not song.local_path:
         return
@@ -1971,13 +1820,8 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
     if state.queue and state.voice_client and state.voice_client.is_connected():
         state.current = state.queue.popleft()
-        playable_url = _resolve_playable_url(state.current.url)
-        if not playable_url:
-            print(f"[Music] Could not resolve playable URL for: {state.current.url}")
-            asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
-            return
         source = discord.FFmpegOpusAudio(
-            playable_url,
+            state.current.url,
             executable=FFMPEG_OPTS['executable'],
             before_options=FFMPEG_OPTS['before_options'],
             options=f"-vn -af volume={state.volume}",
@@ -2205,27 +2049,18 @@ async def play(interaction: discord.Interaction, query: str):
         else:
             state.voice_client = vc
 
-        results = await search_youtube(query, max_results=5)
+        results = await search_youtube(query, max_results=1)
         if not results:
             await interaction.followup.send("No results found.")
             return
-        entry = None
-        for r in results:
-            candidate = SongEntry(
-                title=r.get('title', 'Unknown'),
-                url=r['url'],
-                webpage_url=r.get('webpage_url', ''),
-                duration=r.get('duration', 0),
-                requester=interaction.user,
-            )
-            test_url = await asyncio.get_running_loop().run_in_executor(None, lambda c=candidate: _resolve_playable_url(c.url))
-            if test_url:
-                candidate.url = test_url
-                entry = candidate
-                break
-        if not entry:
-            await interaction.followup.send("Couldn't find a playable version of that song. Try a different search.")
-            return
+        r = results[0]
+        entry = SongEntry(
+            title=r.get('title', 'Unknown'),
+            url=r['url'],
+            webpage_url=r.get('webpage_url', ''),
+            duration=r.get('duration', 0),
+            requester=interaction.user,
+        )
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
             play_next(interaction.guild.id, asyncio.get_running_loop())
