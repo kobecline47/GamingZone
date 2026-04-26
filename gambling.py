@@ -368,6 +368,22 @@ def _bj_embed_with_image(
     embed = _bj_embed(player, dealer, bet, uid, status, hide_dealer=hide_dealer, bonus=bonus)
     img_file = _bj_render_image_file(player, dealer, hide_dealer)
     if img_file:
+        # Remove old text-based hand rendering to avoid showing duplicate tables.
+        embed.clear_fields()
+        pv = _hand_value(player)
+        dv = _hand_value(dealer) if not hide_dealer else "?"
+        embed.add_field(name="🤖 Dealer", value=f"Total: **{dv}**", inline=True)
+        embed.add_field(name="👤 You", value=f"Total: **{pv}**", inline=True)
+        embed.add_field(name="💰 Bet", value=f"`{bet:,}` PokeCoins", inline=True)
+        embed.add_field(name="💼 Balance", value=f"`{_wallet(uid):,}` PokeCoins", inline=True)
+        if status:
+            embed.add_field(name="📊 Status", value=status, inline=False)
+        if bonus:
+            embed.add_field(name="⚡ CASINO BONUS", value="🎊 **3× MULTIPLIER** applied!", inline=False)
+        if hide_dealer:
+            embed.set_footer(
+                text="👊 Hit = draw  •  ✋ Stand = end turn  •  💰 Double = 2× bet + 1 card  •  ✂️ Split = split pairs"
+            )
         embed.set_image(url="attachment://blackjack_table.png")
     return embed, img_file
 
