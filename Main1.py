@@ -2118,8 +2118,9 @@ class MusicControlView(discord.ui.View):
         button.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
         button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
+        autoplay_note = "I'll queue related songs automatically!" if state.autoplay else ""
         await interaction.followup.send(
-            f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {\"I'll queue related songs automatically!\" if state.autoplay else ''}",
+            f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {autoplay_note}",
             ephemeral=True
         )
 
