@@ -40,12 +40,15 @@ BONUS_CHANCE = 0.07          # 7 % chance of 3× bonus on any win
 DAILY_RANGE  = (200, 600)    # min / max free daily coins
 WORK_RANGE   = (120, 420)    # min / max coins from /work
 WORK_COOLDOWN_SECONDS = 3_600
+HEIST_JOIN_SECONDS = 10
+HEIST_MAX_PLAYERS = 4
 
 # ── Per-user casino stats ─────────────────────────────────────────────────────
 # uid → {games, won, lost, biggest_win, streak, streak_type}
 CASINO_STATS: dict[int, dict] = {}
 _DAILY_CD:    dict[int, float] = {}   # uid → epoch of last /daily claim
 _WORK_CD:     dict[int, float] = {}   # uid → epoch of last /work claim
+_HEIST_BUSY_CHANNELS: set[int] = set()
 
 _WORK_EVENTS = [
     "You refereed a ranked Pokemon battle and earned **{coins:,}** PokeCoins.",
@@ -58,6 +61,28 @@ _WORK_EVENTS = [
     "You trained rookie trainers on type matchups and earned **{coins:,}** PokeCoins.",
     "You commentated a gym challenge stream and got tipped **{coins:,}** PokeCoins.",
     "You maintained the slots cabinet reels and were paid **{coins:,}** PokeCoins.",
+]
+
+_HEIST_TARGETS = {
+    "store": {"name": "🏪 Corner Store",    "mult": 1.5,  "success_base": 0.75, "color": 0x2ECC71},
+    "bank":  {"name": "🏦 City Bank",       "mult": 3.0,  "success_base": 0.50, "color": 0x3498DB},
+    "vault": {"name": "💎 Diamond Vault",   "mult": 7.0,  "success_base": 0.30, "color": 0x9B59B6},
+    "fed":   {"name": "🚀 Federal Reserve", "mult": 15.0, "success_base": 0.12, "color": 0xFF4444},
+}
+
+_HEIST_CREW_ROLES = [
+    ("🔓 Safecracker", 0.10),
+    ("🚗 Getaway Driver", 0.08),
+    ("💻 Hacker", 0.12),
+    ("🔫 Muscle", 0.05),
+    ("🕵️ Inside Man", 0.15),
+]
+
+_HEIST_STAGES = [
+    ("🚨 Disabling the alarm", "bypassed silently", "alarm triggered!"),
+    ("📦 Cracking the vault", "cracked in seconds", "silent alert sent"),
+    ("🏃 Loading the loot", "bags loaded, ready to go", "guard spotted movement"),
+    ("🚗 Making the getaway", "vanished into the night", "police gave chase"),
 ]
 
 
@@ -1405,6 +1430,292 @@ def _heist_render_image_file(title: str, lines: list[str], accent: tuple[int, in
     return _save_panel_file(img, "heist_panel.png")
 
 
+def _heist_lobby_embed(
+    host: discord.Member,
+    bet: int,
+    target_key: str,
+    participants: list[discord.Member],
+    *,
+    closed: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    target = _HEIST_TARGETS[target_key]
+    payout_each = int(bet * target["mult"])
+    crew_total = payout_each * len(participants)
+    roster_lines = [f"• {member.display_name}" for member in participants[:HEIST_MAX_PLAYERS]]
+    embed = discord.Embed(
+        title="🦹 Heist Lobby",
+        description=(
+            f"**Captain:** {host.mention}\n"
+            f"**Target:** {target['name']}\n"
+            f"**Bet per player:** `{bet:,}` PokeCoins\n"
+            f"**Potential payout each:** `{payout_each:,}` PokeCoins\n"
+            f"**Potential crew haul:** `{crew_total:,}` PokeCoins"
+        ),
+        color=target["color"],
+    )
+    embed.add_field(name=f"👥 Crew ({len(participants)}/{HEIST_MAX_PLAYERS})", value="\n".join(roster_lines), inline=False)
+    if closed:
+        embed.set_footer(text="Lobby locked. Executing the heist...")
+    else:
+        embed.add_field(name="How it works", value="Press Join Heist to risk the same bet and ride the same outcome.", inline=False)
+        embed.set_footer(text=f"Crew entry closes in {HEIST_JOIN_SECONDS} seconds.")
+
+    panel_lines = [
+        f"Target: {target['name']}",
+        f"Bet each: {bet:,}",
+        f"Payout each: {payout_each:,}",
+        f"Crew haul: {crew_total:,}",
+    ]
+    panel_lines.extend(member.display_name for member in participants[:5])
+    return embed, _heist_render_image_file("Heist Lobby", panel_lines, (103, 152, 214))
+
+
+async def _run_heist_sequence(
+    message: discord.Message,
+    participants: list[discord.Member],
+    bet: int,
+    target_key: str,
+) -> None:
+    target = _HEIST_TARGETS[target_key]
+    valid_participants: list[discord.Member] = []
+    dropped_names: list[str] = []
+
+    for member in participants:
+        err = _check_bet(member.id, bet)
+        if err is None:
+            valid_participants.append(member)
+        else:
+            dropped_names.append(member.display_name)
+
+    if not valid_participants:
+        cancel_embed = discord.Embed(
+            title="🦹 Heist Cancelled",
+            description="Nobody in the crew still had enough PokeCoins when the lobby closed.",
+            color=0xE74C3C,
+        )
+        await message.edit(embed=cancel_embed, attachments=[], view=None)
+        return
+
+    extra_players = max(0, len(valid_participants) - 1)
+    player_bonus = min(extra_players * 0.08, 0.24)
+
+    plan_lines = [
+        f"Target: {target['name']}",
+        f"Crew size: {len(valid_participants)}",
+        f"Bet each: {bet:,}",
+        f"Base success: {int(target['success_base'] * 100)}%",
+        f"Crew synergy: +{int(player_bonus * 100)}%",
+        "Studying the blueprints...",
+        "Sourcing equipment...",
+        "Recruiting the crew...",
+    ]
+    if dropped_names:
+        plan_lines.append(f"Dropped: {', '.join(dropped_names[:2])}")
+
+    plan_embed = discord.Embed(
+        title="🦹 Heist Planning Room",
+        description=(
+            f"**Target:** {target['name']}\n"
+            f"**Crew size:** `{len(valid_participants)}`\n"
+            f"**Bet per player:** `{bet:,}` PokeCoins\n"
+            f"**Potential payout each:** `{int(bet * target['mult']):,}` PokeCoins\n"
+            f"**Base success chance:** `{int(target['success_base'] * 100)}%`\n"
+            f"**Crew synergy bonus:** `+{int(player_bonus * 100)}%`"
+        ),
+        color=target["color"],
+    )
+    if dropped_names:
+        plan_embed.add_field(name="Late Drops", value=", ".join(dropped_names), inline=False)
+    plan_embed.add_field(
+        name="Crew",
+        value="\n".join(member.mention for member in valid_participants),
+        inline=False,
+    )
+    plan_embed.set_footer(text="Heist begins in 2 seconds...")
+    plan_img = _heist_render_image_file("Heist Planning Room", plan_lines, (103, 152, 214))
+    if plan_img:
+        plan_embed.set_image(url="attachment://heist_panel.png")
+        await message.edit(embed=plan_embed, attachments=[plan_img], view=None)
+    else:
+        await message.edit(embed=plan_embed, attachments=[], view=None)
+    await asyncio.sleep(2)
+
+    crew_lines = [f"👥 Crew synergy bonus applied (+{int(player_bonus * 100)}%)"]
+    success_mod = player_bonus
+    for member in valid_participants:
+        crew_lines.append(f"✅ {member.display_name} is locked in")
+    for role, bonus_val in _HEIST_CREW_ROLES:
+        if random.random() < 0.65:
+            crew_lines.append(f"✅ {role} joined  (+{int(bonus_val * 100)}%)")
+            success_mod += bonus_val
+        else:
+            crew_lines.append(f"❌ {role} bailed last minute")
+    final_chance = min(target["success_base"] + success_mod, 0.95)
+
+    crew_embed = discord.Embed(
+        title="🦹 Crew Assembled",
+        description="\n".join(crew_lines[:12]),
+        color=target["color"],
+    )
+    crew_embed.add_field(name="📊 Final Success Chance", value=f"`{int(final_chance * 100)}%`", inline=True)
+    crew_embed.add_field(name="👥 Crew Size", value=f"`{len(valid_participants)}`", inline=True)
+    crew_embed.add_field(name="💰 Bet Each", value=f"`{bet:,}` PokeCoins", inline=True)
+    crew_embed.set_footer(text="Executing the heist...")
+    crew_img = _heist_render_image_file("Crew Assembled", crew_lines, (120, 178, 137))
+    if crew_img:
+        crew_embed.set_image(url="attachment://heist_panel.png")
+        await message.edit(embed=crew_embed, attachments=[crew_img])
+    else:
+        await message.edit(embed=crew_embed, attachments=[])
+    await asyncio.sleep(2.5)
+
+    stage_lines: list[str] = []
+    heist_failed = False
+    for action, ok_txt, fail_txt in _HEIST_STAGES:
+        if random.random() < final_chance:
+            stage_lines.append(f"✅ **{action}** — {ok_txt}")
+        else:
+            stage_lines.append(f"❌ **{action}** — {fail_txt}!")
+            heist_failed = True
+            break
+
+    succeeded = (random.random() < final_chance) and not heist_failed
+    bonus = False
+    payout_each = int(bet * target["mult"])
+    total_change = 0
+    if succeeded:
+        bonus = random.random() < BONUS_CHANCE
+        if bonus:
+            payout_each *= 3
+        for member in valid_participants:
+            WALLETS[member.id] = _wallet(member.id) + payout_each
+            _record_win(member.id, payout_each)
+        total_change = payout_each * len(valid_participants)
+        color = 0xFFD700 if bonus else 0x2ECC71
+        outcome = (
+            f"💰 **HEIST SUCCESSFUL!** The crew escaped clean!\n\n"
+            f"**+{payout_each:,} PokeCoins each**"
+            + (" 🌟 **3× BONUS!**" if bonus else "")
+        )
+        title = f"🦹 {target['name']} — SUCCESS!"
+    else:
+        if random.random() < 0.30:
+            recovered = int(bet * 0.4)
+            loss_each = bet - recovered
+            for member in valid_participants:
+                WALLETS[member.id] = _wallet(member.id) - loss_each
+                _record_loss(member.id, loss_each)
+            total_change = -(loss_each * len(valid_participants))
+            color = 0xFFAA00
+            outcome = (
+                f"⚠️ **PARTIAL ESCAPE!** Crew scattered — some loot was recovered.\n\n"
+                f"**Lost {loss_each:,} PokeCoins each** (recovered `{recovered:,}` each)"
+            )
+            title = f"🦹 {target['name']} — PARTIAL"
+        else:
+            for member in valid_participants:
+                WALLETS[member.id] = _wallet(member.id) - bet
+                _record_loss(member.id, bet)
+            total_change = -(bet * len(valid_participants))
+            color = 0xFF4444
+            outcome = (
+                f"🚨 **BUSTED!** Cops caught the crew and seized everything.\n\n"
+                f"**−{bet:,} PokeCoins each** confiscated."
+            )
+            title = f"🦹 {target['name']} — BUSTED!"
+
+    result_embed = discord.Embed(title=title, color=color)
+    result_embed.add_field(name="📋 Heist Log", value="\n".join(stage_lines) or "Couldn't even get inside.", inline=False)
+    result_embed.add_field(name="📊 Outcome", value=outcome, inline=False)
+    result_embed.add_field(name="👥 Crew", value=" ".join(member.mention for member in valid_participants), inline=False)
+    result_embed.add_field(name="💰 Bet Each", value=f"`{bet:,}` PokeCoins", inline=True)
+    result_embed.add_field(name="🏴 Crew Net", value=f"`{total_change:+,}` PokeCoins", inline=True)
+    if bonus:
+        result_embed.add_field(name="⚡ CASINO BONUS", value="🎊 **3× MULTIPLIER** applied to the whole crew payout!", inline=False)
+    result_embed.set_footer(text="Plan your next heist with /heist!  |  /daily for free coins")
+
+    result_lines = stage_lines if stage_lines else ["Could not get inside."]
+    result_lines.append(f"Crew: {len(valid_participants)}")
+    result_lines.append(outcome.replace("\n", " "))
+    heist_accent = (97, 185, 125) if "SUCCESS" in title else ((196, 154, 78) if "PARTIAL" in title else (198, 79, 79))
+    result_img = _heist_render_image_file(title, result_lines, heist_accent)
+    if result_img:
+        result_embed.set_image(url="attachment://heist_panel.png")
+        await message.edit(embed=result_embed, attachments=[result_img])
+    else:
+        await message.edit(embed=result_embed, attachments=[])
+
+
+class HeistLobbyView(discord.ui.View):
+    def __init__(self, host: discord.Member, bet: int, target_key: str):
+        super().__init__(timeout=HEIST_JOIN_SECONDS)
+        self.host = host
+        self.bet = bet
+        self.target_key = target_key
+        self.participants: dict[int, discord.Member] = {host.id: host}
+        self.message: discord.Message | None = None
+        self._lock = asyncio.Lock()
+        self._resolved = False
+
+    async def _refresh_message(self, *, closed: bool = False) -> None:
+        if self.message is None:
+            return
+        embed, img = _heist_lobby_embed(self.host, self.bet, self.target_key, list(self.participants.values()), closed=closed)
+        if img:
+            embed.set_image(url="attachment://heist_panel.png")
+            await self.message.edit(embed=embed, attachments=[img], view=None if closed else self)
+        else:
+            await self.message.edit(embed=embed, attachments=[], view=None if closed else self)
+
+    async def _launch(self) -> None:
+        async with self._lock:
+            if self._resolved:
+                return
+            self._resolved = True
+            self.stop()
+            await self._refresh_message(closed=True)
+        try:
+            if self.message is not None:
+                await _run_heist_sequence(self.message, list(self.participants.values()), self.bet, self.target_key)
+        finally:
+            if self.message is not None and self.message.channel:
+                _HEIST_BUSY_CHANNELS.discard(self.message.channel.id)
+
+    async def on_timeout(self) -> None:
+        await self._launch()
+
+    @discord.ui.button(label="Join Heist", style=discord.ButtonStyle.success, emoji="🦹")
+    async def join_heist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self._resolved:
+                await interaction.response.send_message("❌ This heist lobby is already closed.", ephemeral=True)
+                return
+            if interaction.user.id in self.participants:
+                await interaction.response.send_message("✅ You're already in this crew.", ephemeral=True)
+                return
+            if len(self.participants) >= HEIST_MAX_PLAYERS:
+                await interaction.response.send_message("❌ This crew is already full.", ephemeral=True)
+                return
+            err = _check_bet(interaction.user.id, self.bet)
+            if err:
+                await interaction.response.send_message(err, ephemeral=True)
+                return
+            self.participants[interaction.user.id] = interaction.user
+            await interaction.response.send_message(
+                f"✅ You joined the heist crew for **{self.bet:,}** PokeCoins.",
+                ephemeral=True,
+            )
+            await self._refresh_message()
+
+    @discord.ui.button(label="Start Now", style=discord.ButtonStyle.primary, emoji="🚀")
+    async def start_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host.id:
+            await interaction.response.send_message("❌ Only the heist captain can start early.", ephemeral=True)
+            return
+        await interaction.response.send_message("🚀 Launching the heist now...", ephemeral=True)
+        await self._launch()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 🎯  PLINKO  (new)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1465,7 +1776,7 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
     embed.add_field(name="🎲 /dice <bet>",              value="Roll higher than the bot. Tie = push.",                                inline=False)
     embed.add_field(name="🃏 /highlow <bet>",           value="Is the next card **higher** or **lower**? Correct = **1.9×**!",       inline=False)
     embed.add_field(name="🎯 /plinko <bet>",            value="Drop the ball through 8 rows of pegs. Up to **3× your bet!**",        inline=False)
-    embed.add_field(name="🦹 /heist <bet> <target>",    value="Multi-stage crew heist. Pick your target — up to **15× your bet!**",  inline=False)
+    embed.add_field(name="🦹 /heist <bet> <target>",    value="Start a crew heist friends can join. Pick your target — up to **15× your bet!**",  inline=False)
     embed.add_field(name="📅 /daily",                   value=f"Claim **{DAILY_RANGE[0]}–{DAILY_RANGE[1]} free PokeCoins** every 24 hours!", inline=False)
     embed.add_field(name="💼 /work",                    value=f"Do a random game-themed job for **{WORK_RANGE[0]}–{WORK_RANGE[1]}** coins (1h cooldown)", inline=False)
     if s["games"] > 0:
@@ -1551,7 +1862,7 @@ def setup_gambling(bot: commands.Bot) -> None:
                 "🎲 `/dice` — Roll higher than the bot!\n"
                 "🃏 `/highlow` — Higher or lower card? **1.9×** payout!\n"
                 "🎯 `/plinko` — Drop the ball, up to **3×** payout!\n"
-                "🦹 `/heist` — Multi-stage heist, up to **15×** payout!\n"
+                "🦹 `/heist` — Start a joinable crew heist, up to **15×** payout!\n"
                 "📅 `/daily` — Claim free coins every 24 hours!\n"
                 "� `/work` — Do random game jobs for extra PokeCoins!\n"
                 "�📊 `/casinomenu` — See all games & your personal stats!\n\n"
@@ -2082,156 +2393,24 @@ def setup_gambling(bot: commands.Bot) -> None:
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-
-        targets = {
-            "store": {"name": "🏪 Corner Store",    "mult": 1.5,  "success_base": 0.75, "color": 0x2ECC71},
-            "bank":  {"name": "🏦 City Bank",       "mult": 3.0,  "success_base": 0.50, "color": 0x3498DB},
-            "vault": {"name": "💎 Diamond Vault",   "mult": 7.0,  "success_base": 0.30, "color": 0x9B59B6},
-            "fed":   {"name": "🚀 Federal Reserve", "mult": 15.0, "success_base": 0.12, "color": 0xFF4444},
-        }
-        t = targets[target]
-
-        # Phase 1 — Planning
-        plan_embed = discord.Embed(
-            title="🦹 Heist Planning Room",
-            description=(
-                f"**Target:** {t['name']}\n"
-                f"**Potential payout:** `{int(bet * t['mult']):,}` PokeCoins  (**×{t['mult']}**)\n"
-                f"**Base success chance:** `{int(t['success_base'] * 100)}%`\n\n"
-                "```\n"
-                "  🗺️  Studying the blueprints...\n"
-                "  🔧  Sourcing equipment...\n"
-                "  🕵️  Recruiting the crew...\n"
-                "```"
-            ),
-            color=t["color"],
-        )
-        plan_embed.set_footer(text="Heist begins in 2 seconds...")
-        plan_lines = [
-            f"Target: {t['name']}",
-            f"Potential payout: {int(bet * t['mult']):,} (x{t['mult']})",
-            f"Base success: {int(t['success_base'] * 100)}%",
-            "Studying the blueprints...",
-            "Sourcing equipment...",
-            "Recruiting the crew...",
-        ]
-        plan_img = _heist_render_image_file("Heist Planning Room", plan_lines, (103, 152, 214))
-        if plan_img:
-            plan_embed.set_image(url="attachment://heist_panel.png")
-            await interaction.response.send_message(embed=plan_embed, file=plan_img)
-        else:
-            await interaction.response.send_message(embed=plan_embed)
-        await asyncio.sleep(2)
-
-        # Phase 2 — Crew assembly
-        crew_members = [
-            ("🔓 Safecracker",   0.10),
-            ("🚗 Getaway Driver", 0.08),
-            ("💻 Hacker",         0.12),
-            ("🔫 Muscle",         0.05),
-            ("🕵️ Inside Man",    0.15),
-        ]
-        crew_lines  = []
-        success_mod = 0.0
-        for role, bonus_val in crew_members:
-            if random.random() < 0.65:
-                crew_lines.append(f"✅ {role} joined  (+{int(bonus_val * 100)}%)")
-                success_mod += bonus_val
-            else:
-                crew_lines.append(f"❌ {role} bailed last minute")
-        final_chance = min(t["success_base"] + success_mod, 0.92)
-
-        crew_embed = discord.Embed(
-            title="🦹 Crew Assembled",
-            description="\n".join(crew_lines),
-            color=t["color"],
-        )
-        crew_embed.add_field(
-            name="📊 Final Success Chance", value=f"`{int(final_chance * 100)}%`", inline=True
-        )
-        crew_embed.add_field(name="💰 Bet", value=f"`{bet:,}` PokeCoins", inline=True)
-        crew_embed.set_footer(text="Executing the heist...")
-        crew_img = _heist_render_image_file("Crew Assembled", crew_lines, (120, 178, 137))
-        if crew_img:
-            crew_embed.set_image(url="attachment://heist_panel.png")
-            await interaction.edit_original_response(embed=crew_embed, attachments=[crew_img])
-        else:
-            await interaction.edit_original_response(embed=crew_embed)
-        await asyncio.sleep(2.5)
-
-        # Phase 3 — Heist stages
-        stages = [
-            ("🚨 Disabling the alarm",   "bypassed silently",        "alarm triggered!"),
-            ("📦 Cracking the vault",    "cracked in seconds",        "silent alert sent"),
-            ("🏃 Loading the loot",      "bags loaded, ready to go",  "guard spotted movement"),
-            ("🚗 Making the getaway",    "vanished into the night",   "police gave chase"),
-        ]
-        stage_lines   = []
-        heist_failed  = False
-        for action, ok_txt, fail_txt in stages:
-            if random.random() < final_chance:
-                stage_lines.append(f"✅ **{action}** — {ok_txt}")
-            else:
-                stage_lines.append(f"❌ **{action}** — {fail_txt}!")
-                heist_failed = True
-                break
-
-        # Phase 4 — Result
-        succeeded = (random.random() < final_chance) and not heist_failed
-        bonus     = False
-        if succeeded:
-            base    = int(bet * t["mult"])
-            payout, bonus = _bonus_roll(uid, base)
-            WALLETS[uid]  = _wallet(uid) + payout
-            _record_win(uid, payout)
-            color   = 0xFFD700 if bonus else 0x2ECC71
-            outcome = (
-                f"💰 **HEIST SUCCESSFUL!** The crew escaped clean!\n\n"
-                f"**+{payout:,} PokeCoins**"
-                + (" 🌟 **3× BONUS!**" if bonus else "")
+        if interaction.channel_id in _HEIST_BUSY_CHANNELS:
+            await interaction.response.send_message(
+                "❌ A heist lobby is already active in this channel. Let that crew finish first.",
+                ephemeral=True,
             )
-            title = f"🦹 {t['name']} — SUCCESS!"
-        else:
-            if random.random() < 0.30:
-                recovered = int(bet * 0.4)
-                WALLETS[uid] = _wallet(uid) - (bet - recovered)
-                _record_loss(uid, bet - recovered)
-                color   = 0xFFAA00
-                outcome = (
-                    f"⚠️ **PARTIAL ESCAPE!** Crew scattered — recovered some loot.\n\n"
-                    f"**Lost {bet - recovered:,} PokeCoins** (recovered `{recovered:,}`)"
-                )
-                title = f"🦹 {t['name']} — PARTIAL"
-            else:
-                WALLETS[uid] = _wallet(uid) - bet
-                _record_loss(uid, bet)
-                color   = 0xFF4444
-                outcome = (
-                    f"🚨 **BUSTED!** Cops caught the crew and seized everything.\n\n"
-                    f"**−{bet:,} PokeCoins** confiscated."
-                )
-                title = f"🦹 {t['name']} — BUSTED!"
+            return
 
-        result_embed = discord.Embed(title=title, color=color)
-        result_embed.add_field(
-            name="📋 Heist Log",
-            value="\n".join(stage_lines) or "Couldn't even get inside.",
-            inline=False,
-        )
-        result_embed.add_field(name="📊 Outcome",  value=outcome,                          inline=False)
-        result_embed.add_field(name="💰 Bet",       value=f"`{bet:,}` PokeCoins",           inline=True)
-        result_embed.add_field(name="💼 Balance",   value=f"`{_wallet(uid):,}` PokeCoins",  inline=True)
-        if bonus:
-            result_embed.add_field(
-                name="⚡ CASINO BONUS", value="🎊 **3× MULTIPLIER** applied to your payout!", inline=False
-            )
-        result_embed.set_footer(text="Plan your next heist with /heist!  |  /daily for free coins")
-        result_lines = stage_lines if stage_lines else ["Could not get inside."]
-        result_lines.append(outcome.replace("\n", " "))
-        heist_accent = (97, 185, 125) if "SUCCESS" in title else ((196, 154, 78) if "PARTIAL" in title else (198, 79, 79))
-        result_img = _heist_render_image_file(title, result_lines, heist_accent)
-        if result_img:
-            result_embed.set_image(url="attachment://heist_panel.png")
-            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
-        else:
-            await interaction.edit_original_response(embed=result_embed)
+        _HEIST_BUSY_CHANNELS.add(interaction.channel_id)
+        view = HeistLobbyView(interaction.user, bet, target)
+        embed, lobby_img = _heist_lobby_embed(interaction.user, bet, target, [interaction.user])
+
+        try:
+            if lobby_img:
+                embed.set_image(url="attachment://heist_panel.png")
+                await interaction.response.send_message(embed=embed, file=lobby_img, view=view)
+            else:
+                await interaction.response.send_message(embed=embed, view=view)
+            view.message = await interaction.original_response()
+        except Exception:
+            _HEIST_BUSY_CHANNELS.discard(interaction.channel_id)
+            raise
