@@ -414,25 +414,44 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
     else:
         draw.text((640, 180), p2["emoji"], fill=(255, 255, 255, 255), font=_load_font(84, bold=True))
 
-    # One-frame move impact flash on the side that got hit.
+    # One-frame move effects (hit, miss, no-effect) on the battlefield.
     if fx:
+        kind = fx.get("kind", "hit")
         side = fx.get("side")
         base_color = fx.get("color", (255, 96, 96))
         crit = bool(fx.get("crit"))
         cx, cy = (285, 260) if side == "p1" else (675, 185)
-        burst_size = 180 if crit else 145
-        for i in range(7):
-            alpha = max(18, (140 if crit else 105) - i * 16)
-            pad = i * 13
-            draw.ellipse(
-                (cx - burst_size // 2 - pad, cy - burst_size // 2 - pad, cx + burst_size // 2 + pad, cy + burst_size // 2 + pad),
-                outline=(base_color[0], base_color[1], base_color[2], alpha),
-                width=3 if i < 3 else 2,
-            )
-        draw.line((cx - 70, cy, cx + 70, cy), fill=(255, 255, 255, 130), width=2)
-        draw.line((cx, cy - 70, cx, cy + 70), fill=(255, 255, 255, 130), width=2)
-        if crit:
-            draw.text((cx - 28, cy - 104), "CRIT!", fill=(255, 235, 130, 255), font=_load_font(22, bold=True))
+        if kind == "hit":
+            burst_size = 180 if crit else 145
+            for i in range(7):
+                alpha = max(18, (140 if crit else 105) - i * 16)
+                pad = i * 13
+                draw.ellipse(
+                    (cx - burst_size // 2 - pad, cy - burst_size // 2 - pad, cx + burst_size // 2 + pad, cy + burst_size // 2 + pad),
+                    outline=(base_color[0], base_color[1], base_color[2], alpha),
+                    width=3 if i < 3 else 2,
+                )
+            draw.line((cx - 70, cy, cx + 70, cy), fill=(255, 255, 255, 130), width=2)
+            draw.line((cx, cy - 70, cx, cy + 70), fill=(255, 255, 255, 130), width=2)
+            if crit:
+                draw.text((cx - 28, cy - 104), "CRIT!", fill=(255, 235, 130, 255), font=_load_font(22, bold=True))
+        elif kind == "miss":
+            for i in range(4):
+                pad = i * 8
+                draw.arc((cx - 78 - pad, cy - 58 - pad, cx + 78 + pad, cy + 58 + pad), 205, 335, fill=(220, 220, 220, 140 - i * 22), width=3)
+            draw.line((cx - 64, cy - 22, cx + 64, cy + 22), fill=(240, 240, 240, 150), width=3)
+            draw.text((cx - 26, cy - 80), "MISS", fill=(230, 230, 230, 230), font=_load_font(18, bold=True))
+        elif kind == "no_effect":
+            for i in range(6):
+                alpha = max(18, 120 - i * 17)
+                pad = i * 11
+                draw.rounded_rectangle(
+                    (cx - 72 - pad, cy - 62 - pad, cx + 72 + pad, cy + 62 + pad),
+                    radius=24,
+                    outline=(140, 220, 255, alpha),
+                    width=2,
+                )
+            draw.text((cx - 58, cy - 82), "NO EFFECT", fill=(170, 235, 255, 235), font=_load_font(15, bold=True))
 
     # Trainer portraits near each side of the arena.
     p1_active = battle["turn"] == "p1"
@@ -855,15 +874,27 @@ def setup_pokemon(bot: commands.Bot) -> None:
         # ── Attack (unless blocked by status) ──
         if not blocked:
             damage, effectiveness, is_crit = _calculate_damage(attacker, defender, actual_move)
+            move_type = MOVES.get(actual_move, {}).get("type", "Normal")
+            fx_color = TYPE_COLORS.get(move_type, (255, 96, 96))
 
             if effectiveness == "missed":
                 lines.append(f"{attacker['emoji']} **{attacker['name']}** used **{actual_move}**... but it **missed**!")
+                battle["_fx"] = {
+                    "side": attacker_side,
+                    "kind": "miss",
+                    "color": (210, 210, 210),
+                    "crit": False,
+                }
             elif effectiveness == "no effect":
                 lines.append(f"{attacker['emoji']} **{attacker['name']}** used **{actual_move}**... it has **no effect**!")
+                battle["_fx"] = {
+                    "side": defender_side,
+                    "kind": "no_effect",
+                    "color": (140, 220, 255),
+                    "crit": False,
+                }
             else:
                 defender["current_hp"] = max(0, defender["current_hp"] - damage)
-                move_type = MOVES.get(actual_move, {}).get("type", "Normal")
-                fx_color = TYPE_COLORS.get(move_type, (255, 96, 96))
                 battle["_fx"] = {
                     "side": defender_side,
                     "kind": "hit",
