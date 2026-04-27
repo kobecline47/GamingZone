@@ -211,6 +211,7 @@ POKEDEX_IDS = {
 }
 
 SPRITE_CACHE: dict[str, Image.Image | None] = {}
+AVATAR_CACHE: dict[str, Image.Image | None] = {}
 
 
 def _load_font(size: int = 24, bold: bool = False) -> ImageFont.FreeTypeFont | None:
@@ -266,6 +267,26 @@ def _load_pokemon_sprite(name: str) -> Image.Image | None:
     return sprite.copy() if sprite else None
 
 
+def _load_remote_image(url: str | None) -> Image.Image | None:
+    """Fetch and cache a remote image URL as RGBA."""
+    if not Image or not url:
+        return None
+
+    if url in AVATAR_CACHE:
+        cached = AVATAR_CACHE[url]
+        return cached.copy() if cached else None
+
+    try:
+        with urllib.request.urlopen(url, timeout=4) as response:
+            data = response.read()
+        remote = Image.open(io.BytesIO(data)).convert("RGBA")
+    except Exception:
+        remote = None
+
+    AVATAR_CACHE[url] = remote
+    return remote.copy() if remote else None
+
+
 def _paste_battle_sprite(
     img: Image.Image,
     sprite: Image.Image,
@@ -292,6 +313,36 @@ def _paste_battle_sprite(
     img.alpha_composite(resized, (x, y))
 
 
+def _paste_round_portrait(
+    img: Image.Image,
+    portrait: Image.Image,
+    *,
+    center_x: int,
+    center_y: int,
+    size: int,
+    ring_color: tuple[int, int, int, int],
+) -> None:
+    """Paste a circular portrait with a colored ring."""
+    if not portrait:
+        return
+
+    scaled = portrait.resize((size, size), Image.Resampling.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.ellipse((0, 0, size - 1, size - 1), fill=255)
+
+    clipped = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    clipped.paste(scaled, (0, 0), mask)
+    img.alpha_composite(clipped, (center_x - size // 2, center_y - size // 2))
+
+    ring = ImageDraw.Draw(img)
+    ring.ellipse(
+        (center_x - size // 2 - 3, center_y - size // 2 - 3, center_x + size // 2 + 2, center_y + size // 2 + 2),
+        outline=ring_color,
+        width=4,
+    )
+
+
 def _pokemon_battle_render(battle: dict) -> discord.File | None:
     """Render a 960x600 battle scene with both Pokemon, HP bars, types, and statuses."""
     if not Image or not ImageDraw:
@@ -306,6 +357,8 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
 
     p1, p2 = battle["p1"], battle["p2"]
     p1_name, p2_name = battle["p1_name"], battle["p2_name"]
+    p1_avatar = _load_remote_image(battle.get("p1_avatar_url"))
+    p2_avatar = _load_remote_image(battle.get("p2_avatar_url"))
 
     # Arena floor so sprites visibly appear on a battlefield.
     draw.ellipse((140, 310, 430, 460), fill=(70, 90, 70, 235), outline=(120, 140, 120, 255), width=3)
@@ -322,6 +375,12 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
         _paste_battle_sprite(img, p2_sprite, center_x=675, baseline_y=250, max_w=210, max_h=210, flip=True)
     else:
         draw.text((640, 180), p2["emoji"], fill=(255, 255, 255, 255), font=_load_font(84, bold=True))
+
+    # Trainer portraits near each side of the arena.
+    if p1_avatar:
+        _paste_round_portrait(img, p1_avatar, center_x=100, center_y=305, size=82, ring_color=(80, 180, 255, 255))
+    if p2_avatar:
+        _paste_round_portrait(img, p2_avatar, center_x=860, center_y=225, size=82, ring_color=(255, 150, 70, 255))
 
     # ─── Left side: Player 1 ────────────────────────────────────────────────
     # Pokemon name + emoji
@@ -628,6 +687,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
             "p2_id":    user_id,
             "p1_name":  challenger_user.display_name,
             "p2_name":  interaction.user.display_name,
+            "p1_avatar_url": str(challenger_user.display_avatar.url),
+            "p2_avatar_url": str(interaction.user.display_avatar.url),
             "turn":     first_turn,
             "channel_id": channel_id,
         }
