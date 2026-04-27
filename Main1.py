@@ -61,6 +61,9 @@ class Client(commands.Bot):
         except Exception:
             inviter = None
 
+        # Initialize onboarding profile for the new member.
+        _onboarding_profile(member.guild.id, member.id)
+
         # ── Greeting card in #welcome ─────────────────────────────────────
         welcome_ch = discord.utils.get(member.guild.text_channels, name="welcome")
         if not welcome_ch:
@@ -77,7 +80,8 @@ class Client(commands.Bot):
                 description=(
                     f"Welcome, {member.mention}! 👋\n\n"
                     f"You are member **#{member.guild.member_count}**.\n"
-                    f"Check out the rules and enjoy your stay!"
+                    f"Check out the rules and enjoy your stay!\n"
+                    "Run **/onboarding** to unlock your starter progression bonus."
                 ),
                 color=0x2ECC71,
             )
@@ -196,6 +200,13 @@ class Client(commands.Bot):
                 minutes = int((time.time() - join_t) / 60)
                 vm = VOICE_MINUTES.setdefault(gid, {})
                 vm[uid] = vm.get(uid, 0) + minutes
+                _refresh_voice_onboarding_step(gid, uid)
+                bonus_msg = _maybe_award_onboarding_bonus(gid, uid)
+                if bonus_msg:
+                    try:
+                        await member.send(bonus_msg)
+                    except Exception:
+                        pass
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if before.author.bot or not before.guild:
@@ -795,6 +806,22 @@ _FREE_GAMES_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pos
 POSTED_FREE_GAMES: set[int] = set()  # app IDs already announced
 FREE_GAMES_FIRST_CYCLE = True
 
+# ── LFG + RSVP Tracking ─────────────────────────────────────────────────────
+LFG_POSTS: dict[int, dict] = {}  # message_id -> metadata
+LFG_RSVP: dict[int, dict[str, set[int]]] = {}  # message_id -> {join|maybe|pass -> set(user_ids)}
+
+# ── Onboarding Progression ──────────────────────────────────────────────────
+_ONBOARDING_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "onboarding_progress.json")
+ONBOARDING_PROGRESS: dict[str, dict[str, dict[str, bool]]] = {}
+ONBOARDING_STEPS: list[tuple[str, str]] = [
+    ("read_rules", "Read server rules"),
+    ("verified", f"Verify in #{VERIFY_CHANNEL_NAME}"),
+    ("set_gamertag", "Save at least one gamertag"),
+    ("post_lfg", "Create your first LFG post"),
+    ("voice_10m", "Spend 10+ minutes in voice"),
+]
+ONBOARDING_REWARD_XP = 250
+
 # ── Ticket SLA Monitoring ───────────────────────────────────────────────────
 TICKET_SLA_HOURS = 6
 TICKET_SLA_REMINDER_COOLDOWN_MINUTES = 180
@@ -822,7 +849,103 @@ def _save_posted_games() -> None:
     except Exception as e:
         print(f"[FreeGames] Warning: could not save posted games list — {e}")
 
+
+def _load_onboarding_progress() -> None:
+    global ONBOARDING_PROGRESS
+    if not os.path.exists(_ONBOARDING_SAVE):
+        return
+    try:
+        with open(_ONBOARDING_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            ONBOARDING_PROGRESS = data
+    except Exception as e:
+        print(f"[Onboarding] Warning: could not load onboarding progress — {e}")
+
+
+def _save_onboarding_progress() -> None:
+    try:
+        with open(_ONBOARDING_SAVE, "w", encoding="utf-8") as f:
+            json.dump(ONBOARDING_PROGRESS, f)
+    except Exception as e:
+        print(f"[Onboarding] Warning: could not save onboarding progress — {e}")
+
+
+def _onboarding_profile(guild_id: int, user_id: int) -> dict[str, bool]:
+    gid = str(guild_id)
+    uid = str(user_id)
+    guild_map = ONBOARDING_PROGRESS.setdefault(gid, {})
+    profile = guild_map.setdefault(uid, {})
+    changed = False
+    for key, _label in ONBOARDING_STEPS:
+        if key not in profile:
+            profile[key] = False
+            changed = True
+    if "rewarded" not in profile:
+        profile["rewarded"] = False
+        changed = True
+    if changed:
+        _save_onboarding_progress()
+    return profile
+
+
+def _mark_onboarding_step(guild_id: int, user_id: int, step: str, value: bool = True) -> bool:
+    profile = _onboarding_profile(guild_id, user_id)
+    before = bool(profile.get(step, False))
+    profile[step] = value
+    if before != value:
+        _save_onboarding_progress()
+        return True
+    return False
+
+
+def _refresh_voice_onboarding_step(guild_id: int, user_id: int) -> bool:
+    mins = VOICE_MINUTES.get(guild_id, {}).get(user_id, 0)
+    done = mins >= 10
+    return _mark_onboarding_step(guild_id, user_id, "voice_10m", done)
+
+
+def _onboarding_completion_status(guild_id: int, user_id: int) -> tuple[int, int]:
+    profile = _onboarding_profile(guild_id, user_id)
+    total = len(ONBOARDING_STEPS)
+    done = sum(1 for key, _ in ONBOARDING_STEPS if profile.get(key))
+    return done, total
+
+
+def _maybe_award_onboarding_bonus(guild_id: int, user_id: int) -> str | None:
+    profile = _onboarding_profile(guild_id, user_id)
+    all_done = all(profile.get(key, False) for key, _ in ONBOARDING_STEPS)
+    if not all_done or profile.get("rewarded", False):
+        return None
+    profile["rewarded"] = True
+    _save_onboarding_progress()
+    old_lvl, new_lvl, leveled = _add_xp(guild_id, user_id, ONBOARDING_REWARD_XP)
+    if leveled:
+        return f"🎉 Onboarding complete! You earned **{ONBOARDING_REWARD_XP} XP** and reached **Level {new_lvl}**."
+    return f"🎉 Onboarding complete! You earned **{ONBOARDING_REWARD_XP} XP**."
+
+
+def _ensure_lfg_rsvp(message_id: int) -> dict[str, set[int]]:
+    data = LFG_RSVP.setdefault(message_id, {"join": set(), "maybe": set(), "pass": set()})
+    for key in ("join", "maybe", "pass"):
+        data.setdefault(key, set())
+    return data
+
+
+def _lfg_rsvp_text(message_id: int, players_needed: int) -> str:
+    data = _ensure_lfg_rsvp(message_id)
+    going = len(data["join"])
+    maybe = len(data["maybe"])
+    passing = len(data["pass"])
+    return (
+        f"✅ Going: **{going}/{players_needed}**\n"
+        f"❔ Maybe: **{maybe}**\n"
+        f"❌ Pass: **{passing}**"
+    )
+
+
 _load_posted_games()
+_load_onboarding_progress()
 
 # ── Personal Space (private temp voice channels) ──────────────────────────────
 # guild_id -> lobby voice channel ID that triggers creation
@@ -950,15 +1073,97 @@ class GamerVerifyButton(discord.ui.Button):
             await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
         except Exception as e:
             print(f"[Verify] WARNING: failed to log role change: {e}")
-        await interaction.followup.send(
-            f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!",
-            ephemeral=True,
-        )
+
+        _mark_onboarding_step(interaction.guild.id, member.id, "verified", True)
+        bonus_msg = _maybe_award_onboarding_bonus(interaction.guild.id, member.id)
+
+        final_msg = f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!"
+        if bonus_msg:
+            final_msg += f"\n{bonus_msg}"
+        await interaction.followup.send(final_msg, ephemeral=True)
 
 class GamerVerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(GamerVerifyButton())
+
+
+def _update_lfg_embed_rsvp(embed: discord.Embed, message_id: int, players_needed: int) -> None:
+    text = _lfg_rsvp_text(message_id, players_needed)
+    for idx, field in enumerate(embed.fields):
+        if field.name == "RSVP":
+            embed.set_field_at(idx, name="RSVP", value=text, inline=False)
+            return
+    embed.add_field(name="RSVP", value=text, inline=False)
+
+
+class LFGRSVPView(discord.ui.View):
+    def __init__(self, host_id: int, players_needed: int):
+        super().__init__(timeout=86400)
+        self.host_id = host_id
+        self.players_needed = players_needed
+        self.message_id: int | None = None
+
+    async def _apply_choice(self, interaction: discord.Interaction, choice: str):
+        if self.message_id is None:
+            await interaction.response.send_message("This LFG session is not active anymore.", ephemeral=True)
+            return
+        post = LFG_POSTS.get(self.message_id)
+        if not post or not post.get("active", True):
+            await interaction.response.send_message("This LFG post is already closed.", ephemeral=True)
+            return
+
+        data = _ensure_lfg_rsvp(self.message_id)
+        uid = interaction.user.id
+        for key in ("join", "maybe", "pass"):
+            data[key].discard(uid)
+        data[choice].add(uid)
+
+        message = interaction.message
+        if message and message.embeds:
+            embed = message.embeds[0]
+            _update_lfg_embed_rsvp(embed, self.message_id, self.players_needed)
+            await message.edit(embed=embed, view=self)
+
+        labels = {"join": "You're marked as **Going**.", "maybe": "You're marked as **Maybe**.", "pass": "You're marked as **Pass**."}
+        await interaction.response.send_message(labels[choice], ephemeral=True)
+
+    @discord.ui.button(label="Going", emoji="✅", style=discord.ButtonStyle.success)
+    async def btn_join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply_choice(interaction, "join")
+
+    @discord.ui.button(label="Maybe", emoji="❔", style=discord.ButtonStyle.secondary)
+    async def btn_maybe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply_choice(interaction, "maybe")
+
+    @discord.ui.button(label="Pass", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def btn_pass(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply_choice(interaction, "pass")
+
+    @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger)
+    async def btn_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.message_id is None:
+            await interaction.response.send_message("This LFG session is not active anymore.", ephemeral=True)
+            return
+        if interaction.user.id != self.host_id and not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("Only the host (or a moderator) can close this LFG post.", ephemeral=True)
+            return
+
+        post = LFG_POSTS.get(self.message_id)
+        if post:
+            post["active"] = False
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        message = interaction.message
+        if message and message.embeds:
+            embed = message.embeds[0]
+            embed.color = 0x7F8C8D
+            embed.set_footer(text="LFG closed")
+            await message.edit(embed=embed, view=self)
+        await interaction.response.send_message("LFG closed.", ephemeral=True)
 
 
 class TicketView(discord.ui.View):
@@ -2693,7 +2898,29 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
 # ── Gaming Community Commands ─────────────────────────────────────────────────
 
 @client.tree.command(name="lfg", description="Post a Looking For Group message", guild=GUILD_ID)
-async def lfg(interaction: discord.Interaction, game: str, players_needed: int, description: str = ""):
+@app_commands.describe(
+    game="Game title",
+    players_needed="How many players you still need",
+    description="Optional details (mode, rank, notes)",
+    platform="Optional platform (PC, Xbox, PS5, etc.)",
+    region="Optional region (NA, EU, OCE, etc.)",
+    start_in_minutes="How soon you are starting",
+    mic_required="Whether mic is required"
+)
+async def lfg(
+    interaction: discord.Interaction,
+    game: str,
+    players_needed: int,
+    description: str = "",
+    platform: str = "",
+    region: str = "",
+    start_in_minutes: int = 0,
+    mic_required: bool = False,
+):
+    if players_needed < 1 or players_needed > 20:
+        await interaction.response.send_message("Players needed must be between 1 and 20.", ephemeral=True)
+        return
+
     channel = discord.utils.get(interaction.guild.text_channels, name=LFG_CHANNEL_NAME)
     if not channel:
         try:
@@ -2701,15 +2928,104 @@ async def lfg(interaction: discord.Interaction, game: str, players_needed: int, 
         except Exception:
             await interaction.response.send_message("Could not find or create a looking-for-group channel.", ephemeral=True)
             return
+
     embed = discord.Embed(title=f"🎮 LFG — {game}", color=0x00BFFF)
-    embed.add_field(name="Player", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Host", value=interaction.user.mention, inline=True)
     embed.add_field(name="Players Needed", value=str(players_needed), inline=True)
+    embed.add_field(name="Mic", value="Required" if mic_required else "Optional", inline=True)
+    if platform.strip():
+        embed.add_field(name="Platform", value=platform.strip(), inline=True)
+    if region.strip():
+        embed.add_field(name="Region", value=region.strip().upper(), inline=True)
+    if start_in_minutes > 0:
+        start_ts = int((discord.utils.utcnow() + datetime.timedelta(minutes=start_in_minutes)).timestamp())
+        embed.add_field(name="Start Time", value=f"<t:{start_ts}:R>", inline=True)
     if description:
         embed.add_field(name="Details", value=description, inline=False)
-    embed.set_footer(text="React or DM to join!")
-    msg = await channel.send(embed=embed)
-    await msg.add_reaction("✅")
-    await interaction.response.send_message(f"LFG post created in {channel.mention}!", ephemeral=True)
+
+    view = LFGRSVPView(host_id=interaction.user.id, players_needed=players_needed)
+    msg = await channel.send(embed=embed, view=view)
+    view.message_id = msg.id
+
+    LFG_POSTS[msg.id] = {
+        "guild_id": interaction.guild.id,
+        "channel_id": channel.id,
+        "host_id": interaction.user.id,
+        "game": game.strip().lower(),
+        "platform": platform.strip().lower(),
+        "region": region.strip().lower(),
+        "players_needed": players_needed,
+        "active": True,
+        "created_at": time.time(),
+        "jump_url": msg.jump_url,
+    }
+    _ensure_lfg_rsvp(msg.id)
+
+    embed = msg.embeds[0]
+    _update_lfg_embed_rsvp(embed, msg.id, players_needed)
+    await msg.edit(embed=embed, view=view)
+
+    _mark_onboarding_step(interaction.guild.id, interaction.user.id, "post_lfg", True)
+    bonus_msg = _maybe_award_onboarding_bonus(interaction.guild.id, interaction.user.id)
+
+    response = f"LFG post created in {channel.mention}!"
+    if bonus_msg:
+        response += f"\n{bonus_msg}"
+    await interaction.response.send_message(response, ephemeral=True)
+
+
+@client.tree.command(name="lfgfilter", description="Browse active LFG posts with filters", guild=GUILD_ID)
+@app_commands.describe(
+    game="Filter by game title (optional)",
+    platform="Filter by platform (optional)",
+    region="Filter by region (optional)",
+    host="Filter by host (optional)",
+)
+async def lfgfilter(
+    interaction: discord.Interaction,
+    game: str = "",
+    platform: str = "",
+    region: str = "",
+    host: discord.Member = None,
+):
+    gid = interaction.guild.id
+    game_q = game.strip().lower()
+    platform_q = platform.strip().lower()
+    region_q = region.strip().lower()
+
+    matches: list[dict] = []
+    for mid, post in LFG_POSTS.items():
+        if post.get("guild_id") != gid or not post.get("active", True):
+            continue
+        if game_q and game_q not in post.get("game", ""):
+            continue
+        if platform_q and platform_q not in post.get("platform", ""):
+            continue
+        if region_q and region_q not in post.get("region", ""):
+            continue
+        if host and post.get("host_id") != host.id:
+            continue
+        matches.append(post)
+
+    matches.sort(key=lambda p: p.get("created_at", 0), reverse=True)
+
+    if not matches:
+        await interaction.response.send_message("No active LFG posts match those filters right now.", ephemeral=True)
+        return
+
+    lines = []
+    for post in matches[:10]:
+        host_member = interaction.guild.get_member(post["host_id"])
+        host_name = host_member.mention if host_member else f"<@{post['host_id']}>"
+        lines.append(
+            f"• **{post.get('game', 'unknown').title()}** | {host_name} | "
+            f"need **{post.get('players_needed', '?')}** | [Open Post]({post.get('jump_url', '')})"
+        )
+
+    embed = discord.Embed(title="🎯 Active LFG Matches", description="\n".join(lines), color=0x3498DB)
+    embed.set_footer(text=f"Showing {min(len(matches), 10)} of {len(matches)} active posts")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @client.tree.command(name="gamertag", description="Set your gamertag for a platform", guild=GUILD_ID)
 async def gamertag_set(interaction: discord.Interaction, platform: str, tag: str):
@@ -2719,6 +3035,12 @@ async def gamertag_set(interaction: discord.Interaction, platform: str, tag: str
     embed = discord.Embed(title="🎮 Gamertag Saved", color=0x00FF7F)
     embed.add_field(name="Platform", value=platform_clean, inline=True)
     embed.add_field(name="Tag", value=tag, inline=True)
+
+    _mark_onboarding_step(interaction.guild.id, interaction.user.id, "set_gamertag", True)
+    bonus_msg = _maybe_award_onboarding_bonus(interaction.guild.id, interaction.user.id)
+    if bonus_msg:
+        embed.add_field(name="Progress", value=bonus_msg, inline=False)
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @client.tree.command(name="gamertags", description="View a player's gamertags", guild=GUILD_ID)
@@ -2733,6 +3055,53 @@ async def gamertags_view(interaction: discord.Interaction, user: discord.Member 
     for platform, tag in tags.items():
         embed.add_field(name=platform, value=tag, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="onboarding", description="View your onboarding progression", guild=GUILD_ID)
+async def onboarding(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    if user and not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("Manage Server permission required to view other members' onboarding.", ephemeral=True)
+        return
+
+    _refresh_voice_onboarding_step(interaction.guild.id, target.id)
+    profile = _onboarding_profile(interaction.guild.id, target.id)
+    done, total = _onboarding_completion_status(interaction.guild.id, target.id)
+
+    lines = []
+    for key, label in ONBOARDING_STEPS:
+        mark = "✅" if profile.get(key, False) else "⬜"
+        lines.append(f"{mark} {label}")
+
+    progress_pct = int((done / total) * 100) if total else 0
+    embed = discord.Embed(title=f"🚀 Onboarding Progress — {target.display_name}", color=0x2ECC71)
+    embed.description = "\n".join(lines)
+    embed.add_field(name="Progress", value=f"**{done}/{total}** ({progress_pct}%)", inline=True)
+    embed.add_field(name="Reward", value=f"**{ONBOARDING_REWARD_XP} XP** on completion", inline=True)
+    embed.add_field(
+        name="Quick Actions",
+        value="Use `/onboardingdone read_rules` after reading rules.\nOther steps auto-complete when you verify, set gamertag, post LFG, and hit 10m voice.",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="onboardingdone", description="Mark a manual onboarding step as completed", guild=GUILD_ID)
+@app_commands.choices(step=[
+    app_commands.Choice(name="Read server rules", value="read_rules"),
+])
+async def onboardingdone(interaction: discord.Interaction, step: str):
+    changed = _mark_onboarding_step(interaction.guild.id, interaction.user.id, step, True)
+    _refresh_voice_onboarding_step(interaction.guild.id, interaction.user.id)
+    done, total = _onboarding_completion_status(interaction.guild.id, interaction.user.id)
+    bonus_msg = _maybe_award_onboarding_bonus(interaction.guild.id, interaction.user.id)
+
+    msg = "Progress updated." if changed else "That step was already completed."
+    msg += f" You are now at {done}/{total} steps."
+    if bonus_msg:
+        msg += f"\n{bonus_msg}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
 
 @client.tree.command(name="personalspace", description="Set up the Personal Space system — creates a lobby VC that spawns private rooms (Admin only)", guild=GUILD_ID)
 @app_commands.default_permissions(administrator=True)
@@ -3437,7 +3806,8 @@ async def help_command(interaction: discord.Interaction):
     ), inline=False)
 
     embed.add_field(name="🎮 Gaming", value=(
-        "`/lfg <game> <players> [desc]` — Post a LFG ad\n"
+        "`/lfg <game> <players> [desc]` — Post a filtered LFG with RSVP buttons\n"
+        "`/lfgfilter [game] [platform] [region] [host]` — Browse matching active LFG posts\n"
         "`/gamertag <platform> <tag>` — Save gamertag\n"
         "`/gamertags [user]` — View gamertags\n"
         "`/setupgames` — Create game channels & role buttons *(Admin)*"
@@ -3445,7 +3815,8 @@ async def help_command(interaction: discord.Interaction):
 
     embed.add_field(name="📈 Insights", value=(
         "`/weeklyrecap` — Show weekly community stats\n"
-        "`/serverhealth` — Bot health + channel/task diagnostics *(Admin)*"
+        "`/serverhealth` — Bot health + channel/task diagnostics *(Admin)*\n"
+        "`/onboarding` `/onboardingdone` — Track and complete new-member progression"
     ), inline=False)
 
     embed.add_field(name="🆓 Free Games", value=(
