@@ -307,6 +307,7 @@ class Client(commands.Bot):
 
     async def on_ready(self):
         print(f'Logged on as {self.user}!')
+        print(f"[Startup] Marker={STARTUP_MARKER} PID={os.getpid()} Guilds={len(self.guilds)}")
         if self._startup_completed:
             # on_ready can fire multiple times (reconnects); avoid re-running startup setup.
             return
@@ -370,6 +371,14 @@ class Client(commands.Bot):
                         print(f"[Startup] Missing mod log channel in {g.name} (expected ID {LOG_CHANNEL_ID} or name #{MOD_LOG_NAME})")
                     if _resolve_ticket_log_channel(g) is None:
                         print(f"[Startup] Missing ticket log channel in {g.name} (expected #{TICKET_LOG_NAME})")
+                    marker_ch = _resolve_mod_log_channel(g)
+                    if marker_ch:
+                        marker_embed = discord.Embed(title="🟢 Bot Startup Marker", color=0x2ECC71)
+                        marker_embed.add_field(name="Marker", value=f"`{STARTUP_MARKER}`", inline=False)
+                        marker_embed.add_field(name="PID", value=f"`{os.getpid()}`", inline=True)
+                        marker_embed.add_field(name="Guild", value=f"`{g.id}`", inline=True)
+                        marker_embed.timestamp = discord.utils.utcnow()
+                        await marker_ch.send(embed=marker_embed)
                 except Exception as e:
                     print(f"[Startup] Channel validation failed in {g.name}: {e}")
 
@@ -391,11 +400,9 @@ class Client(commands.Bot):
 
     async def on_guild_join(self, guild: discord.Guild):
         try:
-            await _ensure_log_channels(guild)
-            await _ensure_feature_channels(guild)
-            await _post_verify_embed(guild)
             synced = await self.tree.sync(guild=guild)
             print(f"[Guild Join] Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
+            print("[Guild Join] Auto channel creation is disabled. Use setup commands to create channels.")
         except Exception as e:
             print(f"[Guild Join] Setup/sync failed for {guild.name} ({guild.id}): {e}")
 
@@ -420,6 +427,57 @@ VERIFY_CHANNEL_NAME   = "✅-verify"       # visible to unverified; hidden once 
 MUSIC_CATEGORY_NAME   = "♦┃𝙏𝙚𝙭𝙩 𝘾𝙝𝙖𝙣𝙣𝙚𝙡𝙨┃♦"  # category where music-channel is created
 WHITELIST: set[int] = set()  # stores whitelisted user IDs
 VERIFY_EMBED_MARKER = "GZ_VERIFY_EMBED_V1"
+_MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+MANAGED_CHANNEL_IDS: dict[str, dict[str, int]] = {}
+STARTUP_MARKER = f"boot-{int(time.time())}-{os.getpid()}"
+
+
+def _load_managed_channels() -> None:
+    global MANAGED_CHANNEL_IDS
+    if not os.path.exists(_MANAGED_CHANNELS_SAVE):
+        return
+    try:
+        with open(_MANAGED_CHANNELS_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            MANAGED_CHANNEL_IDS = {str(gid): {str(k): int(v) for k, v in mapping.items()} for gid, mapping in data.items() if isinstance(mapping, dict)}
+    except Exception as e:
+        print(f"[Channels] Warning: could not load managed channel ids — {e}")
+
+
+def _save_managed_channels() -> None:
+    try:
+        with open(_MANAGED_CHANNELS_SAVE, "w", encoding="utf-8") as f:
+            json.dump(MANAGED_CHANNEL_IDS, f)
+    except Exception as e:
+        print(f"[Channels] Warning: could not save managed channel ids — {e}")
+
+
+def _remember_channel(guild: discord.Guild, key: str, channel: discord.abc.GuildChannel) -> None:
+    gid = str(guild.id)
+    MANAGED_CHANNEL_IDS.setdefault(gid, {})[key] = int(channel.id)
+    _save_managed_channels()
+
+
+def _tracked_text_channel(guild: discord.Guild, key: str) -> discord.TextChannel | None:
+    cid = MANAGED_CHANNEL_IDS.get(str(guild.id), {}).get(key)
+    if not cid:
+        return None
+    ch = guild.get_channel(cid)
+    return ch if isinstance(ch, discord.TextChannel) else None
+
+
+def _resolve_or_track_text_channel(guild: discord.Guild, key: str, *names: str) -> discord.TextChannel | None:
+    tracked = _tracked_text_channel(guild, key)
+    if tracked:
+        return tracked
+    found = _find_text_channel_ci(guild, *names)
+    if found:
+        _remember_channel(guild, key, found)
+    return found
+
+
+_load_managed_channels()
 
 
 def _find_text_channel_ci(guild: discord.Guild, *names: str) -> discord.TextChannel | None:
@@ -435,19 +493,24 @@ def _resolve_mod_log_channel(guild: discord.Guild) -> discord.TextChannel | None
     """Resolve moderation log channel by legacy ID first, then by configured name."""
     ch = guild.get_channel(LOG_CHANNEL_ID)
     if isinstance(ch, discord.TextChannel):
+        _remember_channel(guild, "mod_log", ch)
         return ch
-    return _find_text_channel_ci(guild, MOD_LOG_NAME)
+    return _resolve_or_track_text_channel(guild, "mod_log", MOD_LOG_NAME)
 
 
 def _resolve_ticket_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """Resolve ticket log channel with tolerant name matching."""
+    tracked = _tracked_text_channel(guild, "ticket_log")
+    if tracked:
+        return tracked
     ticket_cat = guild.get_channel(TICKET_LOG_CATEGORY_ID)
     if isinstance(ticket_cat, discord.CategoryChannel):
         wanted = {TICKET_LOG_NAME.lower(), "ticket logs", "ticket-log", "ticket_logs"}
         for ch in ticket_cat.text_channels:
             if ch.name.lower() in wanted:
+                _remember_channel(guild, "ticket_log", ch)
                 return ch
-    return _find_text_channel_ci(guild, TICKET_LOG_NAME, "ticket logs", "ticket-log", "ticket_logs")
+    return _resolve_or_track_text_channel(guild, "ticket_log", TICKET_LOG_NAME, "ticket logs", "ticket-log", "ticket_logs")
 
 
 async def _ensure_log_channels(guild: discord.Guild) -> None:
@@ -467,9 +530,15 @@ async def _ensure_log_channels(guild: discord.Guild) -> None:
         (MOD_LOG_NAME,  "🔨 Private admin log — every mod command is recorded here."),
         (ROLE_LOG_NAME, "🏷️ Private role log — all role picks from embeds are recorded here."),
     ]:
-        if not _find_text_channel_ci(guild, ch_name):
-            await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic)
+        existing = _find_text_channel_ci(guild, ch_name)
+        if not existing:
+            existing = await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic)
             print(f"[Logs] Created #{ch_name} in {guild.name}")
+        await existing.edit(overwrites=admin_ow, topic=topic)
+        if ch_name == MOD_LOG_NAME:
+            _remember_channel(guild, "mod_log", existing)
+        elif ch_name == ROLE_LOG_NAME:
+            _remember_channel(guild, "role_log", existing)
 
     # Ticket logs channel goes in the configured category when available.
     ticket_topic = "🎫 Private ticket transcript log — closed ticket history is saved here."
@@ -480,11 +549,13 @@ async def _ensure_log_channels(guild: discord.Guild) -> None:
         if isinstance(ticket_cat, discord.CategoryChannel) and existing_ticket_log.category != ticket_cat:
             edit_kwargs["category"] = ticket_cat
         await existing_ticket_log.edit(**edit_kwargs)
+        _remember_channel(guild, "ticket_log", existing_ticket_log)
     else:
         create_kwargs = {"overwrites": admin_ow, "topic": ticket_topic}
         if isinstance(ticket_cat, discord.CategoryChannel):
             create_kwargs["category"] = ticket_cat
-        await guild.create_text_channel(TICKET_LOG_NAME, **create_kwargs)
+        created = await guild.create_text_channel(TICKET_LOG_NAME, **create_kwargs)
+        _remember_channel(guild, "ticket_log", created)
         print(f"[Logs] Created #{TICKET_LOG_NAME} in {guild.name}")
 
 async def _ensure_feature_channels(guild: discord.Guild) -> None:
@@ -519,16 +590,19 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
         (POKEMON_CHANNEL_NAME,  "⚔️ Challenge others to Pokemon battles here! /pokemon battle", None, ["pokemon-battle", "pokemon"]),
         (MUSIC_CHANNEL_NAME,    "🎵 Request music and use all music commands here! /play /skip /queue", music_category if music_category else None, ["music-channel", "music"]),
     ]
-    for ch_name, topic, category, aliases in channels:
-        ch = _find_text_channel_ci(guild, ch_name, *aliases)
+    for idx, (ch_name, topic, category, aliases) in enumerate(channels):
+        key = ["casino_channel", "pokemon_channel", "music_channel"][idx]
+        ch = _resolve_or_track_text_channel(guild, key, ch_name, *aliases)
         if ch:
             # Update existing channel perms (and move to correct category if set)
             edit_kwargs = {"overwrites": restricted_ow}
             if category and ch.category != category:
                 edit_kwargs["category"] = category
             await ch.edit(**edit_kwargs)
+            _remember_channel(guild, key, ch)
         else:
             ch = await guild.create_text_channel(ch_name, overwrites=restricted_ow, topic=topic, category=category)
+            _remember_channel(guild, key, ch)
             print(f"[Channels] Created #{ch_name} in {guild.name}" + (f" under '{category.name}'" if category else ""))
 
     # Verify channel: visible to @everyone, hidden once they have the Gamer role
@@ -547,7 +621,7 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
             verify_ow[role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True
             )
-    verify_ch = _find_text_channel_ci(guild, VERIFY_CHANNEL_NAME, "verify", "✅-verify", "-verify")
+    verify_ch = _resolve_or_track_text_channel(guild, "verify_channel", VERIFY_CHANNEL_NAME, "verify", "✅-verify", "-verify")
     if verify_ch is None:
         # Last-resort fallback: reuse any prior verify-like channel by topic marker.
         verify_ch = next(
@@ -557,14 +631,18 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
             ),
             None,
         )
+        if verify_ch:
+            _remember_channel(guild, "verify_channel", verify_ch)
     if verify_ch:
         await verify_ch.edit(overwrites=verify_ow)
+        _remember_channel(guild, "verify_channel", verify_ch)
     else:
         verify_ch = await guild.create_text_channel(
             VERIFY_CHANNEL_NAME,
             overwrites=verify_ow,
             topic="🟢 Click the button to verify and unlock the server!",
         )
+        _remember_channel(guild, "verify_channel", verify_ch)
         print(f"[Channels] Created #{VERIFY_CHANNEL_NAME} in {guild.name}")
 
 async def _post_verify_embed(guild: discord.Guild) -> None:
@@ -1261,7 +1339,7 @@ async def free_games_check():
         return
 
     # Background loop should not create channels; only post if target channel exists.
-    ch = _find_text_channel_ci(guild, FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
+    ch = _resolve_or_track_text_channel(guild, "free_games_channel", FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
     if not ch:
         print(f"[FreeGames] Channel #{FREE_GAMES_CHANNEL_NAME} not found in {guild.name}; skipping cycle.")
         return
@@ -3183,13 +3261,14 @@ async def setupfreegames(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    ch = _find_text_channel_ci(guild, FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
+    ch = _resolve_or_track_text_channel(guild, "free_games_channel", FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
     if not ch:
         ch = await guild.create_text_channel(
             FREE_GAMES_CHANNEL_NAME,
             topic="🎮 Free games on Steam — auto-updated every 4 hours",
             reason="Free games setup",
         )
+        _remember_channel(guild, "free_games_channel", ch)
         intro = discord.Embed(
             title="🎮 Free Games on Steam",
             description=(
@@ -3202,6 +3281,8 @@ async def setupfreegames(interaction: discord.Interaction):
         )
         intro.set_footer(text="Powered by GamerPower + Steam Store API")
         await ch.send(embed=intro)
+    else:
+        _remember_channel(guild, "free_games_channel", ch)
 
     await interaction.followup.send(f"✅ Fetching current free games and posting to {ch.mention}…", ephemeral=True)
 
