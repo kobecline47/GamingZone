@@ -403,6 +403,7 @@ intents.moderation = True
 client = Client(command_prefix="!", intents=intents)
 
 LOG_CHANNEL_ID = 1495573126304497735
+TICKET_LOG_CATEGORY_ID = 1496673347533144094
 MOD_LOG_NAME  = "mod-logs"   # admin-only mod action log
 ROLE_LOG_NAME = "role-logs"  # admin-only role assignment log
 GAMBLING_CHANNEL_NAME = "casino-floor"   # dedicated casino text channel
@@ -433,6 +434,12 @@ def _resolve_mod_log_channel(guild: discord.Guild) -> discord.TextChannel | None
 
 def _resolve_ticket_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """Resolve ticket log channel with tolerant name matching."""
+    ticket_cat = guild.get_channel(TICKET_LOG_CATEGORY_ID)
+    if isinstance(ticket_cat, discord.CategoryChannel):
+        wanted = {TICKET_LOG_NAME.lower(), "ticket logs", "ticket-log", "ticket_logs"}
+        for ch in ticket_cat.text_channels:
+            if ch.name.lower() in wanted:
+                return ch
     return _find_text_channel_ci(guild, TICKET_LOG_NAME, "ticket logs", "ticket-log", "ticket_logs")
 
 
@@ -452,11 +459,26 @@ async def _ensure_log_channels(guild: discord.Guild) -> None:
     for ch_name, topic in [
         (MOD_LOG_NAME,  "🔨 Private admin log — every mod command is recorded here."),
         (ROLE_LOG_NAME, "🏷️ Private role log — all role picks from embeds are recorded here."),
-        (TICKET_LOG_NAME, "🎫 Private ticket transcript log — closed ticket history is saved here."),
     ]:
         if not _find_text_channel_ci(guild, ch_name):
             await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic)
             print(f"[Logs] Created #{ch_name} in {guild.name}")
+
+    # Ticket logs channel goes in the configured category when available.
+    ticket_topic = "🎫 Private ticket transcript log — closed ticket history is saved here."
+    ticket_cat = guild.get_channel(TICKET_LOG_CATEGORY_ID)
+    existing_ticket_log = _resolve_ticket_log_channel(guild)
+    if existing_ticket_log:
+        edit_kwargs = {"overwrites": admin_ow, "topic": ticket_topic}
+        if isinstance(ticket_cat, discord.CategoryChannel) and existing_ticket_log.category != ticket_cat:
+            edit_kwargs["category"] = ticket_cat
+        await existing_ticket_log.edit(**edit_kwargs)
+    else:
+        create_kwargs = {"overwrites": admin_ow, "topic": ticket_topic}
+        if isinstance(ticket_cat, discord.CategoryChannel):
+            create_kwargs["category"] = ticket_cat
+        await guild.create_text_channel(TICKET_LOG_NAME, **create_kwargs)
+        print(f"[Logs] Created #{TICKET_LOG_NAME} in {guild.name}")
 
 async def _ensure_feature_channels(guild: discord.Guild) -> None:
     """Auto-create casino, pokemon-battle, and music-channel locked to the Gamer role."""
