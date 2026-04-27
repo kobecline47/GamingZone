@@ -4224,94 +4224,155 @@ async def bot_info(interaction: discord.Interaction):
 @client.tree.command(name="help", description="Show all available bot commands", guild=GUILD_ID)
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🤖 Bot Commands",
-        description="Here's a full list of available slash commands:",
+        title="🤖 Bot Commands — Full Directory",
+        description="**New here?** Try `/quickstart` first!\n**Admin?** Use `/adminhelp` for mod commands.",
         color=0x5865F2
     )
 
-    embed.add_field(name="🎵 Music (use in #music-channel)", value=(
-        "`/play <query>` — Search & play a song (autocomplete)\n"
-        "`/pause` `/resume` `/skip` `/stop` `/leave`\n"
-        "`/queue` — View the song queue\n"
-        "`/nowplaying` — Current song info\n"
-        "`/volume <0-100>` — Set playback volume"
+    embed.add_field(name="🆕 Getting Started", value=(
+        "`/quickstart` — 30-second onboarding guide (NEW PLAYERS START HERE)\n"
+        "`/onboarding` — Track your 5-step progression\n"
+        "`/gamertag` — Save your gaming profile"
     ), inline=False)
 
-    embed.add_field(name="📊 Levels", value=(
-        "`/rank [user]` — Show level, XP & voice time\n"
-        "`/leaderboard` — Top 10 XP members"
-    ), inline=False)
-
-    embed.add_field(name="⭐ Prestige & Cosmetics (Phase 3)", value=(
+    embed.add_field(name="📊 Progression & Economy", value=(
+        "`/rank [user]` — View level, XP, voice time\n"
+        "`/leaderboard` — Top 10 XP members\n"
         "`/prestige [user]` — View prestige level & XP multiplier\n"
-        "`/prestigereset` — Reset level to gain prestige (+{} PokeCoins) — **5% XP boost per level**\n"
-        "`/cosmetics inventory|shop` — View owned cosmetics or browse the shop\n"
-        "`/cosmeticsbuy <id>` — Purchase a cosmetic upgrade"
-    ).format(PRESTIGE_RESET_COST), inline=False)
-
-    embed.add_field(name="🎮 Pokemon Gyms & Raids (Phase 3)", value=(
-        "`/pokemon gym` — Challenge gym leaders and earn badges\n"
-        "`/pokemon raid` — Join group raids against boss Pokemon\n"
-        "`/pokemon ladder` — View seasonal ranking leaderboard"
+        "`/prestigereset` — Reset to gain prestige (costs PokeCoins)\n"
+        "`/cosmetics inventory|shop` — View/browse cosmetics\n"
+        "`/cosmeticsbuy <id>` — Purchase cosmetic"
     ), inline=False)
 
-    embed.add_field(name="🎉 Giveaways *(Admin)*", value=(
-        "`/giveaway <prize> <minutes> [winners]` — Start a giveaway\n"
-        "`/endgiveaway <message_id>` — End early"
-    ), inline=False)
-
-    embed.add_field(name="🎫 Tickets *(Admin setup)*", value=(
-        "`/setupticketchannel <channel>` — Post the ticket panel\n"
-        "Members click **Open a Ticket** to create a private channel"
-    ), inline=False)
-
-    embed.add_field(name="🏷️ Reaction Roles *(Admin)*", value=(
-        "`/reactionrole <message_id> <emoji> <role>` — Bind a role to a reaction"
-    ), inline=False)
-
-    embed.add_field(name="📡 Streamers *(Admin)*", value=(
-        "`/addstreamer <username> <platform>` — Follow a streamer\n"
-        "`/removestreamer <username>` — Unfollow\n"
-        "`/streamers` — List all followed streamers"
-    ), inline=False)
-
-    embed.add_field(name="📨 Invites", value=(
+    embed.add_field(name="🎮 Gaming & Social", value=(
+        "`/lfg <game> <players> [desc]` — Post LFG with RSVP buttons\n"
+        "`/lfgfilter [game] [platform] [region]` — Find active LFG posts\n"
+        "`/gamertags [user]` — View someone's gamertags\n"
         "`/invites [user]` — Check invite count"
     ), inline=False)
 
-    embed.add_field(name="🎮 Gaming", value=(
-        "`/lfg <game> <players> [desc]` — Post a filtered LFG with RSVP buttons\n"
-        "`/lfgfilter [game] [platform] [region] [host]` — Browse matching active LFG posts\n"
-        "`/gamertag <platform> <tag>` — Save gamertag\n"
-        "`/gamertags [user]` — View gamertags\n"
-        "`/setupgames` — Create game channels & role buttons *(Admin)*"
+    embed.add_field(name="🎵 Music (in #music-channel)", value=(
+        "`/play <query>` — Search & play song\n"
+        "`/pause` `/resume` `/skip` `/stop` `/leave`\n"
+        "`/queue` — View song queue\n"
+        "`/volume <0-100>` — Set volume"
     ), inline=False)
 
-    embed.add_field(name="📈 Insights", value=(
-        "`/weeklyrecap` — Show weekly community stats\n"
-        "`/serverhealth` — Bot health + channel/task diagnostics *(Admin)*\n"
-        "`/onboarding` `/onboardingdone` — Track and complete new-member progression"
+    embed.add_field(name="📈 Community Insights", value=(
+        "`/weeklyrecap` — Weekly community stats\n"
+        "`/bot` — About this bot"
     ), inline=False)
 
-    embed.add_field(name="🆓 Free Games", value=(
-        "`/setupfreegames` — Create #free-games channel and post current Steam deals *(Admin)*"
+    embed.add_field(name="⚙️ Admin/Mod Commands", value=(
+        "Use `/adminhelp` to see all moderation, setup, and safety commands."
     ), inline=False)
 
-    embed.add_field(name="⚒️ Moderation", value=(
-        "`/ban` `/kick` `/mute` `/unmute` `/timeout` `/clear` `/announce`\n"
-        "`/unban <user_id>` — Unban a user by ID\n"
-        "`/banlist` — View all currently banned users\n"
-        "`/whitelist` `/unwhitelist` — Protect members from mod actions"
-    ), inline=False)
-
-    embed.add_field(name="🔒 Moderation Safety (Phase 4)", value=(
-        "`/raidmode <enable|disable>` — Lock down server (mods only can message)\n"
-        "`/accountage <days> [enabled]` — Set minimum account age for links (default: 7 days)\n"
-        "`/linkquarantine <view|clear> [user_id]` — View or clear suspicious link records"
-    ), inline=False)
-
-    embed.set_footer(text="All commands are slash commands — type / to get started!")
+    embed.set_footer(text="⭐ Tip: React with 🎮 below to see gaming tips!")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="quickstart", description="New player guide — Get started in 30 seconds", guild=GUILD_ID)
+async def quickstart(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🚀 Welcome to the Gaming Zone!",
+        description="Follow these 4 quick steps to get started.",
+        color=0x2ECC71
+    )
+
+    embed.add_field(name="Step 1️⃣: Complete Onboarding", value=(
+        "Run `/onboarding` to see your progress.\n"
+        "Need to read rules? Use `/onboardingdone read_rules`"
+    ), inline=False)
+
+    embed.add_field(name="Step 2️⃣: Save Your Gamertag", value=(
+        "Run `/gamertag <platform> <username>`\n"
+        "Example: `/gamertag ps5 MyPlayName`"
+    ), inline=False)
+
+    embed.add_field(name="Step 3️⃣: Find a Squad", value=(
+        "Post an LFG: `/lfg valorant 3 looking for comp`\n"
+        "Browse posts: `/lfgfilter game:valorant`\n"
+        "Join using the **Going** button"
+    ), inline=False)
+
+    embed.add_field(name="Step 4️⃣: Earn XP & Level Up", value=(
+        "💬 Chat = 15 XP/min (with cooldown)\n"
+        "🎙️ Voice = 1 XP/min\n"
+        "View your rank: `/rank`"
+    ), inline=False)
+
+    embed.add_field(name="💡 Pro Tips", value=(
+        "• Complete all 5 onboarding steps → **+250 bonus XP**\n"
+        "• Use `/prestige` to reset and gain multipliers\n"
+        "• Buy cosmetics with PokeCoins at `/cosmetics shop`\n"
+        "• Need help? Type `/help`"
+    ), inline=False)
+
+    embed.set_footer(text="Questions? Ask a mod in #support")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="adminhelp", description="Admin/Mod command guide (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def adminhelp(interaction: discord.Interaction):
+    if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.moderate_members):
+        await interaction.response.send_message("Moderator permission required.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🔧 Admin & Moderation Commands",
+        description="Command guide for moderators and administrators.",
+        color=0xFF6B6B
+    )
+
+    embed.add_field(name="🔨 Core Moderation", value=(
+        "`/ban <user> [reason]` — Ban a member\n"
+        "`/kick <user> [reason]` — Kick a member\n"
+        "`/mute <user>` — Mute indefinitely\n"
+        "`/unmute <user>` — Remove mute\n"
+        "`/timeout <user> <hours> <minutes> [reason]` — Timeout a member\n"
+        "`/unban <user_id> [reason]` — Unban by ID\n"
+        "`/banlist` — View all bans\n"
+        "`/clear <amount>` — Delete messages"
+    ), inline=False)
+
+    embed.add_field(name="👮 Mod Utilities", value=(
+        "`/whitelist <user>` — Protect from mod actions\n"
+        "`/unwhitelist <user>` — Remove protection\n"
+        "`/announce <message>` — Post announcement\n"
+        "`/invites [user]` — Check invite count"
+    ), inline=False)
+
+    embed.add_field(name="🔒 Safety Automation (Phase 4)", value=(
+        "`/raidmode <enable|disable>` — Lock server (mods only)\n"
+        "`/accountage <days> [enabled]` — Block new accounts from links\n"
+        "`/linkquarantine <view|clear> [user_id]` — Manage link records"
+    ), inline=False)
+
+    embed.add_field(name="🎫 Ticket System", value=(
+        "`/setupticketchannel <channel>` — Post ticket panel"
+    ), inline=False)
+
+    embed.add_field(name="🏷️ Roles & Reactions", value=(
+        "`/reactionrole <message_id> <emoji> <role>` — Bind role to reaction\n"
+        "`/setupgames` — Create game channels & buttons"
+    ), inline=False)
+
+    embed.add_field(name="📡 Community Setup", value=(
+        "`/addstreamer <username> <platform>` — Follow streamer\n"
+        "`/removestreamer <username>` — Unfollow streamer\n"
+        "`/setupfreegames` — Post free Steam games\n"
+        "`/serverhealth` — View bot diagnostics"
+    ), inline=False)
+
+    embed.add_field(name="🎉 Events", value=(
+        "`/giveaway <prize> <minutes> [winners]` — Start giveaway\n"
+        "`/endgiveaway <message_id>` — End early"
+    ), inline=False)
+
+    embed.set_footer(text="Questions? Check the server wiki or ask your admin lead.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @client.tree.command(name="setupfreegames", description="Create #free-games and post current Steam deals now (Admin only)", guild=GUILD_ID)
 @app_commands.default_permissions(administrator=True)
