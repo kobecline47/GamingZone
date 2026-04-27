@@ -214,7 +214,7 @@ class Client(commands.Bot):
     async def on_message_delete(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+        log_ch = _resolve_mod_log_channel(message.guild)
         if log_ch:
             embed = discord.Embed(title="🗑️ Message Deleted", color=0xE74C3C)
             embed.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
@@ -222,6 +222,55 @@ class Client(commands.Bot):
             embed.add_field(name="Content", value=message.content[:1024] or "*empty*", inline=False)
             embed.timestamp = discord.utils.utcnow()
             await log_ch.send(embed=embed)
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        """Log deletes even when the message was not cached by the gateway."""
+        if payload.guild_id is None:
+            return
+        guild = self.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        log_ch = _resolve_mod_log_channel(guild)
+        if log_ch is None:
+            return
+
+        channel_mention = f"<#{payload.channel_id}>"
+        cached = payload.cached_message
+        if cached is not None and cached.author and cached.author.bot:
+            return
+
+        embed = discord.Embed(title="🗑️ Message Deleted", color=0xE74C3C)
+        embed.add_field(name="Channel", value=channel_mention, inline=False)
+        embed.add_field(name="Message ID", value=f"`{payload.message_id}`", inline=True)
+        if cached is not None:
+            embed.set_author(name=str(cached.author), icon_url=cached.author.display_avatar.url)
+            embed.add_field(name="Content", value=cached.content[:1024] or "*empty*", inline=False)
+        else:
+            embed.add_field(name="Content", value="*Unavailable (message not cached)*", inline=False)
+        embed.timestamp = discord.utils.utcnow()
+        await log_ch.send(embed=embed)
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent):
+        """Log bulk deletions (purges) with count and message IDs."""
+        if payload.guild_id is None:
+            return
+        guild = self.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        log_ch = _resolve_mod_log_channel(guild)
+        if log_ch is None:
+            return
+
+        ids = sorted(payload.message_ids)
+        sample = ", ".join(f"`{mid}`" for mid in ids[:20])
+        extra = "" if len(ids) <= 20 else f"\n...and {len(ids) - 20} more"
+
+        embed = discord.Embed(title="🧹 Bulk Messages Deleted", color=0xE67E22)
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=False)
+        embed.add_field(name="Count", value=str(len(ids)), inline=True)
+        embed.add_field(name="Message IDs", value=(sample + extra) if sample else "*Unavailable*", inline=False)
+        embed.timestamp = discord.utils.utcnow()
+        await log_ch.send(embed=embed)
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.message_id not in REACTION_ROLES:
@@ -362,6 +411,29 @@ GAMER_ROLE_NAME       = "Gamer"          # role granted on verification — unlo
 VERIFY_CHANNEL_NAME   = "✅-verify"       # visible to unverified; hidden once Gamer role is granted
 MUSIC_CATEGORY_NAME   = "♦┃𝙏𝙚𝙭𝙩 𝘾𝙝𝙖𝙣𝙣𝙚𝙡𝙨┃♦"  # category where music-channel is created
 WHITELIST: set[int] = set()  # stores whitelisted user IDs
+VERIFY_EMBED_MARKER = "GZ_VERIFY_EMBED_V1"
+
+
+def _find_text_channel_ci(guild: discord.Guild, *names: str) -> discord.TextChannel | None:
+    """Case-insensitive text channel lookup across one or more possible names."""
+    wanted = {n.lower() for n in names if n}
+    for ch in guild.text_channels:
+        if ch.name.lower() in wanted:
+            return ch
+    return None
+
+
+def _resolve_mod_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Resolve moderation log channel by legacy ID first, then by configured name."""
+    ch = guild.get_channel(LOG_CHANNEL_ID)
+    if isinstance(ch, discord.TextChannel):
+        return ch
+    return _find_text_channel_ci(guild, MOD_LOG_NAME)
+
+
+def _resolve_ticket_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Resolve ticket log channel with tolerant name matching."""
+    return _find_text_channel_ci(guild, TICKET_LOG_NAME, "ticket logs", "ticket-log", "ticket_logs")
 
 
 async def _ensure_log_channels(guild: discord.Guild) -> None:
@@ -380,8 +452,9 @@ async def _ensure_log_channels(guild: discord.Guild) -> None:
     for ch_name, topic in [
         (MOD_LOG_NAME,  "🔨 Private admin log — every mod command is recorded here."),
         (ROLE_LOG_NAME, "🏷️ Private role log — all role picks from embeds are recorded here."),
+        (TICKET_LOG_NAME, "🎫 Private ticket transcript log — closed ticket history is saved here."),
     ]:
-        if not discord.utils.get(guild.text_channels, name=ch_name):
+        if not _find_text_channel_ci(guild, ch_name):
             await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic)
             print(f"[Logs] Created #{ch_name} in {guild.name}")
 
@@ -458,14 +531,17 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
 
 async def _post_verify_embed(guild: discord.Guild) -> None:
     """Post the verification embed in #verify (visible to new members, hidden after they verify)."""
-    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    verify_ch = _find_text_channel_ci(guild, VERIFY_CHANNEL_NAME, "verify", "-verify")
     if not verify_ch:
         return
 
-    # Don't repost if there's already a bot message with the verify embed
+    # Don't repost if there's already a verify message (check pins first, then recent history).
     try:
-        async for msg in verify_ch.history(limit=20):
-            if msg.author == guild.me and msg.embeds and msg.embeds[0].title and "✅" in msg.embeds[0].title:
+        for msg in await verify_ch.pins():
+            if msg.author == guild.me and msg.embeds and msg.embeds[0].footer and msg.embeds[0].footer.text and VERIFY_EMBED_MARKER in msg.embeds[0].footer.text:
+                return
+        async for msg in verify_ch.history(limit=150):
+            if msg.author == guild.me and msg.embeds and msg.embeds[0].footer and msg.embeds[0].footer.text and VERIFY_EMBED_MARKER in msg.embeds[0].footer.text:
                 return
     except Exception:
         pass
@@ -482,9 +558,13 @@ async def _post_verify_embed(guild: discord.Guild) -> None:
         ),
         color=0x2ECC71,
     )
-    embed.set_footer(text="GamingZoneBot • Click once to verify")
+    embed.set_footer(text=f"GamingZoneBot • Click once to verify • {VERIFY_EMBED_MARKER}")
     try:
-        await verify_ch.send(embed=embed, view=GamerVerifyView())
+        verify_msg = await verify_ch.send(embed=embed, view=GamerVerifyView())
+        try:
+            await verify_msg.pin(reason="Keep a single canonical verification message across restarts")
+        except Exception:
+            pass
         print(f"[Verify] Posted verification embed in #{VERIFY_CHANNEL_NAME} in {guild.name}")
     except Exception as e:
         print(f"[Verify] Could not post embed in {guild.name}: {e}")
@@ -643,7 +723,7 @@ class TicketCloseButton(discord.ui.Button):
             return
         await interaction.response.send_message("Closing ticket in 5 seconds...")
         # log transcript
-        log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
+        log_ch = _resolve_ticket_log_channel(interaction.guild)
         if log_ch is None:
             print(f"[Tickets] WARNING: #{TICKET_LOG_NAME} channel not found — transcript not saved for {ch.name}")
         else:
@@ -1382,9 +1462,9 @@ async def on_message(message: discord.Message):
 
 
 async def get_mod_log_channel(guild: discord.Guild):
-    channel = guild.get_channel(LOG_CHANNEL_ID)
+    channel = _resolve_mod_log_channel(guild)
     if channel is None:
-        print(f"Log channel with ID {LOG_CHANNEL_ID} not found.")
+        print(f"Mod log channel not found (ID {LOG_CHANNEL_ID} / name {MOD_LOG_NAME}).")
     return channel
 
 async def log_action(interaction: discord.Interaction, action: str, target: str, reason: str = None):
@@ -1399,7 +1479,7 @@ async def log_action(interaction: discord.Interaction, action: str, target: str,
     if channel:
         await channel.send(embed=embed)
     # Also send to the private mod-logs channel
-    mod_log = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_NAME)
+    mod_log = _resolve_mod_log_channel(interaction.guild)
     if mod_log and mod_log != channel:
         await mod_log.send(embed=embed)
 
@@ -1422,7 +1502,7 @@ async def log_role_change(guild: discord.Guild, member: discord.Member,
 
 async def _log_admin_cmd(interaction: discord.Interaction, cmd: str, details: str = "") -> None:
     """Log any admin-only command to the private #mod-logs channel."""
-    ch = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_NAME)
+    ch = _resolve_mod_log_channel(interaction.guild)
     if not ch:
         return
     embed = discord.Embed(title=f"⚙️ Admin Command: `/{cmd}`", color=0x5865F2)
@@ -2684,7 +2764,7 @@ async def closeticket(interaction: discord.Interaction, channel: discord.TextCha
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
+    log_ch = _resolve_ticket_log_channel(interaction.guild)
     if log_ch is None:
         print(f"[Tickets] WARNING: #{TICKET_LOG_NAME} channel not found — transcript not saved for {channel.name}")
     else:
