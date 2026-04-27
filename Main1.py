@@ -630,23 +630,36 @@ class TicketCloseButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         ch = interaction.channel
-        if not interaction.user.guild_permissions.manage_channels and \
-           OPEN_TICKETS.get(interaction.user.id) != ch.id:
+        # Allow close if: has manage_channels, OR in OPEN_TICKETS (in-memory),
+        # OR has an explicit view_channel overwrite (ticket opener after bot restart).
+        user_ow = ch.overwrites_for(interaction.user)
+        can_close = (
+            interaction.user.guild_permissions.manage_channels
+            or OPEN_TICKETS.get(interaction.user.id) == ch.id
+            or user_ow.view_channel is True
+        )
+        if not can_close:
             await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
             return
         await interaction.response.send_message("Closing ticket in 5 seconds...")
         # log transcript
         log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
-        if log_ch:
-            msgs = [m async for m in ch.history(limit=200, oldest_first=True)]
-            transcript = "\n".join(
-                f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
-                for m in msgs if not m.author.bot or m.content
-            )
-            embed = discord.Embed(title=f"📋 Ticket Closed — #{ch.name}", color=0xE74C3C)
-            embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
-            embed.timestamp = discord.utils.utcnow()
-            await log_ch.send(embed=embed)
+        if log_ch is None:
+            print(f"[Tickets] WARNING: #{TICKET_LOG_NAME} channel not found — transcript not saved for {ch.name}")
+        else:
+            try:
+                msgs = [m async for m in ch.history(limit=200, oldest_first=True)]
+                transcript = "\n".join(
+                    f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
+                    for m in msgs if not m.author.bot or m.content
+                )
+                embed = discord.Embed(title=f"📋 Ticket Closed — #{ch.name}", color=0xE74C3C)
+                embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+                embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
+                embed.timestamp = discord.utils.utcnow()
+                await log_ch.send(embed=embed)
+            except Exception as e:
+                print(f"[Tickets] ERROR logging transcript for {ch.name}: {e}")
         # remove from open tickets
         for uid, cid in list(OPEN_TICKETS.items()):
             if cid == ch.id:
@@ -2643,18 +2656,23 @@ async def closeticket(interaction: discord.Interaction, channel: discord.TextCha
         return
     await interaction.response.defer(ephemeral=True)
     log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
-    if log_ch:
-        msgs = [m async for m in channel.history(limit=200, oldest_first=True)]
-        transcript = "\n".join(
-            f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
-            for m in msgs if not m.author.bot or m.content
-        )
-        embed = discord.Embed(title=f"Ticket Force-Closed - #{channel.name}", color=0xE74C3C)
-        embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
-        embed.add_field(name="Closed by", value=interaction.user.mention)
-        embed.add_field(name="Reason", value=reason)
-        embed.timestamp = discord.utils.utcnow()
-        await log_ch.send(embed=embed)
+    if log_ch is None:
+        print(f"[Tickets] WARNING: #{TICKET_LOG_NAME} channel not found — transcript not saved for {channel.name}")
+    else:
+        try:
+            msgs = [m async for m in channel.history(limit=200, oldest_first=True)]
+            transcript = "\n".join(
+                f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
+                for m in msgs if not m.author.bot or m.content
+            )
+            embed = discord.Embed(title=f"Ticket Force-Closed - #{channel.name}", color=0xE74C3C)
+            embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
+            embed.add_field(name="Closed by", value=interaction.user.mention)
+            embed.add_field(name="Reason", value=reason)
+            embed.timestamp = discord.utils.utcnow()
+            await log_ch.send(embed=embed)
+        except Exception as e:
+            print(f"[Tickets] ERROR logging transcript for {channel.name}: {e}")
     for uid, cid in list(OPEN_TICKETS.items()):
         if cid == channel.id:
             del OPEN_TICKETS[uid]
