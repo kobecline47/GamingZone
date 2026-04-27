@@ -8,13 +8,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import io
+import urllib.request
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
 except Exception:
     Image = None
     ImageDraw = None
     ImageFont = None
+    ImageOps = None
 
 # ── Pokemon Roster ────────────────────────────────────────────────────────────
 POKEMON_ROSTER = [
@@ -193,6 +195,23 @@ TYPE_COLORS = {
     "Normal":   (168, 168, 120),     # Gray
 }
 
+POKEDEX_IDS = {
+    "Charizard": 6,
+    "Blastoise": 9,
+    "Venusaur": 3,
+    "Pikachu": 25,
+    "Mewtwo": 150,
+    "Gengar": 94,
+    "Dragonite": 149,
+    "Lucario": 448,
+    "Garchomp": 445,
+    "Alakazam": 65,
+    "Snorlax": 143,
+    "Eevee": 133,
+}
+
+SPRITE_CACHE: dict[str, Image.Image | None] = {}
+
 
 def _load_font(size: int = 24, bold: bool = False) -> ImageFont.FreeTypeFont | None:
     """Load a font at the given size, with DejaVu fallback."""
@@ -221,6 +240,58 @@ def _save_battle_file(img: Image.Image, filename: str) -> discord.File | None:
     return discord.File(bio, filename=filename)
 
 
+def _load_pokemon_sprite(name: str) -> Image.Image | None:
+    """Fetch and cache official Pokemon artwork by roster name."""
+    if not Image:
+        return None
+
+    if name in SPRITE_CACHE:
+        cached = SPRITE_CACHE[name]
+        return cached.copy() if cached else None
+
+    dex_id = POKEDEX_IDS.get(name)
+    if not dex_id:
+        SPRITE_CACHE[name] = None
+        return None
+
+    url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{dex_id}.png"
+    try:
+        with urllib.request.urlopen(url, timeout=4) as response:
+            data = response.read()
+        sprite = Image.open(io.BytesIO(data)).convert("RGBA")
+    except Exception:
+        sprite = None
+
+    SPRITE_CACHE[name] = sprite
+    return sprite.copy() if sprite else None
+
+
+def _paste_battle_sprite(
+    img: Image.Image,
+    sprite: Image.Image,
+    *,
+    center_x: int,
+    baseline_y: int,
+    max_w: int,
+    max_h: int,
+    flip: bool = False,
+) -> None:
+    """Paste a sprite scaled to fit an arena slot while preserving transparency."""
+    if not sprite:
+        return
+    if flip and ImageOps:
+        sprite = ImageOps.mirror(sprite)
+
+    scale = min(max_w / sprite.width, max_h / sprite.height)
+    target_w = max(1, int(sprite.width * scale))
+    target_h = max(1, int(sprite.height * scale))
+    resized = sprite.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    x = center_x - target_w // 2
+    y = baseline_y - target_h
+    img.alpha_composite(resized, (x, y))
+
+
 def _pokemon_battle_render(battle: dict) -> discord.File | None:
     """Render a 960x600 battle scene with both Pokemon, HP bars, types, and statuses."""
     if not Image or not ImageDraw:
@@ -235,6 +306,22 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
 
     p1, p2 = battle["p1"], battle["p2"]
     p1_name, p2_name = battle["p1_name"], battle["p2_name"]
+
+    # Arena floor so sprites visibly appear on a battlefield.
+    draw.ellipse((140, 310, 430, 460), fill=(70, 90, 70, 235), outline=(120, 140, 120, 255), width=3)
+    draw.ellipse((530, 230, 820, 370), fill=(70, 90, 70, 235), outline=(120, 140, 120, 255), width=3)
+
+    p1_sprite = _load_pokemon_sprite(p1["name"])
+    p2_sprite = _load_pokemon_sprite(p2["name"])
+    if p1_sprite:
+        _paste_battle_sprite(img, p1_sprite, center_x=285, baseline_y=332, max_w=230, max_h=230, flip=False)
+    else:
+        draw.text((250, 250), p1["emoji"], fill=(255, 255, 255, 255), font=_load_font(96, bold=True))
+
+    if p2_sprite:
+        _paste_battle_sprite(img, p2_sprite, center_x=675, baseline_y=250, max_w=210, max_h=210, flip=True)
+    else:
+        draw.text((640, 180), p2["emoji"], fill=(255, 255, 255, 255), font=_load_font(84, bold=True))
 
     # ─── Left side: Player 1 ────────────────────────────────────────────────
     # Pokemon name + emoji
