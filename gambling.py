@@ -42,6 +42,9 @@ WORK_RANGE   = (120, 420)    # min / max coins from /work
 WORK_COOLDOWN_SECONDS = 3_600
 HEIST_JOIN_SECONDS = 10
 HEIST_MAX_PLAYERS = 4
+HEIST_PLAYER_BONUS = 0.05
+HEIST_PLAYER_BONUS_CAP = 0.15
+HEIST_SUCCESS_CAP = 0.92
 
 # ── Per-user casino stats ─────────────────────────────────────────────────────
 # uid → {games, won, lost, biggest_win, streak, streak_type}
@@ -1497,7 +1500,7 @@ async def _run_heist_sequence(
         return
 
     extra_players = max(0, len(valid_participants) - 1)
-    player_bonus = min(extra_players * 0.08, 0.24)
+    player_bonus = min(extra_players * HEIST_PLAYER_BONUS, HEIST_PLAYER_BONUS_CAP)
 
     plan_lines = [
         f"Target: {target['name']}",
@@ -1550,7 +1553,7 @@ async def _run_heist_sequence(
             success_mod += bonus_val
         else:
             crew_lines.append(f"❌ {role} bailed last minute")
-    final_chance = min(target["success_base"] + success_mod, 0.95)
+    final_chance = min(target["success_base"] + success_mod, HEIST_SUCCESS_CAP)
 
     crew_embed = discord.Embed(
         title="🦹 Crew Assembled",
