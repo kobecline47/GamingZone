@@ -207,6 +207,148 @@ def _slots_embed(
     return embed
 
 
+def _slot_render_label(sym: str) -> str:
+    # Keep symbols readable even if emoji glyph fallback is limited.
+    labels = {
+        "🍒": "CH",
+        "🍋": "LE",
+        "🍊": "OR",
+        "🍇": "GR",
+        "⭐": "ST",
+        "💎": "DI",
+        "7️⃣": "7",
+        "🎰": "JP",
+        "🌀": "..",
+        "❓": "?",
+    }
+    return labels.get(sym, "?")
+
+
+def _slots_render_image_file(revealed: list[str], spinning: bool = False) -> discord.File | None:
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return None
+
+    w, h = 980, 560
+    img = Image.new("RGBA", (w, h), (7, 50, 39, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Felt texture background.
+    for y in range(0, h, 4):
+        shade = 34 + ((y // 4) % 2) * 2
+        draw.line((0, y, w, y), fill=(6, shade, 30, 255), width=2)
+    draw.rounded_rectangle((14, 14, w - 14, h - 14), radius=36, outline=(84, 170, 128, 220), width=4)
+
+    # Main slot cabinet frame.
+    frame = (88, 52, w - 88, h - 68)
+    draw.rounded_rectangle(frame, radius=30, fill=(22, 30, 36, 255), outline=(165, 126, 48, 255), width=6)
+    draw.rounded_rectangle((102, 68, w - 102, h - 84), radius=24, fill=(18, 23, 28, 255), outline=(58, 68, 78, 255), width=2)
+
+    # Reels window.
+    win_box = (164, 134, w - 164, h - 148)
+    draw.rounded_rectangle(win_box, radius=18, fill=(10, 13, 18, 255), outline=(74, 84, 96, 255), width=3)
+
+    reels = list(revealed) + ["🌀"] * (3 - len(revealed))
+    c1, c2, c3 = reels
+    top = [random.choice(_SLOT_SYMBOLS) for _ in range(3)]
+    bot = [random.choice(_SLOT_SYMBOLS) for _ in range(3)]
+
+    # Font setup.
+    try:
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 42)
+        font_sym = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+        font_small = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_sym = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    draw.text((w // 2 - 136, 78), "SLOT MACHINE", fill=(242, 208, 109, 255), font=font_title)
+
+    col_w = 190
+    row_h = 112
+    gap = 20
+    left = 188
+    top_y = 172
+
+    def tile_color(sym: str) -> tuple[int, int, int]:
+        if sym in ("🎰", "7️⃣"):
+            return (169, 40, 44)
+        if sym == "💎":
+            return (34, 88, 143)
+        if sym == "⭐":
+            return (133, 103, 38)
+        if sym == "🌀":
+            return (48, 56, 66)
+        if sym == "❓":
+            return (56, 56, 56)
+        return (63, 71, 50)
+
+    grid = [top, [c1, c2, c3], bot]
+    for r in range(3):
+        for c in range(3):
+            x0 = left + c * (col_w + gap)
+            y0 = top_y + r * row_h
+            x1 = x0 + col_w
+            y1 = y0 + row_h - 10
+            tc = tile_color(grid[r][c])
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=14, fill=(tc[0], tc[1], tc[2], 255), outline=(170, 180, 188, 210), width=2)
+            label = _slot_render_label(grid[r][c])
+            bb = draw.textbbox((0, 0), label, font=font_sym)
+            tw, th = bb[2] - bb[0], bb[3] - bb[1]
+            draw.text((x0 + (col_w - tw) // 2, y0 + (row_h - th) // 2 - 8), label, fill=(246, 246, 246, 255), font=font_sym)
+
+    # Win line and result accent.
+    win_y = top_y + row_h + (row_h // 2) - 16
+    draw.line((left - 14, win_y, w - left + 14, win_y), fill=(235, 235, 235, 220), width=5)
+    draw.polygon([(left - 28, win_y), (left - 8, win_y - 10), (left - 8, win_y + 10)], fill=(235, 235, 235, 220))
+    draw.polygon([(w - left + 28, win_y), (w - left + 8, win_y - 10), (w - left + 8, win_y + 10)], fill=(235, 235, 235, 220))
+
+    if len(revealed) == 3:
+        a, b, c = revealed
+        if a == b == c:
+            line_c = (242, 193, 56, 255)
+            badge_text = "JACKPOT"
+        elif a == b or b == c or a == c:
+            line_c = (74, 214, 141, 255)
+            badge_text = "WIN"
+        else:
+            line_c = (220, 86, 86, 255)
+            badge_text = "MISS"
+        draw.line((left - 14, win_y, w - left + 14, win_y), fill=line_c, width=8)
+        bx0, by0 = w // 2 - 82, h - 116
+        bx1, by1 = w // 2 + 82, h - 74
+        draw.rounded_rectangle((bx0, by0, bx1, by1), radius=12, fill=(26, 30, 36, 255), outline=line_c, width=3)
+        bb = draw.textbbox((0, 0), badge_text, font=font_small)
+        tw, th = bb[2] - bb[0], bb[3] - bb[1]
+        draw.text((w // 2 - tw // 2, by0 + (by1 - by0 - th) // 2), badge_text, fill=(242, 242, 242, 255), font=font_small)
+    elif spinning:
+        draw.text((w // 2 - 66, h - 103), "SPINNING", fill=(170, 190, 220, 235), font=font_small)
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="slots_machine.png")
+
+
+def _slots_embed_with_image(
+    display: str,
+    bet: int,
+    uid: int,
+    result_text: str = "",
+    color: int = 0x5865F2,
+    spinning: bool = False,
+    bonus: bool = False,
+    revealed: list[str] | None = None,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = _slots_embed(display, bet, uid, result_text=result_text, color=color, spinning=spinning, bonus=bonus)
+    img_file = _slots_render_image_file(revealed or [], spinning=spinning)
+    if img_file:
+        # Hide legacy text box so image is the single visual.
+        embed.description = None
+        embed.set_image(url="attachment://slots_machine.png")
+    return embed, img_file
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 🃏  BLACKJACK
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1219,9 +1361,13 @@ def setup_gambling(bot: commands.Bot) -> None:
             await interaction.response.send_message(err, ephemeral=True)
             return
 
-        await interaction.response.send_message(
-            embed=_slots_embed(_slot_spin_box([]), bet, uid, spinning=True)
+        spin_embed, spin_img = _slots_embed_with_image(
+            _slot_spin_box([]), bet, uid, spinning=True, revealed=[]
         )
+        if spin_img:
+            await interaction.response.send_message(embed=spin_embed, file=spin_img)
+        else:
+            await interaction.response.send_message(embed=spin_embed)
 
         # ── Determine reels ────────────────────────────────────────────────────
         if random.random() < 0.05:          # 5% hot streak: force jackpot
@@ -1241,13 +1387,21 @@ def setup_gambling(bot: commands.Bot) -> None:
 
         # ── Reel-by-reel animation ─────────────────────────────────────────────
         await asyncio.sleep(0.8)
-        await interaction.edit_original_response(
-            embed=_slots_embed(_slot_spin_box([s1]), bet, uid, spinning=True)
+        spin_embed, spin_img = _slots_embed_with_image(
+            _slot_spin_box([s1]), bet, uid, spinning=True, revealed=[s1]
         )
+        if spin_img:
+            await interaction.edit_original_response(embed=spin_embed, attachments=[spin_img])
+        else:
+            await interaction.edit_original_response(embed=spin_embed)
         await asyncio.sleep(0.7)
-        await interaction.edit_original_response(
-            embed=_slots_embed(_slot_spin_box([s1, s2]), bet, uid, spinning=True)
+        spin_embed, spin_img = _slots_embed_with_image(
+            _slot_spin_box([s1, s2]), bet, uid, spinning=True, revealed=[s1, s2]
         )
+        if spin_img:
+            await interaction.edit_original_response(embed=spin_embed, attachments=[spin_img])
+        else:
+            await interaction.edit_original_response(embed=spin_embed)
         await asyncio.sleep(0.7)
 
         # ── Resolve ────────────────────────────────────────────────────────────
@@ -1280,12 +1434,19 @@ def setup_gambling(bot: commands.Bot) -> None:
             result = f"💸 **No match** — Lost **{bet:,}** PokeCoins."
             color  = 0xFF4444
 
-        await interaction.edit_original_response(
-            embed=_slots_embed(
-                _slot_box(s1, s2, s3), bet, uid,
-                result_text=result, color=color, bonus=bonus,
-            )
+        result_embed, result_img = _slots_embed_with_image(
+            _slot_box(s1, s2, s3),
+            bet,
+            uid,
+            result_text=result,
+            color=color,
+            bonus=bonus,
+            revealed=[s1, s2, s3],
         )
+        if result_img:
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+        else:
+            await interaction.edit_original_response(embed=result_embed)
 
     # ── /blackjack ────────────────────────────────────────────────────────────
     @bot.tree.command(name="blackjack", description="🃏 Play Blackjack against the dealer")
