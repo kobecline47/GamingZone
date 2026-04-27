@@ -679,39 +679,42 @@ class GamerVerifyButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        # Defer immediately so Discord doesn't time out during API calls.
+        await interaction.response.defer(ephemeral=True)
+
         member = interaction.guild.get_member(interaction.user.id)
         if member is None:
             # Cache miss — fetch from API directly.
             try:
                 member = await interaction.guild.fetch_member(interaction.user.id)
             except Exception:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Could not find your member record. Please try again in a moment.", ephemeral=True
                 )
                 return
         gamer_role = discord.utils.get(interaction.guild.roles, name=GAMER_ROLE_NAME)
         if not gamer_role:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ The Gamer role doesn't exist yet — ask an admin to run `/setupchannels`.",
                 ephemeral=True,
             )
             return
         if gamer_role in member.roles:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ You're already verified and have full access!", ephemeral=True
             )
             return
         try:
             await member.add_roles(gamer_role, reason="Self-verification via embed button")
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ I don't have permission to assign roles. Ask an admin to move my bot role **above** the Gamer role in Server Settings → Roles.",
                 ephemeral=True,
             )
             print(f"[Verify] FORBIDDEN — bot role is below @{GAMER_ROLE_NAME} in hierarchy. Cannot assign role.")
             return
         except Exception as e:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Something went wrong assigning your role. Please try again or contact an admin.", ephemeral=True
             )
             print(f"[Verify] ERROR assigning @{GAMER_ROLE_NAME} to {member}: {e}")
@@ -720,7 +723,7 @@ class GamerVerifyButton(discord.ui.Button):
             await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
         except Exception as e:
             print(f"[Verify] WARNING: failed to log role change: {e}")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!",
             ephemeral=True,
         )
