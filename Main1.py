@@ -355,6 +355,8 @@ class Client(commands.Bot):
                 free_games_check.start()
             if not empty_vc_cleanup.is_running():
                 empty_vc_cleanup.start()
+            if not ticket_sla_check.is_running():
+                ticket_sla_check.start()
 
             # Register grouped feature commands once (global)
             if not self._feature_cmds_registered:
@@ -736,6 +738,22 @@ def _add_xp(guild_id: int, user_id: int, amount: int) -> tuple[int, int, bool]:
     new_lvl = _xp_to_level(guild_xp[user_id])
     return old_lvl, new_lvl, new_lvl > old_lvl
 
+
+def _format_uptime(seconds: int) -> str:
+    days, rem = divmod(max(0, seconds), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
 # ── Voice Time Tracking ───────────────────────────────────────────────────────
 VOICE_JOIN_TIME: dict[int, dict[int, float]] = {}  # guild_id -> {user_id -> join_timestamp}
 VOICE_MINUTES:   dict[int, dict[int, int]]   = {}  # guild_id -> {user_id -> total_minutes}
@@ -773,6 +791,14 @@ FREE_GAMES_CHANNEL_NAME = "free-games"
 _FREE_GAMES_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "posted_free_games.json")
 POSTED_FREE_GAMES: set[int] = set()  # app IDs already announced
 FREE_GAMES_FIRST_CYCLE = True
+
+# ── Ticket SLA Monitoring ───────────────────────────────────────────────────
+TICKET_SLA_HOURS = 6
+TICKET_SLA_REMINDER_COOLDOWN_MINUTES = 180
+TICKET_SLA_LAST_REMINDER: dict[int, float] = {}  # channel_id -> unix timestamp
+
+# ── Runtime Metadata ─────────────────────────────────────────────────────────
+BOT_BOOT_TIME_UTC = discord.utils.utcnow()
 
 def _load_posted_games() -> None:
     """Load previously posted game IDs from disk so we never repost them."""
@@ -862,6 +888,7 @@ class TicketCloseButton(discord.ui.Button):
             if cid == ch.id:
                 del OPEN_TICKETS[uid]
                 break
+        TICKET_SLA_LAST_REMINDER.pop(ch.id, None)
         await asyncio.sleep(5)
         await ch.delete(reason="Ticket closed")
 
@@ -965,6 +992,7 @@ class OpenTicketButton(discord.ui.Button):
                 existing = discord.utils.get(cat.text_channels, name=f"ticket-{member.name}")
                 if existing:
                     OPEN_TICKETS[member.id] = existing.id
+                    TICKET_SLA_LAST_REMINDER.pop(existing.id, None)
                     await interaction.followup.send(f"You already have an open ticket: {existing.mention}", ephemeral=True)
                     return
             else:
@@ -986,6 +1014,7 @@ class OpenTicketButton(discord.ui.Button):
                 reason="Support ticket",
             )
             OPEN_TICKETS[member.id] = ch.id
+            TICKET_SLA_LAST_REMINDER.pop(ch.id, None)
             embed = discord.Embed(
                 title="🎫 Support Ticket",
                 description=f"Hello {member.mention}! Describe your issue and a staff member will assist you.\n\nClick **Close Ticket** when resolved.",
@@ -1001,6 +1030,60 @@ class OpenTicketView(discord.ui.View):
         self.add_item(OpenTicketButton())
 
 # ── Background Tasks ──────────────────────────────────────────────────────────
+@tasks.loop(minutes=10)
+async def ticket_sla_check():
+    """Alert staff when tickets remain open beyond SLA threshold."""
+    now_unix = time.time()
+    now_dt = discord.utils.utcnow()
+
+    # Keep map clean by removing reminders for ticket channels that no longer exist.
+    live_ticket_channel_ids = set(OPEN_TICKETS.values())
+    for cid in list(TICKET_SLA_LAST_REMINDER.keys()):
+        if cid not in live_ticket_channel_ids:
+            TICKET_SLA_LAST_REMINDER.pop(cid, None)
+
+    for guild in client.guilds:
+        ticket_log = _resolve_ticket_log_channel(guild)
+        guild_tickets = [(uid, cid) for uid, cid in OPEN_TICKETS.items() if isinstance(guild.get_channel(cid), discord.TextChannel)]
+        for owner_id, channel_id in guild_tickets:
+            ch = guild.get_channel(channel_id)
+            if not isinstance(ch, discord.TextChannel):
+                continue
+
+            age_hours = (now_dt - ch.created_at).total_seconds() / 3600.0
+            if age_hours < TICKET_SLA_HOURS:
+                continue
+
+            last = TICKET_SLA_LAST_REMINDER.get(channel_id, 0)
+            if now_unix - last < TICKET_SLA_REMINDER_COOLDOWN_MINUTES * 60:
+                continue
+
+            TICKET_SLA_LAST_REMINDER[channel_id] = now_unix
+
+            staff_mentions = [r.mention for r in guild.roles if r.permissions.manage_channels and not r.is_default()][:3]
+            ping = " ".join(staff_mentions) if staff_mentions else "@here"
+            age_txt = f"{age_hours:.1f}h"
+
+            try:
+                await ch.send(
+                    f"⏰ **Ticket SLA Reminder**: this ticket has been open for **{age_txt}**. {ping}\n"
+                    f"Opened by <@{owner_id}>."
+                )
+            except Exception as e:
+                print(f"[TicketSLA] Could not post reminder in #{ch.name}: {e}")
+
+            if ticket_log:
+                try:
+                    embed = discord.Embed(title="⏰ Ticket SLA Reminder", color=0xF39C12)
+                    embed.add_field(name="Ticket", value=ch.mention, inline=True)
+                    embed.add_field(name="Opened By", value=f"<@{owner_id}>", inline=True)
+                    embed.add_field(name="Open Time", value=age_txt, inline=True)
+                    embed.timestamp = now_dt
+                    await ticket_log.send(embed=embed)
+                except Exception as e:
+                    print(f"[TicketSLA] Could not log SLA reminder for #{ch.name}: {e}")
+
+
 @tasks.loop(minutes=2)
 async def empty_vc_cleanup():
     """Scan all guilds for empty user-created voice channels and delete them."""
@@ -2910,6 +2993,7 @@ async def closeticket(interaction: discord.Interaction, channel: discord.TextCha
         if cid == channel.id:
             del OPEN_TICKETS[uid]
             break
+    TICKET_SLA_LAST_REMINDER.pop(channel.id, None)
     channel_name = channel.name
     await channel.delete(reason=f"Force closed by {interaction.user}: {reason}")
     await interaction.followup.send(f"Ticket #{channel_name} closed.", ephemeral=True)
@@ -3115,6 +3199,119 @@ async def liststreamers(interaction: discord.Interaction):
     embed.description = "\n".join(lines)
     await interaction.response.send_message(embed=embed)
 
+
+@client.tree.command(name="serverhealth", description="Show bot/server health diagnostics (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def serverhealth(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    now = discord.utils.utcnow()
+    uptime = _format_uptime(int((now - BOT_BOOT_TIME_UTC).total_seconds()))
+
+    mod_log = _resolve_mod_log_channel(guild)
+    ticket_log = _resolve_ticket_log_channel(guild)
+    casino_ch = _resolve_or_track_text_channel(guild, "casino_channel", GAMBLING_CHANNEL_NAME, "casino-floor", "casino")
+    pokemon_ch = _resolve_or_track_text_channel(guild, "pokemon_channel", POKEMON_CHANNEL_NAME, "pokemon-battle", "pokemon")
+    music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
+    verify_ch = _resolve_or_track_text_channel(guild, "verify_channel", VERIFY_CHANNEL_NAME, "verify", "✅-verify", "-verify")
+    free_games_ch = _resolve_or_track_text_channel(guild, "free_games_channel", FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
+
+    tracked_ticket_channels = [cid for cid in OPEN_TICKETS.values() if isinstance(guild.get_channel(cid), discord.TextChannel)]
+    stale_tickets = 0
+    for cid in tracked_ticket_channels:
+        ch = guild.get_channel(cid)
+        if isinstance(ch, discord.TextChannel):
+            age_hours = (now - ch.created_at).total_seconds() / 3600.0
+            if age_hours >= TICKET_SLA_HOURS:
+                stale_tickets += 1
+
+    task_lines = [
+        f"giveaway_check: {'✅' if giveaway_check.is_running() else '❌'}",
+        f"streamer_check: {'✅' if streamer_check.is_running() else '❌'}",
+        f"free_games_check: {'✅' if free_games_check.is_running() else '❌'}",
+        f"empty_vc_cleanup: {'✅' if empty_vc_cleanup.is_running() else '❌'}",
+        f"ticket_sla_check: {'✅' if ticket_sla_check.is_running() else '❌'}",
+    ]
+
+    embed = discord.Embed(title="🩺 Server Health", color=0x2ECC71)
+    embed.add_field(name="Bot Runtime", value=f"Uptime: **{uptime}**\nMarker: `{STARTUP_MARKER}`\nPID: `{os.getpid()}`", inline=False)
+    embed.add_field(
+        name="Channel Wiring",
+        value=(
+            f"mod-log: {'✅' if mod_log else '❌'}\n"
+            f"ticket-log: {'✅' if ticket_log else '❌'}\n"
+            f"casino: {'✅' if casino_ch else '❌'}\n"
+            f"pokemon: {'✅' if pokemon_ch else '❌'}\n"
+            f"music: {'✅' if music_ch else '❌'}\n"
+            f"verify: {'✅' if verify_ch else '❌'}\n"
+            f"free-games: {'✅' if free_games_ch else '❌'}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Tickets",
+        value=(
+            f"Tracked open: **{len(tracked_ticket_channels)}**\n"
+            f"SLA threshold: **{TICKET_SLA_HOURS}h**\n"
+            f"Stale over SLA: **{stale_tickets}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="Background Tasks", value="\n".join(task_lines), inline=False)
+    embed.add_field(name="Data", value=f"Managed channel IDs: **{len(MANAGED_CHANNEL_IDS.get(str(guild.id), {}))}**\nPosted free-game IDs: **{len(POSTED_FREE_GAMES)}**", inline=False)
+    embed.timestamp = now
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="weeklyrecap", description="Show a weekly community recap", guild=GUILD_ID)
+async def weeklyrecap(interaction: discord.Interaction):
+    guild = interaction.guild
+    gid = guild.id
+    now = discord.utils.utcnow()
+    week_ago = now - datetime.timedelta(days=7)
+
+    xp_map = XP_DATA.get(gid, {})
+    voice_map = VOICE_MINUTES.get(gid, {})
+
+    top_xp = sorted(xp_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top_voice = sorted(voice_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    xp_lines = []
+    for idx, (uid, xp) in enumerate(top_xp, 1):
+        member = guild.get_member(uid)
+        name = member.mention if member else f"User `{uid}`"
+        xp_lines.append(f"`{idx}.` {name} — **{xp} XP**")
+    if not xp_lines:
+        xp_lines = ["No XP activity yet."]
+
+    voice_lines = []
+    for idx, (uid, mins) in enumerate(top_voice, 1):
+        member = guild.get_member(uid)
+        name = member.mention if member else f"User `{uid}`"
+        voice_lines.append(f"`{idx}.` {name} — **{mins} min**")
+    if not voice_lines:
+        voice_lines = ["No voice activity yet."]
+
+    new_members = [m for m in guild.members if m.joined_at and m.joined_at >= week_ago]
+    active_giveaways = sum(1 for g in GIVEAWAYS.values() if not g.get("ended", False))
+    open_tickets = sum(1 for cid in OPEN_TICKETS.values() if isinstance(guild.get_channel(cid), discord.TextChannel))
+    followed_streamers = len(STREAMERS)
+
+    embed = discord.Embed(title="📊 Weekly Community Recap", color=0x5865F2)
+    embed.description = (
+        f"Here is the latest pulse for **{guild.name}**.\n"
+        f"New members (7d): **{len(new_members)}**\n"
+        f"Open tickets: **{open_tickets}** • Active giveaways: **{active_giveaways}** • Followed streamers: **{followed_streamers}**"
+    )
+    embed.add_field(name="🏆 Top XP", value="\n".join(xp_lines), inline=False)
+    embed.add_field(name="🎙️ Top Voice Time", value="\n".join(voice_lines), inline=False)
+    embed.set_footer(text="Tip: run /serverhealth for live diagnostics")
+    embed.timestamp = now
+    await interaction.response.send_message(embed=embed)
+
 @client.tree.command(name="bot", description="About this bot and what it can do", guild=GUILD_ID)
 async def bot_info(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -3236,6 +3433,11 @@ async def help_command(interaction: discord.Interaction):
         "`/gamertag <platform> <tag>` — Save gamertag\n"
         "`/gamertags [user]` — View gamertags\n"
         "`/setupgames` — Create game channels & role buttons *(Admin)*"
+    ), inline=False)
+
+    embed.add_field(name="📈 Insights", value=(
+        "`/weeklyrecap` — Show weekly community stats\n"
+        "`/serverhealth` — Bot health + channel/task diagnostics *(Admin)*"
     ), inline=False)
 
     embed.add_field(name="🆓 Free Games", value=(
