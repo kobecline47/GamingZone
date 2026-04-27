@@ -32,14 +32,57 @@ if sys.platform == "win32":
     if _ffmpeg_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
-GUILD_ID  = discord.Object(id=711335159189864468)
+GAMING_ZONE_GUILD_ID = 711335159189864468
+GUILD_ID  = discord.Object(id=GAMING_ZONE_GUILD_ID)
 GUILD_ID_2 = discord.Object(id=1495449662755442698)
+# Focus bot on Gaming Zone only.
+PRIMARY_GUILD_NAME = os.getenv("PRIMARY_GUILD_NAME", "Gaming Zone").strip()
+PRIMARY_GUILD_ID = int(os.getenv("PRIMARY_GUILD_ID", str(GAMING_ZONE_GUILD_ID)))
+AUTO_LEAVE_NON_PRIMARY_GUILDS = os.getenv("AUTO_LEAVE_NON_PRIMARY_GUILDS", "1").lower() in {"1", "true", "yes", "on"}
 
 
 class Client(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._feature_cmds_registered = False
+        self._startup_completed = False
+        self._disconnect_started_at = None
+
+    @staticmethod
+    def _format_outage(seconds: int) -> str:
+        if seconds < 60:
+            return f"{seconds}s"
+        mins, secs = divmod(seconds, 60)
+        if mins < 60:
+            return f"{mins}m {secs}s"
+        hours, mins = divmod(mins, 60)
+        return f"{hours}h {mins}m {secs}s"
+
+    async def _send_bot_runtime_event(self, title: str, description: str, color: int) -> None:
+        for guild in self.guilds:
+            ch = _resolve_or_track_text_channel(guild, "bot_log", BOT_LOG_NAME, "bot-logs")
+            if not ch:
+                continue
+            try:
+                embed = discord.Embed(title=title, description=description, color=color)
+                embed.timestamp = discord.utils.utcnow()
+                await ch.send(embed=embed)
+            except Exception as e:
+                print(f"[BotLog] Failed runtime event send in {guild.name} ({guild.id}): {e}")
+
+    async def _announce_recovered_if_needed(self, source: str) -> None:
+        if not self._disconnect_started_at:
+            return
+        outage_seconds = max(1, int((discord.utils.utcnow() - self._disconnect_started_at).total_seconds()))
+        self._disconnect_started_at = None
+        await self._send_bot_runtime_event(
+            "🟢 Bot Back Online",
+            (
+                f"Gateway connection restored via **{source}**.\n"
+                f"Estimated outage: **{self._format_outage(outage_seconds)}**."
+            ),
+            0x2ECC71,
+        )
 
     async def on_member_join(self, member: discord.Member):
         # ── Invite tracking ───────────────────────────────────────────────
@@ -75,7 +118,8 @@ class Client(commands.Bot):
                 description=(
                     f"Welcome, {member.mention}! 👋\n\n"
                     f"You are member **#{member.guild.member_count}**.\n"
-                    f"Check out the rules and enjoy your stay!"
+                    f"Check out the rules and enjoy your stay!\n"
+                    f"Then head to **#{VERIFY_CHANNEL_NAME}** and click **Verify — Get Access** to unlock channels."
                 ),
                 color=0x2ECC71,
             )
@@ -87,8 +131,8 @@ class Client(commands.Bot):
             embed.timestamp = discord.utils.utcnow()
             await welcome_ch.send(embed=embed)
 
-        # ── Social alert in #social-alerts ───────────────────────────────
-        alert_ch = discord.utils.get(member.guild.text_channels, name="social-alerts")
+        # ── Social alert in the configured social alerts channel ──────────
+        alert_ch = _resolve_social_alert_channel(member.guild)
         if alert_ch:
             desc = f"📥 {member.mention} **joined the server** — member #{member.guild.member_count}"
             if inviter:
@@ -100,7 +144,7 @@ class Client(commands.Bot):
 
     async def on_member_remove(self, member: discord.Member):
         # ── Social alert when someone leaves ─────────────────────────────
-        alert_ch = discord.utils.get(member.guild.text_channels, name="social-alerts")
+        alert_ch = _resolve_social_alert_channel(member.guild)
         if alert_ch:
             embed = discord.Embed(
                 description=f"📤 **{member}** left the server.",
@@ -108,12 +152,17 @@ class Client(commands.Bot):
             )
             embed.set_author(name=str(member), icon_url=member.display_avatar.url)
             embed.timestamp = discord.utils.utcnow()
-            await alert_ch.send(embed=embed)
+            try:
+                await alert_ch.send(embed=embed)
+            except discord.Forbidden:
+                print(f"[Social] Missing access to send leave alert in {member.guild.name} ({member.guild.id})")
+            except Exception as e:
+                print(f"[Social] Leave alert failed in {member.guild.name} ({member.guild.id}): {e}")
 
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         # ── Social alert when someone boosts ─────────────────────────────
         if before.premium_since is None and after.premium_since is not None:
-            alert_ch = discord.utils.get(after.guild.text_channels, name="social-alerts")
+            alert_ch = _resolve_social_alert_channel(after.guild)
             if alert_ch:
                 embed = discord.Embed(
                     title="💎 New Server Boost!",
@@ -214,7 +263,7 @@ class Client(commands.Bot):
     async def on_message_delete(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+        log_ch = _resolve_mod_log_channel(message.guild)
         if log_ch:
             embed = discord.Embed(title="🗑️ Message Deleted", color=0xE74C3C)
             embed.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
@@ -222,6 +271,55 @@ class Client(commands.Bot):
             embed.add_field(name="Content", value=message.content[:1024] or "*empty*", inline=False)
             embed.timestamp = discord.utils.utcnow()
             await log_ch.send(embed=embed)
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        """Log deletes even when the message was not cached by the gateway."""
+        if payload.guild_id is None:
+            return
+        guild = self.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        log_ch = _resolve_mod_log_channel(guild)
+        if log_ch is None:
+            return
+
+        channel_mention = f"<#{payload.channel_id}>"
+        cached = payload.cached_message
+        if cached is not None and cached.author and cached.author.bot:
+            return
+
+        embed = discord.Embed(title="🗑️ Message Deleted", color=0xE74C3C)
+        embed.add_field(name="Channel", value=channel_mention, inline=False)
+        embed.add_field(name="Message ID", value=f"`{payload.message_id}`", inline=True)
+        if cached is not None:
+            embed.set_author(name=str(cached.author), icon_url=cached.author.display_avatar.url)
+            embed.add_field(name="Content", value=cached.content[:1024] or "*empty*", inline=False)
+        else:
+            embed.add_field(name="Content", value="*Unavailable (message not cached)*", inline=False)
+        embed.timestamp = discord.utils.utcnow()
+        await log_ch.send(embed=embed)
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent):
+        """Log bulk deletions (purges) with count and message IDs."""
+        if payload.guild_id is None:
+            return
+        guild = self.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        log_ch = _resolve_mod_log_channel(guild)
+        if log_ch is None:
+            return
+
+        ids = sorted(payload.message_ids)
+        sample = ", ".join(f"`{mid}`" for mid in ids[:20])
+        extra = "" if len(ids) <= 20 else f"\n...and {len(ids) - 20} more"
+
+        embed = discord.Embed(title="🧹 Bulk Messages Deleted", color=0xE67E22)
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=False)
+        embed.add_field(name="Count", value=str(len(ids)), inline=True)
+        embed.add_field(name="Message IDs", value=(sample + extra) if sample else "*Unavailable*", inline=False)
+        embed.timestamp = discord.utils.utcnow()
+        await log_ch.send(embed=embed)
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.message_id not in REACTION_ROLES:
@@ -257,6 +355,11 @@ class Client(commands.Bot):
 
     async def on_ready(self):
         print(f'Logged on as {self.user}!')
+        print(f"[Startup] Marker={STARTUP_MARKER} PID={os.getpid()} Guilds={len(self.guilds)}")
+        if self._startup_completed:
+            # on_ready can fire multiple times (reconnects); avoid re-running startup setup.
+            await self._announce_recovered_if_needed("on_ready")
+            return
         if not discord.opus.is_loaded():
             try:
                 opus_lib = None
@@ -285,13 +388,46 @@ class Client(commands.Bot):
             client.add_view(GameRoleView())
             client.add_view(TicketView())
             client.add_view(OpenTicketView())
-            # Cache invites for all guilds
-            for guild in self.guilds:
+            # Resolve primary guild by name first (Gaming Zone), then ID fallback.
+            primary_guild = discord.utils.find(
+                lambda g: g.name.casefold() == PRIMARY_GUILD_NAME.casefold(),
+                self.guilds,
+            )
+            if primary_guild is None:
+                primary_guild = self.get_guild(PRIMARY_GUILD_ID)
+            if primary_guild is None:
+                print(f"[Startup] WARNING: could not resolve primary guild by name '{PRIMARY_GUILD_NAME}' or ID {PRIMARY_GUILD_ID}.")
+            else:
+                print(f"[Startup] Primary guild locked to {primary_guild.name} ({primary_guild.id})")
+
+            # Optionally leave all non-primary guilds so activity/logs stay in Gaming Zone only.
+            if AUTO_LEAVE_NON_PRIMARY_GUILDS and primary_guild is not None:
+                for g in list(self.guilds):
+                    if g.id == primary_guild.id:
+                        continue
+                    try:
+                        print(f"[Startup] Leaving non-primary guild {g.name} ({g.id})")
+                        await g.leave()
+                    except Exception as e:
+                        print(f"[Startup] Could not leave guild {g.name} ({g.id}): {e}")
+
+            if primary_guild is not None:
                 try:
-                    invites = await guild.invites()
-                    INVITE_CACHE[guild.id] = {inv.code: inv for inv in invites}
+                    invites = await primary_guild.invites()
+                    INVITE_CACHE[primary_guild.id] = {inv.code: inv for inv in invites}
                 except Exception:
                     pass
+                try:
+                    await _ensure_social_alert_channel(primary_guild)
+                except Exception as e:
+                    print(f"[Social] Startup social channel check failed in {primary_guild.name}: {e}")
+                # Keep managed channel mappings scoped to the active primary guild only.
+                keep_gid = str(primary_guild.id)
+                stale_gids = [gid for gid in MANAGED_CHANNEL_IDS.keys() if gid != keep_gid]
+                for gid in stale_gids:
+                    del MANAGED_CHANNEL_IDS[gid]
+                if stale_gids:
+                    _save_managed_channels()
             # Start background tasks once
             if not giveaway_check.is_running():
                 giveaway_check.start()
@@ -301,6 +437,8 @@ class Client(commands.Bot):
                 free_games_check.start()
             if not empty_vc_cleanup.is_running():
                 empty_vc_cleanup.start()
+            if not ticket_sla_check.is_running():
+                ticket_sla_check.start()
 
             # Register grouped feature commands once (global)
             if not self._feature_cmds_registered:
@@ -309,39 +447,114 @@ class Client(commands.Bot):
                 gambling.setup_gambling(self)
                 self._feature_cmds_registered = True
 
-            # Ensure private log channels exist in all guilds
-            for g in self.guilds:
+            # Do NOT auto-create channels on startup/restart.
+            # Only validate and warn in the primary guild; admins can run setup commands explicitly.
+            global LOG_CHANNEL_ID
+            marker_guild = primary_guild
+            marker_ch = None
+            role_ch = None
+            ticket_ch = None
+            if marker_guild is not None:
+                # Always reconcile log channels in the primary guild (moves/renames to target names/category).
                 try:
-                    await _ensure_log_channels(g)
-                    # Don't auto-create feature channels on restart — only when admin runs /setupchannels
-                    # await _ensure_feature_channels(g)
-                    # await _post_verify_embed(g)
+                    await _ensure_log_channels(marker_guild)
                 except Exception as e:
-                    print(f"[Logs] Could not create channels in {g.name}: {e}")
+                    print(f"[Startup] Could not ensure log channels in {marker_guild.name} ({marker_guild.id}): {e}")
+                ch = marker_guild.get_channel(LOG_CHANNEL_ID)
+                if isinstance(ch, discord.TextChannel):
+                    marker_ch = ch
+                else:
+                    marker_ch = _resolve_mod_log_channel(marker_guild)
+                if marker_ch is None:
+                    # Retry one more lookup after reconciliation.
+                    marker_ch = _resolve_mod_log_channel(marker_guild)
+                role_ch = _resolve_or_track_text_channel(marker_guild, "role_log", ROLE_LOG_NAME, "role-logs")
+                ticket_ch = _resolve_ticket_log_channel(marker_guild)
 
-            # Global sync plus per-guild fast sync so new servers get commands immediately
-            synced_global = await self.tree.sync()
-            print(f'Synced {len(synced_global)} global slash commands.')
-            for g in self.guilds:
+                if marker_ch:
+                    print(f"[Startup] Log route mod: #{marker_ch.name} ({marker_ch.id})")
+                if role_ch:
+                    print(f"[Startup] Log route role: #{role_ch.name} ({role_ch.id})")
+                if ticket_ch:
+                    print(f"[Startup] Log route ticket: #{ticket_ch.name} ({ticket_ch.id})")
+
+            if marker_guild is None:
+                print("[Startup] ⚠️  No primary guild resolved; startup marker not sent.")
+            elif marker_ch is None:
+                print(f"[Startup] ⚠️  No mod-logs channel found in primary guild {marker_guild.name} ({marker_guild.id}); startup marker not sent.")
+            else:
                 try:
-                    # Ensure global commands are available immediately in each guild.
-                    self.tree.copy_global_to(guild=g)
-                    synced_guild = await self.tree.sync(guild=g)
-                    print(f'Synced {len(synced_guild)} slash commands to guild {g.id}')
+                    LOG_CHANNEL_ID = marker_ch.id
+                    marker_embed = discord.Embed(title="🟢 Bot Startup Marker", color=0x2ECC71)
+                    marker_embed.add_field(name="Marker", value=f"`{STARTUP_MARKER}`", inline=False)
+                    marker_embed.add_field(name="PID", value=f"`{os.getpid()}`", inline=True)
+                    marker_embed.add_field(name="Guild", value=f"`{marker_guild.id}`", inline=True)
+                    marker_embed.timestamp = discord.utils.utcnow()
+                    await marker_ch.send(embed=marker_embed)
+                    print(f"[Startup] ✅ Sent startup marker to {marker_ch.mention} in {marker_guild.name} ({marker_guild.id})")
                 except Exception as e:
-                    print(f"[Sync] Could not sync guild {g.id}: {e}")
+                    print(f"[Startup] Error sending marker: {e}")
+                    import traceback
+                    traceback.print_exc()
+            if primary_guild is not None:
+                try:
+                    if _resolve_ticket_log_channel(primary_guild) is None:
+                        print(f"[Startup] Missing ticket log channel in {primary_guild.name} (expected #{TICKET_LOG_NAME})")
+                except Exception as e:
+                    print(f"[Startup] Ticket log validation failed in {primary_guild.name}: {e}")
+
+            # Sync slash commands only to the resolved primary guild.
+            try:
+                if primary_guild is None:
+                    print("[Sync] Skipped guild sync because no primary guild was resolved.")
+                else:
+                    # Make global commands available immediately in the primary guild.
+                    self.tree.copy_global_to(guild=discord.Object(id=primary_guild.id))
+                    synced_guild = await self.tree.sync(guild=discord.Object(id=primary_guild.id))
+                    print(f"Synced {len(synced_guild)} slash commands to primary guild {primary_guild.id}")
+                    try:
+                        synced_names = ", ".join(sorted(cmd.name for cmd in synced_guild))
+                        print(f"[Sync] Commands: {synced_names}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[Sync] Could not sync resolved primary guild: {e}")
             # Inject the running event loop into the dashboard now that the bot is connected
             dashboard._state["bot_loop"] = asyncio.get_event_loop()
+            self._startup_completed = True
+
+            await self._announce_recovered_if_needed("on_ready")
         except Exception as e:
             print(f'Error syncing commands: {e}')
 
+    async def on_disconnect(self):
+        # Called when gateway disconnects; Discord will usually auto-reconnect.
+        if self._disconnect_started_at is not None:
+            return
+        self._disconnect_started_at = discord.utils.utcnow()
+        await self._send_bot_runtime_event(
+            "🔴 Bot Offline Detected",
+            "Gateway connection dropped. Attempting automatic reconnect...",
+            0xE74C3C,
+        )
+
+    async def on_resumed(self):
+        await self._announce_recovered_if_needed("on_resumed")
+
     async def on_guild_join(self, guild: discord.Guild):
+        if guild.name.casefold() != PRIMARY_GUILD_NAME.casefold() and guild.id != PRIMARY_GUILD_ID:
+            print(f"[Guild Join] Non-primary guild joined: {guild.name} ({guild.id})")
+            if AUTO_LEAVE_NON_PRIMARY_GUILDS:
+                try:
+                    await guild.leave()
+                    print(f"[Guild Join] Left non-primary guild {guild.name} ({guild.id})")
+                except Exception as e:
+                    print(f"[Guild Join] Could not leave non-primary guild {guild.name} ({guild.id}): {e}")
+            return
         try:
-            await _ensure_log_channels(guild)
-            # Feature channels will be created manually via /setupchannels admin command
-            await _post_verify_embed(guild)
             synced = await self.tree.sync(guild=guild)
             print(f"[Guild Join] Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
+            print("[Guild Join] Auto channel creation is disabled. Use setup commands to create channels.")
         except Exception as e:
             print(f"[Guild Join] Setup/sync failed for {guild.name} ({guild.id}): {e}")
 
@@ -355,19 +568,136 @@ intents.moderation = True
 
 client = Client(command_prefix="!", intents=intents)
 
-LOG_CHANNEL_ID = 1495573126304497735
-MOD_LOG_NAME  = "mod-logs"   # admin-only mod action log
-ROLE_LOG_NAME = "role-logs"  # admin-only role assignment log
+LOG_CHANNEL_ID = 1496672123551355062
+LOGS_CATEGORY_ID = 1496416640022220902
+TICKET_LOG_CHANNEL_ID = 1496371222223655103
+TICKET_LOG_CATEGORY_ID = LOGS_CATEGORY_ID
+TICKET_LOG_NAME = "🎫┃ticket-logs"
+SOCIAL_ALERTS_CHANNEL_NAME = "📣┃social-alerts"
+LEGACY_SOCIAL_ALERTS_CHANNEL_NAME = "social-alerts"
+MOD_LOG_NAME  = "📋┃𝗆𝗈𝖽-𝗅𝗈𝗀𝗌"   # admin-only mod action log
+ROLE_LOG_NAME = "📜┃𝗋𝗈𝗅𝖾-𝗅𝗈𝗀𝗌"  # admin-only role assignment log
+BOT_LOG_NAME  = "🤖┃bot-logs"   # private bot runtime/economy event log
 GAMBLING_CHANNEL_NAME = "casino-floor"   # dedicated casino text channel
 POKEMON_CHANNEL_NAME  = "pokemon-battle" # dedicated pokemon battle channel
 GAMER_ROLE_NAME       = "Gamer"          # role granted on verification — unlocks feature channels
 VERIFY_CHANNEL_NAME   = "✅-verify"       # visible to unverified; hidden once Gamer role is granted
+VERIFY_REWARD_COINS   = 1800              # one-time reward when a member verifies
 MUSIC_CATEGORY_NAME   = "♦┃𝙏𝙚𝙭𝙩 𝘾𝙝𝙖𝙣𝙣𝙚𝙡𝙨┃♦"  # category where music-channel is created
 WHITELIST: set[int] = set()  # stores whitelisted user IDs
+VERIFY_EMBED_MARKER = "GZ_VERIFY_EMBED_V1"
+_MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+MANAGED_CHANNEL_IDS: dict[str, dict[str, int]] = {}
+STARTUP_MARKER = f"boot-{int(time.time())}-{os.getpid()}"
+
+
+def _load_managed_channels() -> None:
+    global MANAGED_CHANNEL_IDS
+    if not os.path.exists(_MANAGED_CHANNELS_SAVE):
+        return
+    try:
+        with open(_MANAGED_CHANNELS_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            MANAGED_CHANNEL_IDS = {str(gid): {str(k): int(v) for k, v in mapping.items()} for gid, mapping in data.items() if isinstance(mapping, dict)}
+    except Exception as e:
+        print(f"[Channels] Warning: could not load managed channel ids — {e}")
+
+
+def _save_managed_channels() -> None:
+    try:
+        with open(_MANAGED_CHANNELS_SAVE, "w", encoding="utf-8") as f:
+            json.dump(MANAGED_CHANNEL_IDS, f)
+    except Exception as e:
+        print(f"[Channels] Warning: could not save managed channel ids — {e}")
+
+
+def _remember_channel(guild: discord.Guild, key: str, channel: discord.abc.GuildChannel) -> None:
+    gid = str(guild.id)
+    MANAGED_CHANNEL_IDS.setdefault(gid, {})[key] = int(channel.id)
+    _save_managed_channels()
+
+
+def _tracked_text_channel(guild: discord.Guild, key: str) -> discord.TextChannel | None:
+    cid = MANAGED_CHANNEL_IDS.get(str(guild.id), {}).get(key)
+    if not cid:
+        return None
+    ch = guild.get_channel(cid)
+    return ch if isinstance(ch, discord.TextChannel) else None
+
+
+def _resolve_or_track_text_channel(guild: discord.Guild, key: str, *names: str) -> discord.TextChannel | None:
+    tracked = _tracked_text_channel(guild, key)
+    if tracked:
+        return tracked
+    found = _find_text_channel_ci(guild, *names)
+    if found:
+        _remember_channel(guild, key, found)
+    return found
+
+
+_load_managed_channels()
+
+
+def _find_text_channel_ci(guild: discord.Guild, *names: str) -> discord.TextChannel | None:
+    """Case-insensitive text channel lookup across one or more possible names."""
+    wanted = {n.lower() for n in names if n}
+    for ch in guild.text_channels:
+        if ch.name.lower() in wanted:
+            return ch
+    return None
+
+
+def _resolve_social_alert_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Resolve social alerts channel by preferred emoji name, then legacy name."""
+    return _find_text_channel_ci(guild, SOCIAL_ALERTS_CHANNEL_NAME, LEGACY_SOCIAL_ALERTS_CHANNEL_NAME)
+
+
+async def _ensure_social_alert_channel(guild: discord.Guild) -> None:
+    """Rename legacy social alerts channel to the emoji style name when present."""
+    ch = _resolve_social_alert_channel(guild)
+    if not ch:
+        return
+    if ch.name != SOCIAL_ALERTS_CHANNEL_NAME:
+        try:
+            await ch.edit(name=SOCIAL_ALERTS_CHANNEL_NAME)
+            print(f"[Social] Renamed #{LEGACY_SOCIAL_ALERTS_CHANNEL_NAME} to #{SOCIAL_ALERTS_CHANNEL_NAME} in {guild.name}")
+        except Exception as e:
+            print(f"[Social] Could not rename social alerts channel in {guild.name}: {e}")
+
+
+def _resolve_mod_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Resolve moderation log channel by legacy ID first, then by configured name."""
+    ch = guild.get_channel(LOG_CHANNEL_ID)
+    if isinstance(ch, discord.TextChannel):
+        _remember_channel(guild, "mod_log", ch)
+        return ch
+    return _resolve_or_track_text_channel(guild, "mod_log", MOD_LOG_NAME, "mod-logs")
+
+
+def _resolve_ticket_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Resolve ticket log channel with tolerant name matching."""
+    configured = guild.get_channel(TICKET_LOG_CHANNEL_ID)
+    if isinstance(configured, discord.TextChannel):
+        _remember_channel(guild, "ticket_log", configured)
+        return configured
+    tracked = _tracked_text_channel(guild, "ticket_log")
+    if tracked:
+        return tracked
+    ticket_cat = guild.get_channel(TICKET_LOG_CATEGORY_ID)
+    if isinstance(ticket_cat, discord.CategoryChannel):
+        wanted = {TICKET_LOG_NAME.lower(), "ticket logs", "ticket-log", "ticket_logs"}
+        for ch in ticket_cat.text_channels:
+            if ch.name.lower() in wanted:
+                _remember_channel(guild, "ticket_log", ch)
+                return ch
+    return _resolve_or_track_text_channel(guild, "ticket_log", TICKET_LOG_NAME, "ticket logs", "ticket-log", "ticket_logs")
 
 
 async def _ensure_log_channels(guild: discord.Guild) -> None:
-    """Create mod-logs and role-logs with admin-only visibility if they don't exist."""
+    """Create private moderation, role, and bot logs channels."""
+    logs_category = guild.get_channel(LOGS_CATEGORY_ID)
+    category_kwargs = {"category": logs_category} if isinstance(logs_category, discord.CategoryChannel) else {}
     admin_ow = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         guild.me: discord.PermissionOverwrite(
@@ -379,13 +709,90 @@ async def _ensure_log_channels(guild: discord.Guild) -> None:
             admin_ow[role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=False, read_message_history=True
             )
-    for ch_name, topic in [
-        (MOD_LOG_NAME,  "🔨 Private admin log — every mod command is recorded here."),
-        (ROLE_LOG_NAME, "🏷️ Private role log — all role picks from embeds are recorded here."),
+    for key, ch_name, legacy_name, topic in [
+        ("mod_log", MOD_LOG_NAME, "mod-logs", "🔨 Private admin log — every mod command is recorded here."),
+        ("role_log", ROLE_LOG_NAME, "role-logs", "🏷️ Private role log — all role picks from embeds are recorded here."),
+        ("bot_log", BOT_LOG_NAME, "bot-logs", "🤖 Private bot log — runtime and economy automation events."),
     ]:
-        if not discord.utils.get(guild.text_channels, name=ch_name):
-            await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic)
+        wanted_names = {ch_name.casefold(), legacy_name.casefold()}
+        tracked = _tracked_text_channel(guild, key)
+        candidates = [ch for ch in guild.text_channels if ch.name.casefold() in wanted_names]
+
+        existing = None
+        if tracked and tracked.name.casefold() in wanted_names:
+            existing = tracked
+        elif isinstance(logs_category, discord.CategoryChannel):
+            existing = next((ch for ch in candidates if ch.category and ch.category.id == logs_category.id), None)
+        if existing is None and candidates:
+            existing = candidates[0]
+
+        if not existing:
+            existing = await guild.create_text_channel(ch_name, overwrites=admin_ow, topic=topic, **category_kwargs)
             print(f"[Logs] Created #{ch_name} in {guild.name}")
+        edit_kwargs = {"overwrites": admin_ow, "topic": topic}
+        if existing.name != ch_name:
+            edit_kwargs["name"] = ch_name
+        if isinstance(logs_category, discord.CategoryChannel) and existing.category != logs_category:
+            edit_kwargs["category"] = logs_category
+        await existing.edit(**edit_kwargs)
+        if existing.name != ch_name:
+            print(f"[Logs] Renamed #{legacy_name} to #{ch_name} in {guild.name}")
+        _remember_channel(guild, key, existing)
+
+        # Remove duplicate legacy/target channels in the logs category.
+        for dup in candidates:
+            if dup.id == existing.id:
+                continue
+            if isinstance(logs_category, discord.CategoryChannel) and dup.category and dup.category.id == logs_category.id:
+                try:
+                    await dup.delete(reason=f"Cleanup duplicate log channel; keeping {existing.name} ({existing.id})")
+                    print(f"[Logs] Deleted duplicate #{dup.name} ({dup.id}) in {guild.name}")
+                except Exception as e:
+                    print(f"[Logs] Could not delete duplicate #{dup.name} ({dup.id}) in {guild.name}: {e}")
+            else:
+                print(f"[Logs] Found duplicate #{dup.name} ({dup.id}) outside logs category; left untouched")
+
+    # Ticket logs channel stays separate from mod/role logs and prefers the configured channel ID.
+    ticket_topic = "🎫 Private ticket transcript log — closed ticket history is saved here."
+    configured_ticket = guild.get_channel(TICKET_LOG_CHANNEL_ID)
+    ticket_cat = None
+    if isinstance(configured_ticket, discord.TextChannel) and isinstance(configured_ticket.category, discord.CategoryChannel):
+        ticket_cat = configured_ticket.category
+    else:
+        resolved_ticket_cat = guild.get_channel(TICKET_LOG_CATEGORY_ID)
+        if isinstance(resolved_ticket_cat, discord.CategoryChannel):
+            ticket_cat = resolved_ticket_cat
+
+    existing_ticket_log = configured_ticket if isinstance(configured_ticket, discord.TextChannel) else _resolve_ticket_log_channel(guild)
+    if existing_ticket_log:
+        edit_kwargs = {"overwrites": admin_ow, "topic": ticket_topic}
+        if existing_ticket_log.name != TICKET_LOG_NAME:
+            edit_kwargs["name"] = TICKET_LOG_NAME
+        if isinstance(ticket_cat, discord.CategoryChannel) and existing_ticket_log.category != ticket_cat:
+            edit_kwargs["category"] = ticket_cat
+        await existing_ticket_log.edit(**edit_kwargs)
+        _remember_channel(guild, "ticket_log", existing_ticket_log)
+
+        # Remove duplicate ticket-log channels in the ticket category.
+        ticket_aliases = {TICKET_LOG_NAME.casefold(), "ticket logs", "ticket-log", "ticket_logs"}
+        for dup in guild.text_channels:
+            if dup.id == existing_ticket_log.id:
+                continue
+            if dup.name.casefold() not in ticket_aliases:
+                continue
+            if isinstance(ticket_cat, discord.CategoryChannel) and dup.category and dup.category.id == ticket_cat.id:
+                try:
+                    await dup.delete(reason=f"Cleanup duplicate ticket log channel; keeping {existing_ticket_log.name} ({existing_ticket_log.id})")
+                    print(f"[Logs] Deleted duplicate ticket log #{dup.name} ({dup.id}) in {guild.name}")
+                except Exception as e:
+                    print(f"[Logs] Could not delete duplicate ticket log #{dup.name} ({dup.id}) in {guild.name}: {e}")
+    else:
+        create_kwargs = {"overwrites": admin_ow, "topic": ticket_topic}
+        if isinstance(ticket_cat, discord.CategoryChannel):
+            create_kwargs["category"] = ticket_cat
+        created = await guild.create_text_channel(TICKET_LOG_NAME, **create_kwargs)
+        _remember_channel(guild, "ticket_log", created)
+        print(f"[Logs] Created #{TICKET_LOG_NAME} in {guild.name}")
 
 async def _ensure_feature_channels(guild: discord.Guild) -> None:
     """Auto-create casino, pokemon-battle, and music-channel locked to the Gamer role."""
@@ -415,20 +822,23 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
     )
 
     channels = [
-        (GAMBLING_CHANNEL_NAME, "🎰 Use all casino commands here! /slots /blackjack /poker /crash and more", None),
-        (POKEMON_CHANNEL_NAME,  "⚔️ Challenge others to Pokemon battles here! /pokemon battle", None),
-        (MUSIC_CHANNEL_NAME,    "🎵 Request music and use all music commands here! /play /skip /queue", music_category if music_category else None),
+        (GAMBLING_CHANNEL_NAME, "🎰 Use all casino commands here! /slots /blackjack /poker /crash and more", None, ["casino-floor", "casino"]),
+        (POKEMON_CHANNEL_NAME,  "⚔️ Challenge others to Pokemon battles here! /pokemon battle", None, ["pokemon-battle", "pokemon"]),
+        (MUSIC_CHANNEL_NAME,    "🎵 Request music and use all music commands here! /play /skip /queue", music_category if music_category else None, ["music-channel", "music"]),
     ]
-    for ch_name, topic, category in channels:
-        ch = discord.utils.get(guild.text_channels, name=ch_name)
+    for idx, (ch_name, topic, category, aliases) in enumerate(channels):
+        key = ["casino_channel", "pokemon_channel", "music_channel"][idx]
+        ch = _resolve_or_track_text_channel(guild, key, ch_name, *aliases)
         if ch:
             # Update existing channel perms (and move to correct category if set)
             edit_kwargs = {"overwrites": restricted_ow}
             if category and ch.category != category:
                 edit_kwargs["category"] = category
             await ch.edit(**edit_kwargs)
+            _remember_channel(guild, key, ch)
         else:
             ch = await guild.create_text_channel(ch_name, overwrites=restricted_ow, topic=topic, category=category)
+            _remember_channel(guild, key, ch)
             print(f"[Channels] Created #{ch_name} in {guild.name}" + (f" under '{category.name}'" if category else ""))
 
     # Verify channel: visible to @everyone, hidden once they have the Gamer role
@@ -447,27 +857,43 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
             verify_ow[role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True
             )
-    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    verify_ch = _resolve_or_track_text_channel(guild, "verify_channel", VERIFY_CHANNEL_NAME, "verify", "✅-verify", "-verify")
+    if verify_ch is None:
+        # Last-resort fallback: reuse any prior verify-like channel by topic marker.
+        verify_ch = next(
+            (
+                c for c in guild.text_channels
+                if c.topic and "verify" in c.topic.lower() and "unlock" in c.topic.lower()
+            ),
+            None,
+        )
+        if verify_ch:
+            _remember_channel(guild, "verify_channel", verify_ch)
     if verify_ch:
         await verify_ch.edit(overwrites=verify_ow)
+        _remember_channel(guild, "verify_channel", verify_ch)
     else:
         verify_ch = await guild.create_text_channel(
             VERIFY_CHANNEL_NAME,
             overwrites=verify_ow,
             topic="🟢 Click the button to verify and unlock the server!",
         )
+        _remember_channel(guild, "verify_channel", verify_ch)
         print(f"[Channels] Created #{VERIFY_CHANNEL_NAME} in {guild.name}")
 
 async def _post_verify_embed(guild: discord.Guild) -> None:
     """Post the verification embed in #verify (visible to new members, hidden after they verify)."""
-    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    verify_ch = _find_text_channel_ci(guild, VERIFY_CHANNEL_NAME, "verify", "-verify")
     if not verify_ch:
         return
 
-    # Don't repost if there's already a bot message with the verify embed
+    # Don't repost if there's already a verify message (check pins first, then recent history).
     try:
-        async for msg in verify_ch.history(limit=20):
-            if msg.author == guild.me and msg.embeds and msg.embeds[0].title and "✅" in msg.embeds[0].title:
+        for msg in await verify_ch.pins():
+            if msg.author == guild.me and msg.embeds and msg.embeds[0].footer and msg.embeds[0].footer.text and VERIFY_EMBED_MARKER in msg.embeds[0].footer.text:
+                return
+        async for msg in verify_ch.history(limit=150):
+            if msg.author == guild.me and msg.embeds and msg.embeds[0].footer and msg.embeds[0].footer.text and VERIFY_EMBED_MARKER in msg.embeds[0].footer.text:
                 return
     except Exception:
         pass
@@ -484,9 +910,13 @@ async def _post_verify_embed(guild: discord.Guild) -> None:
         ),
         color=0x2ECC71,
     )
-    embed.set_footer(text="GamingZoneBot • Click once to verify")
+    embed.set_footer(text=f"GamingZoneBot • Click once to verify • {VERIFY_EMBED_MARKER}")
     try:
-        await verify_ch.send(embed=embed, view=GamerVerifyView())
+        verify_msg = await verify_ch.send(embed=embed, view=GamerVerifyView())
+        try:
+            await verify_msg.pin(reason="Keep a single canonical verification message across restarts")
+        except Exception:
+            pass
         print(f"[Verify] Posted verification embed in #{VERIFY_CHANNEL_NAME} in {guild.name}")
     except Exception as e:
         print(f"[Verify] Could not post embed in {guild.name}: {e}")
@@ -542,6 +972,22 @@ def _add_xp(guild_id: int, user_id: int, amount: int) -> tuple[int, int, bool]:
     new_lvl = _xp_to_level(guild_xp[user_id])
     return old_lvl, new_lvl, new_lvl > old_lvl
 
+
+def _format_uptime(seconds: int) -> str:
+    days, rem = divmod(max(0, seconds), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
 # ── Voice Time Tracking ───────────────────────────────────────────────────────
 VOICE_JOIN_TIME: dict[int, dict[int, float]] = {}  # guild_id -> {user_id -> join_timestamp}
 VOICE_MINUTES:   dict[int, dict[int, int]]   = {}  # guild_id -> {user_id -> total_minutes}
@@ -553,7 +999,7 @@ INVITE_COUNTS: dict[int, dict[int, int]]            = {}  # guild_id -> {inviter
 # ── Tickets ───────────────────────────────────────────────────────────────────
 OPEN_TICKETS: dict[int, int] = {}  # user_id -> channel_id
 TICKET_CATEGORY_NAME = "Support Tickets"
-TICKET_LOG_NAME      = "ticket-logs"
+TICKET_LOG_NAME      = "🎫┃ticket-logs"
 _TICKET_LOCKS: dict[int, asyncio.Lock] = {}  # per-user lock prevents race condition duplicates
 
 def _get_ticket_lock(user_id: int) -> asyncio.Lock:
@@ -578,6 +1024,51 @@ STREAMER_CHANNEL_NAME = "streamer-alerts"
 FREE_GAMES_CHANNEL_NAME = "free-games"
 _FREE_GAMES_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "posted_free_games.json")
 POSTED_FREE_GAMES: set[int] = set()  # app IDs already announced
+FREE_GAMES_FIRST_CYCLE = True
+
+# ── LFG + RSVP Tracking ─────────────────────────────────────────────────────
+LFG_POSTS: dict[int, dict] = {}  # message_id -> metadata
+LFG_RSVP: dict[int, dict[str, set[int]]] = {}  # message_id -> {join|maybe|pass -> set(user_ids)}
+
+# ── Prestige System ────────────────────────────────────────────────────────
+# Enables players to "reset" and gain permanent bonuses at higher levels
+_PRESTIGE_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prestige_data.json")
+PRESTIGE_DATA: dict[int, dict[str, int]] = {}  # user_id -> {prestige: int, resets: int, total_xp_earned: int}
+PRESTIGE_LEVELS = 10  # max prestige level
+PRESTIGE_BONUS_XP_PER_LEVEL = 0.05  # 5% XP bonus per prestige level
+PRESTIGE_RESET_COST = 2500  # PokeCoins to reset and gain prestige (from gambling.py)
+
+# ── Economy Sinks + Cosmetics ────────────────────────────────────────────────
+COSMETICS = {
+    "title_badge": {"name": "Title Badge", "cost": 500, "desc": "Custom title prefix in chat"},
+    "border_glow": {"name": "Border Glow", "cost": 300, "desc": "Glowing effect on battle embeds"},
+    "avatar_frame": {"name": "Avatar Frame", "cost": 400, "desc": "Custom frame around your profile"},
+    "speed_boost": {"name": "Speed Boost", "cost": 1000, "desc": "+10% to all XP gains for 1 week"},
+}
+_COSMETICS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cosmetics_inventory.json")
+PLAYER_COSMETICS: dict[int, set[str]] = {}  # user_id -> {cosmetic_ids}
+
+# ── Ticket SLA Monitoring ───────────────────────────────────────────────────
+TICKET_SLA_HOURS = 6
+TICKET_SLA_REMINDER_COOLDOWN_MINUTES = 180
+TICKET_SLA_LAST_REMINDER: dict[int, float] = {}  # channel_id -> unix timestamp
+
+# ── Phase 4: Moderation Safety Automation ──────────────────────────────────
+# Raid mode: lock down channels during raids or high spam
+RAID_MODE_ACTIVE: dict[int, bool] = {}  # guild_id -> is_raid_mode_on
+RAID_MODE_ROLES_MUTED: dict[int, set[int]] = {}  # guild_id -> {role_ids that can't message}
+
+# Link quarantine: prevent suspicious URLs (non-Discord, malware-like)
+_QUARANTINE_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_quarantine.json")
+LINK_QUARANTINE: dict[int, dict[str, int]] = {}  # user_id -> {quarantine_level: 0-2, last_violation_time: unix}
+LINK_QUARANTINE_LEVELS = 3  # 0=normal, 1=quarantine (needs review), 2=banned
+
+# Account age gate: restrict new accounts from certain features
+ACCOUNT_AGE_GATE_DAYS = 7  # minimum account age to post links/participate in gyms/raids
+ACCOUNT_AGE_GATE_ENABLED: dict[int, bool] = {}  # guild_id -> is_enabled
+
+# Runtime Metadata
+BOT_BOOT_TIME_UTC = discord.utils.utcnow()
 
 def _load_posted_games() -> None:
     """Load previously posted game IDs from disk so we never repost them."""
@@ -598,7 +1089,111 @@ def _save_posted_games() -> None:
     except Exception as e:
         print(f"[FreeGames] Warning: could not save posted games list — {e}")
 
+
+def _ensure_lfg_rsvp(message_id: int) -> dict[str, set[int]]:
+    data = LFG_RSVP.setdefault(message_id, {"join": set(), "maybe": set(), "pass": set()})
+    for key in ("join", "maybe", "pass"):
+        data.setdefault(key, set())
+    return data
+
+
+def _lfg_rsvp_text(message_id: int, players_needed: int) -> str:
+    data = _ensure_lfg_rsvp(message_id)
+    going = len(data["join"])
+    maybe = len(data["maybe"])
+    passing = len(data["pass"])
+    return (
+        f"✅ Going: **{going}/{players_needed}**\n"
+        f"❔ Maybe: **{maybe}**\n"
+        f"❌ Pass: **{passing}**"
+    )
+
+
 _load_posted_games()
+
+
+def _load_prestige_data() -> None:
+    global PRESTIGE_DATA
+    if not os.path.exists(_PRESTIGE_SAVE):
+        return
+    try:
+        with open(_PRESTIGE_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            PRESTIGE_DATA = {int(uid): profile for uid, profile in data.items() if isinstance(profile, dict)}
+    except Exception as e:
+        print(f"[Prestige] Warning: could not load prestige data — {e}")
+
+
+def _save_prestige_data() -> None:
+    try:
+        with open(_PRESTIGE_SAVE, "w", encoding="utf-8") as f:
+            json.dump(PRESTIGE_DATA, f)
+    except Exception as e:
+        print(f"[Prestige] Warning: could not save prestige data — {e}")
+
+
+def _load_cosmetics_inventory() -> None:
+    global PLAYER_COSMETICS
+    if not os.path.exists(_COSMETICS_SAVE):
+        return
+    try:
+        with open(_COSMETICS_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            PLAYER_COSMETICS = {int(uid): set(items) for uid, items in data.items() if isinstance(items, list)}
+    except Exception as e:
+        print(f"[Cosmetics] Warning: could not load cosmetics — {e}")
+
+
+def _save_cosmetics_inventory() -> None:
+    try:
+        with open(_COSMETICS_SAVE, "w", encoding="utf-8") as f:
+            json.dump({uid: list(items) for uid, items in PLAYER_COSMETICS.items()}, f)
+    except Exception as e:
+        print(f"[Cosmetics] Warning: could not save cosmetics — {e}")
+
+
+def _prestige_profile(user_id: int) -> dict[str, int]:
+    profile = PRESTIGE_DATA.setdefault(user_id, {"prestige": 0, "resets": 0, "total_xp_earned": 0})
+    return profile
+
+
+def _get_prestige(user_id: int) -> int:
+    return _prestige_profile(user_id).get("prestige", 0)
+
+
+def _xp_multiplier(user_id: int) -> float:
+    prestige = _get_prestige(user_id)
+    return 1.0 + (prestige * PRESTIGE_BONUS_XP_PER_LEVEL)
+
+
+def _load_link_quarantine() -> None:
+    """Load link quarantine data from disk."""
+    global LINK_QUARANTINE
+    if not os.path.exists(_QUARANTINE_SAVE):
+        return
+    try:
+        with open(_QUARANTINE_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            LINK_QUARANTINE = {int(uid): record for uid, record in data.items() if isinstance(record, dict)}
+    except Exception as e:
+        print(f"[LinkQuarantine] Warning: could not load quarantine data — {e}")
+
+
+def _save_link_quarantine() -> None:
+    """Persist link quarantine data to disk."""
+    try:
+        with open(_QUARANTINE_SAVE, "w", encoding="utf-8") as f:
+            json.dump(LINK_QUARANTINE, f)
+    except Exception as e:
+        print(f"[LinkQuarantine] Warning: could not save quarantine data — {e}")
+
+
+_load_prestige_data()
+_load_cosmetics_inventory()
+_load_link_quarantine()
 
 # ── Personal Space (private temp voice channels) ──────────────────────────────
 # guild_id -> lobby voice channel ID that triggers creation
@@ -632,28 +1227,42 @@ class TicketCloseButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         ch = interaction.channel
-        if not interaction.user.guild_permissions.manage_channels and \
-           OPEN_TICKETS.get(interaction.user.id) != ch.id:
+        # Allow close if: has manage_channels, OR in OPEN_TICKETS (in-memory),
+        # OR has an explicit view_channel overwrite (ticket opener after bot restart).
+        user_ow = ch.overwrites_for(interaction.user)
+        can_close = (
+            interaction.user.guild_permissions.manage_channels
+            or OPEN_TICKETS.get(interaction.user.id) == ch.id
+            or user_ow.view_channel is True
+        )
+        if not can_close:
             await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
             return
         await interaction.response.send_message("Closing ticket in 5 seconds...")
         # log transcript
-        log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
-        if log_ch:
-            msgs = [m async for m in ch.history(limit=200, oldest_first=True)]
-            transcript = "\n".join(
-                f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
-                for m in msgs if not m.author.bot or m.content
-            )
-            embed = discord.Embed(title=f"📋 Ticket Closed — #{ch.name}", color=0xE74C3C)
-            embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
-            embed.timestamp = discord.utils.utcnow()
-            await log_ch.send(embed=embed)
+        log_ch = _resolve_ticket_log_channel(interaction.guild)
+        if log_ch is None:
+            print(f"[Tickets] WARNING: #{TICKET_LOG_NAME} channel not found — transcript not saved for {ch.name}")
+        else:
+            try:
+                msgs = [m async for m in ch.history(limit=200, oldest_first=True)]
+                transcript = "\n".join(
+                    f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
+                    for m in msgs if not m.author.bot or m.content
+                )
+                embed = discord.Embed(title=f"📋 Ticket Closed — #{ch.name}", color=0xE74C3C)
+                embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+                embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
+                embed.timestamp = discord.utils.utcnow()
+                await log_ch.send(embed=embed)
+            except Exception as e:
+                print(f"[Tickets] ERROR logging transcript for {ch.name}: {e}")
         # remove from open tickets
         for uid, cid in list(OPEN_TICKETS.items()):
             if cid == ch.id:
                 del OPEN_TICKETS[uid]
                 break
+        TICKET_SLA_LAST_REMINDER.pop(ch.id, None)
         await asyncio.sleep(5)
         await ch.delete(reason="Ticket closed")
 
@@ -668,53 +1277,162 @@ class GamerVerifyButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        try:
-            member = interaction.guild.get_member(interaction.user.id)
-            if not member:
-                # Member not cached — fetch from API
-                try:
-                    member = await interaction.guild.fetch_member(interaction.user.id)
-                except discord.NotFound:
-                    await interaction.response.send_message(
-                        "❌ Could not find your member data. Try rejoining the server.",
-                        ephemeral=True,
-                    )
-                    return
-            
-            gamer_role = discord.utils.get(interaction.guild.roles, name=GAMER_ROLE_NAME)
-            if not gamer_role:
-                await interaction.response.send_message(
-                    "❌ The Gamer role doesn't exist yet — ask an admin to run `/setupchannels`.",
-                    ephemeral=True,
+        # Defer immediately so Discord doesn't time out during API calls.
+        await interaction.response.defer(ephemeral=True)
+
+        member = interaction.guild.get_member(interaction.user.id)
+        if member is None:
+            # Cache miss — fetch from API directly.
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except Exception:
+                await interaction.followup.send(
+                    "❌ Could not find your member record. Please try again in a moment.", ephemeral=True
                 )
                 return
-            
-            if gamer_role in member.roles:
-                await interaction.response.send_message(
-                    "✅ You're already verified and have full access!", ephemeral=True
-                )
-                return
-            
-            await member.add_roles(gamer_role, reason="Self-verification via embed button")
-            await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
-            await interaction.response.send_message(
-                f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!",
+        gamer_role = discord.utils.get(interaction.guild.roles, name=GAMER_ROLE_NAME)
+        if not gamer_role:
+            await interaction.followup.send(
+                "❌ The Gamer role doesn't exist yet — ask an admin to run `/setupchannels`.",
                 ephemeral=True,
             )
+            return
+        if gamer_role in member.roles:
+            await interaction.followup.send(
+                "✅ You're already verified and have full access!", ephemeral=True
+            )
+            return
+        try:
+            await member.add_roles(gamer_role, reason="Self-verification via embed button")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to assign roles. Ask an admin to move my bot role **above** the Gamer role in Server Settings → Roles.",
+                ephemeral=True,
+            )
+            print(f"[Verify] FORBIDDEN — bot role is below @{GAMER_ROLE_NAME} in hierarchy. Cannot assign role.")
+            return
         except Exception as e:
-            print(f"[Verify Button] Error: {e}")
-            try:
-                await interaction.response.send_message(
-                    f"❌ Verification failed: {str(e)[:100]}",
-                    ephemeral=True,
-                )
-            except:
-                pass
+            await interaction.followup.send(
+                "❌ Something went wrong assigning your role. Please try again or contact an admin.", ephemeral=True
+            )
+            print(f"[Verify] ERROR assigning @{GAMER_ROLE_NAME} to {member}: {e}")
+            return
+        try:
+            await log_role_change(interaction.guild, member, gamer_role, added=True, source="Verification Embed")
+        except Exception as e:
+            print(f"[Verify] WARNING: failed to log role change: {e}")
+
+        reward_text = ""
+        try:
+            pokemon_game._ensure_player(member.id)
+            pokemon_game.WALLETS[member.id] = pokemon_game._wallet(member.id) + VERIFY_REWARD_COINS
+            new_balance = pokemon_game.WALLETS[member.id]
+            reward_text = (
+                f"\n💰 You were awarded **{VERIFY_REWARD_COINS} PokeCoins** for verifying! "
+                f"New balance: **{new_balance:,}**."
+            )
+
+            log_ch = _resolve_or_track_text_channel(interaction.guild, "bot_log", BOT_LOG_NAME, "bot-logs")
+            if not log_ch:
+                log_ch = _resolve_mod_log_channel(interaction.guild)
+            if log_ch:
+                coin_embed = discord.Embed(title="💰 PokeCoin Event", color=0x2ECC71)
+                coin_embed.add_field(name="Recipient", value=f"{member.mention} (`{member.id}`)", inline=True)
+                coin_embed.add_field(name="Amount", value=f"`+{VERIFY_REWARD_COINS:,}` PokeCoins", inline=True)
+                coin_embed.add_field(name="Balance", value=f"`{new_balance:,}` PokeCoins", inline=True)
+                coin_embed.add_field(name="Source", value="verify reward", inline=False)
+                coin_embed.timestamp = discord.utils.utcnow()
+                await log_ch.send(embed=coin_embed)
+        except Exception as e:
+            print(f"[Verify] WARNING: failed to award verification coins: {e}")
+
+        await interaction.followup.send(
+            f"🎉 Welcome! You now have the **@{GAMER_ROLE_NAME}** role and can access all channels!{reward_text}",
+            ephemeral=True,
+        )
 
 class GamerVerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(GamerVerifyButton())
+
+
+def _update_lfg_embed_rsvp(embed: discord.Embed, message_id: int, players_needed: int) -> None:
+    text = _lfg_rsvp_text(message_id, players_needed)
+    for idx, field in enumerate(embed.fields):
+        if field.name == "RSVP":
+            embed.set_field_at(idx, name="RSVP", value=text, inline=False)
+            return
+    embed.add_field(name="RSVP", value=text, inline=False)
+
+
+class LFGRSVPView(discord.ui.View):
+    def __init__(self, host_id: int, players_needed: int):
+        super().__init__(timeout=86400)
+        self.host_id = host_id
+        self.players_needed = players_needed
+        self.message_id: int | None = None
+
+    async def _apply_choice(self, interaction: discord.Interaction, choice: str):
+        if self.message_id is None:
+            await interaction.response.send_message("This LFG session is not active anymore.", ephemeral=True)
+            return
+        post = LFG_POSTS.get(self.message_id)
+        if not post or not post.get("active", True):
+            await interaction.response.send_message("This LFG post is already closed.", ephemeral=True)
+            return
+
+        data = _ensure_lfg_rsvp(self.message_id)
+        uid = interaction.user.id
+        for key in ("join", "maybe", "pass"):
+            data[key].discard(uid)
+        data[choice].add(uid)
+
+        message = interaction.message
+        if message and message.embeds:
+            embed = message.embeds[0]
+            _update_lfg_embed_rsvp(embed, self.message_id, self.players_needed)
+            await message.edit(embed=embed, view=self)
+
+        labels = {"join": "You're marked as **Going**.", "maybe": "You're marked as **Maybe**.", "pass": "You're marked as **Pass**."}
+        await interaction.response.send_message(labels[choice], ephemeral=True)
+
+    @discord.ui.button(label="Going", emoji="✅", style=discord.ButtonStyle.success)
+    async def btn_join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply_choice(interaction, "join")
+
+    @discord.ui.button(label="Maybe", emoji="❔", style=discord.ButtonStyle.secondary)
+    async def btn_maybe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply_choice(interaction, "maybe")
+
+    @discord.ui.button(label="Pass", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def btn_pass(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply_choice(interaction, "pass")
+
+    @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger)
+    async def btn_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.message_id is None:
+            await interaction.response.send_message("This LFG session is not active anymore.", ephemeral=True)
+            return
+        if interaction.user.id != self.host_id and not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("Only the host (or a moderator) can close this LFG post.", ephemeral=True)
+            return
+
+        post = LFG_POSTS.get(self.message_id)
+        if post:
+            post["active"] = False
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        message = interaction.message
+        if message and message.embeds:
+            embed = message.embeds[0]
+            embed.color = 0x7F8C8D
+            embed.set_footer(text="LFG closed")
+            await message.edit(embed=embed, view=self)
+        await interaction.response.send_message("LFG closed.", ephemeral=True)
 
 
 class TicketView(discord.ui.View):
@@ -751,6 +1469,7 @@ class OpenTicketButton(discord.ui.Button):
                 existing = discord.utils.get(cat.text_channels, name=f"ticket-{member.name}")
                 if existing:
                     OPEN_TICKETS[member.id] = existing.id
+                    TICKET_SLA_LAST_REMINDER.pop(existing.id, None)
                     await interaction.followup.send(f"You already have an open ticket: {existing.mention}", ephemeral=True)
                     return
             else:
@@ -772,6 +1491,7 @@ class OpenTicketButton(discord.ui.Button):
                 reason="Support ticket",
             )
             OPEN_TICKETS[member.id] = ch.id
+            TICKET_SLA_LAST_REMINDER.pop(ch.id, None)
             embed = discord.Embed(
                 title="🎫 Support Ticket",
                 description=f"Hello {member.mention}! Describe your issue and a staff member will assist you.\n\nClick **Close Ticket** when resolved.",
@@ -787,35 +1507,94 @@ class OpenTicketView(discord.ui.View):
         self.add_item(OpenTicketButton())
 
 # ── Background Tasks ──────────────────────────────────────────────────────────
+@tasks.loop(minutes=10)
+async def ticket_sla_check():
+    """Alert staff when tickets remain open beyond SLA threshold."""
+    now_unix = time.time()
+    now_dt = discord.utils.utcnow()
+
+    # Keep map clean by removing reminders for ticket channels that no longer exist.
+    live_ticket_channel_ids = set(OPEN_TICKETS.values())
+    for cid in list(TICKET_SLA_LAST_REMINDER.keys()):
+        if cid not in live_ticket_channel_ids:
+            TICKET_SLA_LAST_REMINDER.pop(cid, None)
+
+    guild = client.get_guild(PRIMARY_GUILD_ID)
+    if guild is None:
+        return
+
+    ticket_log = _resolve_ticket_log_channel(guild)
+    guild_tickets = [(uid, cid) for uid, cid in OPEN_TICKETS.items() if isinstance(guild.get_channel(cid), discord.TextChannel)]
+    for owner_id, channel_id in guild_tickets:
+        ch = guild.get_channel(channel_id)
+        if not isinstance(ch, discord.TextChannel):
+            continue
+
+        age_hours = (now_dt - ch.created_at).total_seconds() / 3600.0
+        if age_hours < TICKET_SLA_HOURS:
+            continue
+
+        last = TICKET_SLA_LAST_REMINDER.get(channel_id, 0)
+        if now_unix - last < TICKET_SLA_REMINDER_COOLDOWN_MINUTES * 60:
+            continue
+
+        TICKET_SLA_LAST_REMINDER[channel_id] = now_unix
+
+        staff_mentions = [r.mention for r in guild.roles if r.permissions.manage_channels and not r.is_default()][:3]
+        ping = " ".join(staff_mentions) if staff_mentions else "@here"
+        age_txt = f"{age_hours:.1f}h"
+
+        try:
+            await ch.send(
+                f"⏰ **Ticket SLA Reminder**: this ticket has been open for **{age_txt}**. {ping}\n"
+                f"Opened by <@{owner_id}>."
+            )
+        except Exception as e:
+            print(f"[TicketSLA] Could not post reminder in #{ch.name}: {e}")
+
+        if ticket_log:
+            try:
+                embed = discord.Embed(title="⏰ Ticket SLA Reminder", color=0xF39C12)
+                embed.add_field(name="Ticket", value=ch.mention, inline=True)
+                embed.add_field(name="Opened By", value=f"<@{owner_id}>", inline=True)
+                embed.add_field(name="Open Time", value=age_txt, inline=True)
+                embed.timestamp = now_dt
+                await ticket_log.send(embed=embed)
+            except Exception as e:
+                print(f"[TicketSLA] Could not log SLA reminder for #{ch.name}: {e}")
+
+
 @tasks.loop(minutes=2)
 async def empty_vc_cleanup():
     """Scan all guilds for empty user-created voice channels and delete them."""
-    for guild in client.guilds:
-        # Channels to always keep: lobby triggers, AFK channel, channels with 0 user limit that are permanent
-        protected_ids: set[int] = set()
-        if guild.afk_channel:
-            protected_ids.add(guild.afk_channel.id)
-        # Protect all Personal Space lobby channels
-        lobby_id = PERSONAL_SPACE_LOBBY.get(guild.id)
-        if lobby_id:
-            protected_ids.add(lobby_id)
-        # Protect all known music / permanent VCs by name keywords
-        permanent_keywords = ("music", "stream", "stage", "afk", "join to create", "general", "lounge", "waiting")
-        for vc in guild.voice_channels:
-            if any(kw in vc.name.lower() for kw in permanent_keywords):
-                protected_ids.add(vc.id)
-        for vc in guild.voice_channels:
-            if vc.id in protected_ids:
-                continue
-            if len(vc.members) == 0:
-                # Only delete channels that were explicitly created by the Personal Space system
-                if vc.id in PERSONAL_SPACE_CHANNELS:
-                    try:
-                        PERSONAL_SPACE_CHANNELS.pop(vc.id, None)
-                        await vc.delete(reason="Empty Personal Space channel — auto-cleaned")
-                        print(f"[VCCleanup] Deleted empty Personal Space channel: #{vc.name} in {guild.name}")
-                    except Exception as e:
-                        print(f"[VCCleanup] Could not delete #{vc.name}: {e}")
+    guild = client.get_guild(PRIMARY_GUILD_ID)
+    if guild is None:
+        return
+    # Channels to always keep: lobby triggers, AFK channel, channels with 0 user limit that are permanent
+    protected_ids: set[int] = set()
+    if guild.afk_channel:
+        protected_ids.add(guild.afk_channel.id)
+    # Protect all Personal Space lobby channels
+    lobby_id = PERSONAL_SPACE_LOBBY.get(guild.id)
+    if lobby_id:
+        protected_ids.add(lobby_id)
+    # Protect all known music / permanent VCs by name keywords
+    permanent_keywords = ("music", "stream", "stage", "afk", "join to create", "general", "lounge", "waiting")
+    for vc in guild.voice_channels:
+        if any(kw in vc.name.lower() for kw in permanent_keywords):
+            protected_ids.add(vc.id)
+    for vc in guild.voice_channels:
+        if vc.id in protected_ids:
+            continue
+        if len(vc.members) == 0:
+            # Only delete channels that were explicitly created by the Personal Space system
+            if vc.id in PERSONAL_SPACE_CHANNELS:
+                try:
+                    PERSONAL_SPACE_CHANNELS.pop(vc.id, None)
+                    await vc.delete(reason="Empty Personal Space channel — auto-cleaned")
+                    print(f"[VCCleanup] Deleted empty Personal Space channel: #{vc.name} in {guild.name}")
+                except Exception as e:
+                    print(f"[VCCleanup] Could not delete #{vc.name}: {e}")
 
 @tasks.loop(seconds=30)
 async def giveaway_check():
@@ -1096,41 +1875,48 @@ async def _post_free_games(ch: discord.TextChannel, games: list[dict]):
         await ch.send(embed=embed, view=view)
 
 
+async def _recent_announced_free_game_urls(ch: discord.TextChannel, limit: int = 250) -> set[str]:
+    """Collect recently posted free-game URLs from bot embeds in channel history."""
+    announced: set[str] = set()
+    try:
+        async for msg in ch.history(limit=limit):
+            if msg.author != ch.guild.me:
+                continue
+            for emb in msg.embeds:
+                if emb.url:
+                    announced.add(emb.url.strip())
+    except Exception as e:
+        print(f"[FreeGames] Could not read channel history for dedupe: {e}")
+    return announced
+
+
 @tasks.loop(hours=4)
 async def free_games_check():
+    global FREE_GAMES_FIRST_CYCLE
     guild = client.get_guild(GUILD_ID.id)
     if not guild:
         return
 
-    # Get or create the free-games channel
-    ch = discord.utils.get(guild.text_channels, name=FREE_GAMES_CHANNEL_NAME)
+    # Skip first cycle after boot to avoid restart repost storms.
+    if FREE_GAMES_FIRST_CYCLE:
+        FREE_GAMES_FIRST_CYCLE = False
+        print("[FreeGames] First cycle after startup skipped.")
+        return
+
+    # Background loop should not create channels; only post if target channel exists.
+    ch = _resolve_or_track_text_channel(guild, "free_games_channel", FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
     if not ch:
-        try:
-            ch = await guild.create_text_channel(
-                FREE_GAMES_CHANNEL_NAME,
-                topic="🎮 Free games on Steam — auto-updated every 4 hours",
-                reason="Free games auto-channel",
-            )
-            # Post a header message the first time the channel is created
-            intro = discord.Embed(
-                title="🎮 Free Games on Steam",
-                description=(
-                    "This channel is automatically updated every **4 hours** "
-                    "with games that are currently **100% off** on Steam.\n\n"
-                    "Grab them before the offer ends!"
-                ),
-                color=0x1B2838,
-            )
-            intro.set_footer(text="Powered by the Steam store API")
-            await ch.send(embed=intro)
-        except Exception as e:
-            print(f"[FreeGames] Could not create channel: {e}")
-            return
+        print(f"[FreeGames] Channel #{FREE_GAMES_CHANNEL_NAME} not found in {guild.name}; skipping cycle.")
+        return
 
     loop = asyncio.get_running_loop()
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
+    announced_urls = await _recent_announced_free_game_urls(ch)
 
-    new_games = [g for g in games if g["id"] not in POSTED_FREE_GAMES]
+    new_games = [
+        g for g in games
+        if g["id"] not in POSTED_FREE_GAMES and g.get("url", "").strip() not in announced_urls
+    ]
     if new_games:
         for g in new_games:
             POSTED_FREE_GAMES.add(g["id"])
@@ -1362,12 +2148,109 @@ async def on_message(message: discord.Message):
                     await log_ch.send(embed=embed)
             return
 
+        # ── Phase 4: Raid Mode (lockdown) ──────────────────────────────────────
+        # During raid mode, only mods/admins can message
+        gid = message.guild.id
+        if RAID_MODE_ACTIVE.get(gid, False):
+            if not (message.author.guild_permissions.administrator or message.author.guild_permissions.moderate_members):
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+                notice = await message.channel.send(
+                    f"{message.author.mention} 🔒 **Raid mode is active.** Only moderators can message during this time.",
+                    delete_after=5,
+                )
+                return
+
+        # ── Phase 4: Account Age Gate ──────────────────────────────────────────
+        # Prevent new accounts from posting certain content
+        if ACCOUNT_AGE_GATE_ENABLED.get(gid, False):
+            account_age = (discord.utils.utcnow() - message.author.created_at).total_seconds() / 86400
+            if account_age < ACCOUNT_AGE_GATE_DAYS:
+                # Check for links or suspicious content
+                if "http://" in message.content or "https://" in message.content or "discord.gg" in message.content:
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+                    notice = await message.channel.send(
+                        f"{message.author.mention} ⏳ New accounts ({ACCOUNT_AGE_GATE_DAYS}+ days required) cannot post external links. "
+                        f"Your account is {account_age:.1f} days old.",
+                        delete_after=7,
+                    )
+                    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+                    if log_ch:
+                        embed = discord.Embed(title="🔐 Auto-Mod: Account Age Gate (Link Blocked)", color=0x3498DB)
+                        embed.add_field(name="User", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Account Age (days)", value=f"{account_age:.1f}", inline=False)
+                        embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                        embed.timestamp = discord.utils.utcnow()
+                        await log_ch.send(embed=embed)
+                    return
+
+        # ── Phase 4: Link Quarantine ───────────────────────────────────────────
+        # Detect and quarantine suspicious non-Discord links
+        _SAFE_DOMAINS = {"youtube.com", "youtu.be", "twitch.tv", "github.com", "imgur.com", "tenor.com"}
+        if "http://" in message.content or "https://" in message.content:
+            links = re.findall(r'https?://([^\s/]+)', message.content)
+            suspicious_links = [link for link in links if link not in _SAFE_DOMAINS and "discord" not in link.lower()]
+            
+            if suspicious_links:
+                record = LINK_QUARANTINE.setdefault(message.author.id, {"quarantine_level": 0, "last_violation_time": 0})
+                record["last_violation_time"] = time.time()
+                record["quarantine_level"] = min(record["quarantine_level"] + 1, 2)
+                _save_link_quarantine()
+                
+                q_level = record["quarantine_level"]
+                if q_level >= 2:
+                    # Level 2: ban user
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+                    try:
+                        await message.author.ban(reason="Auto-mod: suspicious link (quarantine level 2)")
+                    except discord.HTTPException:
+                        pass
+                    notice = await message.channel.send(
+                        f"{message.author.mention} 🚫 You have been **banned** for repeated suspicious link posting.",
+                        delete_after=5,
+                    )
+                    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+                    if log_ch:
+                        embed = discord.Embed(title="🚫 Auto-Mod: Banned (Suspicious Links - Level 2)", color=0x992D22)
+                        embed.add_field(name="User", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                        embed.add_field(name="Links Detected", value=", ".join(suspicious_links[:5]), inline=False)
+                        embed.timestamp = discord.utils.utcnow()
+                        await log_ch.send(embed=embed)
+                elif q_level == 1:
+                    # Level 1: quarantine (delete message, warn)
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+                    warning = await message.channel.send(
+                        f"{message.author.mention} ⚠️ **Message removed:** Suspicious link detected (requires staff review). "
+                        f"A second offense will result in a **ban**.",
+                        delete_after=8,
+                    )
+                    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+                    if log_ch:
+                        embed = discord.Embed(title="⚠️ Auto-Mod: Suspicious Link Detected (Level 1)", color=0xFF6B6B)
+                        embed.add_field(name="User", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                        embed.add_field(name="Links Detected", value=", ".join(suspicious_links[:5]), inline=False)
+                        embed.timestamp = discord.utils.utcnow()
+                        await log_ch.send(embed=embed)
+                return
 
 
 async def get_mod_log_channel(guild: discord.Guild):
-    channel = guild.get_channel(LOG_CHANNEL_ID)
+    channel = _resolve_mod_log_channel(guild)
     if channel is None:
-        print(f"Log channel with ID {LOG_CHANNEL_ID} not found.")
+        print(f"Mod log channel not found (ID {LOG_CHANNEL_ID} / name {MOD_LOG_NAME}).")
     return channel
 
 async def log_action(interaction: discord.Interaction, action: str, target: str, reason: str = None):
@@ -1382,7 +2265,7 @@ async def log_action(interaction: discord.Interaction, action: str, target: str,
     if channel:
         await channel.send(embed=embed)
     # Also send to the private mod-logs channel
-    mod_log = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_NAME)
+    mod_log = _resolve_mod_log_channel(interaction.guild)
     if mod_log and mod_log != channel:
         await mod_log.send(embed=embed)
 
@@ -1405,7 +2288,7 @@ async def log_role_change(guild: discord.Guild, member: discord.Member,
 
 async def _log_admin_cmd(interaction: discord.Interaction, cmd: str, details: str = "") -> None:
     """Log any admin-only command to the private #mod-logs channel."""
-    ch = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_NAME)
+    ch = _resolve_mod_log_channel(interaction.guild)
     if not ch:
         return
     embed = discord.Embed(title=f"⚙️ Admin Command: `/{cmd}`", color=0x5865F2)
@@ -1562,6 +2445,92 @@ async def clear(interaction: discord.Interaction, amount: int = 10):
     await interaction.followup.send(f'Cleared {len(deleted)} messages.', ephemeral=True)
     await log_action(interaction, "Clear", f"Channel: {interaction.channel.name}", f"Deleted: {len(deleted)} messages")
 
+# ── Phase 4: Moderation Safety (Raid Mode, Link Quarantine, Account Age Gate) ──
+@client.tree.command(name="raidmode", description="Toggle raid mode lockdown (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def raidmode(interaction: discord.Interaction, enabled: bool):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    gid = interaction.guild.id
+    RAID_MODE_ACTIVE[gid] = enabled
+    status = "🔒 **enabled**" if enabled else "🔓 **disabled**"
+    embed = discord.Embed(
+        title="Raid Mode",
+        description=f"Raid mode is now {status}.",
+        color=0xFF6B6B if enabled else 0x2ECC71
+    )
+    if enabled:
+        embed.add_field(name="Effect", value="Only moderators and admins can send messages.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await log_action(interaction, "Raid Mode", f"Status: {'Enabled' if enabled else 'Disabled'}")
+
+@client.tree.command(name="accountage", description="Set minimum account age gate (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def accountage(interaction: discord.Interaction, days: int, enabled: bool = True):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    if days < 0 or days > 365:
+        await interaction.response.send_message("Account age must be between 0 and 365 days.", ephemeral=True)
+        return
+    gid = interaction.guild.id
+    ACCOUNT_AGE_GATE_ENABLED[gid] = enabled
+    global ACCOUNT_AGE_GATE_DAYS
+    ACCOUNT_AGE_GATE_DAYS = days
+    status = "**enabled**" if enabled else "**disabled**"
+    embed = discord.Embed(
+        title="Account Age Gate",
+        description=f"Account age gate is now {status} (minimum: **{days} days**).",
+        color=0x3498DB if enabled else 0x95A5A6
+    )
+    if enabled:
+        embed.add_field(name="Effect", value=f"Accounts younger than {days} days cannot post external links.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await log_action(interaction, "Account Age Gate", f"Days: {days}, Status: {'Enabled' if enabled else 'Disabled'}")
+
+@client.tree.command(name="linkquarantine", description="View or clear link quarantine records (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def linkquarantine(interaction: discord.Interaction, action: str = "view", user_id: str = ""):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    
+    if action.lower() == "view":
+        if not LINK_QUARANTINE:
+            await interaction.response.send_message("No users in quarantine.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        embed = discord.Embed(title="🔐 Link Quarantine Records", color=0xFF6B6B)
+        lines = []
+        for uid, record in sorted(LINK_QUARANTINE.items()):
+            q_level = record.get("quarantine_level", 0)
+            level_text = {0: "None", 1: "⚠️ Quarantine", 2: "🚫 Banned"}
+            lines.append(f"`{uid}` — {level_text.get(q_level, 'Unknown')}")
+        embed.description = "\n".join(lines[:25]) if lines else "None"
+        if len(lines) > 25:
+            embed.set_footer(text=f"...and {len(lines) - 25} more")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    elif action.lower() == "clear":
+        if not user_id:
+            await interaction.response.send_message("Specify a user ID to clear (e.g., `/linkquarantine clear 123456`)", ephemeral=True)
+            return
+        try:
+            uid = int(user_id)
+        except ValueError:
+            await interaction.response.send_message("Invalid user ID.", ephemeral=True)
+            return
+        if uid not in LINK_QUARANTINE:
+            await interaction.response.send_message(f"User `{uid}` is not in quarantine.", ephemeral=True)
+            return
+        LINK_QUARANTINE.pop(uid, None)
+        _save_link_quarantine()
+        await interaction.response.send_message(f"✅ Cleared quarantine record for user `{uid}`.", ephemeral=True)
+        await log_action(interaction, "Link Quarantine Clear", f"User ID: {uid}")
+    else:
+        await interaction.response.send_message("Action must be `view` or `clear`.", ephemeral=True)
+
 # ── Music System ─────────────────────────────────────────────────────────────
 
 from pytubefix import Search, YouTube as PyTube
@@ -1575,7 +2544,12 @@ def _is_usable_ffmpeg(path: str | None) -> bool:
         return False
     if not os.path.exists(path):
         return False
-    return True
+    try:
+        import subprocess
+        subprocess.run([path, "-version"], capture_output=True, text=True, timeout=8, check=False)
+        return True
+    except Exception:
+        return False
 
 
 def _resolve_ffmpeg_executable() -> str:
@@ -1596,18 +2570,17 @@ def _resolve_ffmpeg_executable() -> str:
 
     try:
         import static_ffmpeg
-
         static_ffmpeg.add_paths()
         bundled_ffmpeg = _shutil.which("ffmpeg")
         if _is_usable_ffmpeg(bundled_ffmpeg):
             return bundled_ffmpeg
         try:
+            # Ensure binaries are fetched if PATH injection alone didn't expose ffmpeg.
             from static_ffmpeg.run import get_or_fetch_platform_executables_else_raise
-
-            fetched_ffmpeg, _ = get_or_fetch_platform_executables_else_raise()
-            if _is_usable_ffmpeg(fetched_ffmpeg):
-                print(f"[Music] Using static-ffmpeg binary: {fetched_ffmpeg}")
-                return fetched_ffmpeg
+            ffmpeg_path, _ = get_or_fetch_platform_executables_else_raise()
+            if _is_usable_ffmpeg(ffmpeg_path):
+                print(f"[Music] Using static-ffmpeg binary: {ffmpeg_path}")
+                return ffmpeg_path
         except Exception as fetch_err:
             print(f"[Music] static-ffmpeg fetch failed: {fetch_err}")
     except Exception as e:
@@ -1615,7 +2588,6 @@ def _resolve_ffmpeg_executable() -> str:
 
     try:
         import imageio_ffmpeg
-
         imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
         if _is_usable_ffmpeg(imageio_exe):
             print(f"[Music] Using imageio-ffmpeg binary: {imageio_exe}")
@@ -1627,6 +2599,7 @@ def _resolve_ffmpeg_executable() -> str:
     if _is_usable_ffmpeg(env_ffmpeg):
         return env_ffmpeg
 
+    print(f"[Music] FFmpeg resolution failed. PATH={os.getenv('PATH', '')}")
     return "ffmpeg"
 
 if _platform.system() == "Windows":
@@ -1634,56 +2607,15 @@ if _platform.system() == "Windows":
 else:
     FFMPEG_EXE = _resolve_ffmpeg_executable()
 print(f"[Music] Using FFmpeg executable: {FFMPEG_EXE}")
+print("[Music] Build marker: deploy-temp e3891c3+diag")
 
-
-def _ffmpeg_candidate_paths() -> list[str]:
-    candidates: list[str] = []
-
-    env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
-    if env_ffmpeg:
-        candidates.append(env_ffmpeg)
-
-    if FFMPEG_EXE:
-        candidates.append(FFMPEG_EXE)
-
-    for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
-        candidates.append(path)
-
-    wh = _shutil.which("ffmpeg")
-    if wh:
-        candidates.append(wh)
-
-    try:
-        from static_ffmpeg.run import get_or_fetch_platform_executables_else_raise
-
-        fetched_ffmpeg, _ = get_or_fetch_platform_executables_else_raise()
-        if fetched_ffmpeg:
-            candidates.append(fetched_ffmpeg)
-    except Exception as e:
-        print(f"[Music] static-ffmpeg candidate fetch failed: {e}")
-
-    try:
-        import imageio_ffmpeg
-
-        imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        if imageio_exe:
-            candidates.append(imageio_exe)
-    except Exception:
-        pass
-
-    # Preserve order while removing duplicates.
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in candidates:
-        if item and item not in seen:
-            deduped.append(item)
-            seen.add(item)
-    return deduped
+if FFMPEG_EXE == "ffmpeg" and not _shutil.which("ffmpeg"):
+    print("[Music] WARNING: ffmpeg binary not available. Set FFMPEG_PATH or ensure apt package installation on Railway.")
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
-    'before_options': '-nostdin -hide_banner -loglevel error -headers "User-Agent: Mozilla/5.0\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
+    'before_options': '-nostdin -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -q:a 5 -ac 2 -ar 48000',
 }
 
 YTDL_STREAM_OPTS = {
@@ -1939,8 +2871,46 @@ async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
 
 
+def _ffmpeg_candidate_paths() -> list[str]:
+    candidates: list[str] = []
+
+    env_ffmpeg = os.getenv("FFMPEG_PATH", "").strip()
+    if env_ffmpeg:
+        candidates.append(env_ffmpeg)
+
+    if FFMPEG_EXE:
+        candidates.append(FFMPEG_EXE)
+
+    for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+        candidates.append(path)
+
+    wh = _shutil.which("ffmpeg")
+    if wh:
+        candidates.append(wh)
+
+    try:
+        import imageio_ffmpeg
+
+        imageio_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if imageio_exe:
+            candidates.append(imageio_exe)
+    except Exception:
+        pass
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item and item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
+
+
+print(f"[Music] Startup FFmpeg candidates: {_ffmpeg_candidate_paths()}")
+
+
 def _extract_stream_url(song: SongEntry) -> str | None:
-    """Resolve a fresh playable audio URL right before FFmpeg playback."""
+    """Resolve a fresh playable audio URL right before playback."""
     target = song.webpage_url or song.url
     if not target:
         return None
@@ -1954,7 +2924,6 @@ def _extract_stream_url(song: SongEntry) -> str | None:
     except Exception as e:
         print(f"[Music] yt-dlp stream resolve failed for {song.title}: {e}")
 
-    # Fallback to previously stored URL if extraction fails.
     return song.url or None
 
 def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
@@ -1989,12 +2958,14 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
 
             volume_factor = max(0.1, min(2.0, state.volume))
             source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
-            
+
             def after_play(error):
                 if error:
                     print(f'[Music] Player error on "{state.current.title}": {error}')
+                finished_song = state.current
+                _cleanup_song_file(finished_song)
                 asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
-            
+
             print(f'[Music] Now playing: {state.current.title}')
             state.voice_client.play(source, after=after_play)
         except Exception as e:
@@ -2004,9 +2975,12 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
                 f"Candidates={_ffmpeg_candidate_paths()} | "
                 f"PATH={os.getenv('PATH', '')}"
             )
+            finished_song = state.current
+            _cleanup_song_file(finished_song)
             state.current = None
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
     else:
+        _cleanup_song_file(state.current)
         state.current = None
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
@@ -2137,10 +3111,51 @@ class MusicControlView(discord.ui.View):
         button.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
         button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
+        autoplay_note = "I'll queue related songs automatically!" if state.autoplay else ""
         await interaction.followup.send(
-            f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {'I\'ll queue related songs automatically!' if state.autoplay else ''}",
+            f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {autoplay_note}",
             ephemeral=True
         )
+
+
+class PaginatedHelpView(discord.ui.View):
+    """Paginated help embeds with arrow buttons."""
+    
+    def __init__(self, embeds: list, author_id: int):
+        super().__init__(timeout=60)
+        self.embeds = embeds
+        self.author_id = author_id
+        self.current_page = 0
+        self.update_buttons()
+    
+    def update_buttons(self):
+        """Enable/disable arrow buttons based on current page."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if item.custom_id == "prev_btn":
+                    item.disabled = self.current_page == 0
+                elif item.custom_id == "next_btn":
+                    item.disabled = self.current_page == len(self.embeds) - 1
+    
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.primary, custom_id="prev_btn")
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("You can't use this button.", ephemeral=True)
+            return
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+    
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.primary, custom_id="next_btn")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("You can't use this button.", ephemeral=True)
+            return
+        if self.current_page < len(self.embeds) - 1:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
 
 
 async def _post_music_panel(guild_id: int):
@@ -2238,6 +3253,7 @@ async def play(interaction: discord.Interaction, query: str):
             webpage_url=r.get('webpage_url', ''),
             duration=r.get('duration', 0),
             requester=interaction.user,
+            local_path=r.get('local_path'),
         )
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
@@ -2374,7 +3390,29 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
 # ── Gaming Community Commands ─────────────────────────────────────────────────
 
 @client.tree.command(name="lfg", description="Post a Looking For Group message", guild=GUILD_ID)
-async def lfg(interaction: discord.Interaction, game: str, players_needed: int, description: str = ""):
+@app_commands.describe(
+    game="Game title",
+    players_needed="How many players you still need",
+    description="Optional details (mode, rank, notes)",
+    platform="Optional platform (PC, Xbox, PS5, etc.)",
+    region="Optional region (NA, EU, OCE, etc.)",
+    start_in_minutes="How soon you are starting",
+    mic_required="Whether mic is required"
+)
+async def lfg(
+    interaction: discord.Interaction,
+    game: str,
+    players_needed: int,
+    description: str = "",
+    platform: str = "",
+    region: str = "",
+    start_in_minutes: int = 0,
+    mic_required: bool = False,
+):
+    if players_needed < 1 or players_needed > 20:
+        await interaction.response.send_message("Players needed must be between 1 and 20.", ephemeral=True)
+        return
+
     channel = discord.utils.get(interaction.guild.text_channels, name=LFG_CHANNEL_NAME)
     if not channel:
         try:
@@ -2382,15 +3420,98 @@ async def lfg(interaction: discord.Interaction, game: str, players_needed: int, 
         except Exception:
             await interaction.response.send_message("Could not find or create a looking-for-group channel.", ephemeral=True)
             return
+
     embed = discord.Embed(title=f"🎮 LFG — {game}", color=0x00BFFF)
-    embed.add_field(name="Player", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Host", value=interaction.user.mention, inline=True)
     embed.add_field(name="Players Needed", value=str(players_needed), inline=True)
+    embed.add_field(name="Mic", value="Required" if mic_required else "Optional", inline=True)
+    if platform.strip():
+        embed.add_field(name="Platform", value=platform.strip(), inline=True)
+    if region.strip():
+        embed.add_field(name="Region", value=region.strip().upper(), inline=True)
+    if start_in_minutes > 0:
+        start_ts = int((discord.utils.utcnow() + datetime.timedelta(minutes=start_in_minutes)).timestamp())
+        embed.add_field(name="Start Time", value=f"<t:{start_ts}:R>", inline=True)
     if description:
         embed.add_field(name="Details", value=description, inline=False)
-    embed.set_footer(text="React or DM to join!")
-    msg = await channel.send(embed=embed)
-    await msg.add_reaction("✅")
+
+    view = LFGRSVPView(host_id=interaction.user.id, players_needed=players_needed)
+    msg = await channel.send(embed=embed, view=view)
+    view.message_id = msg.id
+
+    LFG_POSTS[msg.id] = {
+        "guild_id": interaction.guild.id,
+        "channel_id": channel.id,
+        "host_id": interaction.user.id,
+        "game": game.strip().lower(),
+        "platform": platform.strip().lower(),
+        "region": region.strip().lower(),
+        "players_needed": players_needed,
+        "active": True,
+        "created_at": time.time(),
+        "jump_url": msg.jump_url,
+    }
+    _ensure_lfg_rsvp(msg.id)
+
+    embed = msg.embeds[0]
+    _update_lfg_embed_rsvp(embed, msg.id, players_needed)
+    await msg.edit(embed=embed, view=view)
+
     await interaction.response.send_message(f"LFG post created in {channel.mention}!", ephemeral=True)
+
+
+@client.tree.command(name="lfgfilter", description="Browse active LFG posts with filters", guild=GUILD_ID)
+@app_commands.describe(
+    game="Filter by game title (optional)",
+    platform="Filter by platform (optional)",
+    region="Filter by region (optional)",
+    host="Filter by host (optional)",
+)
+async def lfgfilter(
+    interaction: discord.Interaction,
+    game: str = "",
+    platform: str = "",
+    region: str = "",
+    host: discord.Member = None,
+):
+    gid = interaction.guild.id
+    game_q = game.strip().lower()
+    platform_q = platform.strip().lower()
+    region_q = region.strip().lower()
+
+    matches: list[dict] = []
+    for mid, post in LFG_POSTS.items():
+        if post.get("guild_id") != gid or not post.get("active", True):
+            continue
+        if game_q and game_q not in post.get("game", ""):
+            continue
+        if platform_q and platform_q not in post.get("platform", ""):
+            continue
+        if region_q and region_q not in post.get("region", ""):
+            continue
+        if host and post.get("host_id") != host.id:
+            continue
+        matches.append(post)
+
+    matches.sort(key=lambda p: p.get("created_at", 0), reverse=True)
+
+    if not matches:
+        await interaction.response.send_message("No active LFG posts match those filters right now.", ephemeral=True)
+        return
+
+    lines = []
+    for post in matches[:10]:
+        host_member = interaction.guild.get_member(post["host_id"])
+        host_name = host_member.mention if host_member else f"<@{post['host_id']}>"
+        lines.append(
+            f"• **{post.get('game', 'unknown').title()}** | {host_name} | "
+            f"need **{post.get('players_needed', '?')}** | [Open Post]({post.get('jump_url', '')})"
+        )
+
+    embed = discord.Embed(title="🎯 Active LFG Matches", description="\n".join(lines), color=0x3498DB)
+    embed.set_footer(text=f"Showing {min(len(matches), 10)} of {len(matches)} active posts")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @client.tree.command(name="gamertag", description="Set your gamertag for a platform", guild=GUILD_ID)
 async def gamertag_set(interaction: discord.Interaction, platform: str, tag: str):
@@ -2400,6 +3521,7 @@ async def gamertag_set(interaction: discord.Interaction, platform: str, tag: str
     embed = discord.Embed(title="🎮 Gamertag Saved", color=0x00FF7F)
     embed.add_field(name="Platform", value=platform_clean, inline=True)
     embed.add_field(name="Tag", value=tag, inline=True)
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @client.tree.command(name="gamertags", description="View a player's gamertags", guild=GUILD_ID)
@@ -2414,6 +3536,7 @@ async def gamertags_view(interaction: discord.Interaction, user: discord.Member 
     for platform, tag in tags.items():
         embed.add_field(name=platform, value=tag, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @client.tree.command(name="personalspace", description="Set up the Personal Space system — creates a lobby VC that spawns private rooms (Admin only)", guild=GUILD_ID)
 @app_commands.default_permissions(administrator=True)
@@ -2601,6 +3724,168 @@ async def leaderboard(interaction: discord.Interaction):
     embed.description = "\n".join(lines)
     await interaction.response.send_message(embed=embed)
 
+
+@client.tree.command(name="prestige", description="View and manage your prestige level (Phase 3 retention)", guild=GUILD_ID)
+async def prestige(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    profile = _prestige_profile(target.id)
+    prestige_lvl = profile.get("prestige", 0)
+    resets = profile.get("resets", 0)
+    gid = interaction.guild.id
+    xp = XP_DATA.get(gid, {}).get(target.id, 0)
+    level = _xp_to_level(xp)
+
+    embed = discord.Embed(title=f"⭐ Prestige Profile — {target.display_name}", color=0xFFD700)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Prestige Level", value=f"**{prestige_lvl}/{PRESTIGE_LEVELS}**", inline=True)
+    embed.add_field(name="Total Resets", value=str(resets), inline=True)
+    embed.add_field(name="XP Multiplier", value=f"**{_xp_multiplier(target.id):.0%}**", inline=True)
+    embed.add_field(name="Current Level", value=str(level), inline=True)
+    embed.add_field(
+        name="How to Level Prestige",
+        value=(
+            f"Use `/prestigereset` to reset your level to 1 and gain +1 Prestige.\n"
+            f"Cost: **{PRESTIGE_RESET_COST}** PokeCoins (from casino)\n"
+            f"Benefit: **{PRESTIGE_BONUS_XP_PER_LEVEL:.0%}** XP boost per prestige level"
+        ),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="prestigereset", description="Reset your level to gain prestige (costs PokeCoins)", guild=GUILD_ID)
+async def prestigereset(interaction: discord.Interaction):
+    from pokemon_game import WALLETS, _wallet, STARTER_COINS
+    
+    uid = interaction.user.id
+    profile = _prestige_profile(uid)
+    prestige_lvl = profile.get("prestige", 0)
+
+    if prestige_lvl >= PRESTIGE_LEVELS:
+        await interaction.response.send_message("You've reached max prestige!", ephemeral=True)
+        return
+
+    coins = _wallet(uid)
+    if coins < PRESTIGE_RESET_COST:
+        await interaction.response.send_message(
+            f"❌ Not enough PokeCoins. You have **{coins}**, need **{PRESTIGE_RESET_COST}**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Deduct coins
+    WALLETS[uid] = coins - PRESTIGE_RESET_COST
+
+    # Increment prestige
+    profile["prestige"] = min(prestige_lvl + 1, PRESTIGE_LEVELS)
+    profile["resets"] = profile.get("resets", 0) + 1
+    _save_prestige_data()
+
+    # Reset guild XP to starter level
+    gid = interaction.guild.id
+    XP_DATA.setdefault(gid, {})[uid] = 100  # slight head-start
+
+    new_prestige = profile.get("prestige", 0)
+    multiplier = _xp_multiplier(uid)
+
+    embed = discord.Embed(title="⭐ Prestige Achieved!", color=0xFFD700)
+    embed.description = (
+        f"You have reached **Prestige {new_prestige}/{PRESTIGE_LEVELS}**!\n\n"
+        f"• Paid: **{PRESTIGE_RESET_COST}** PokeCoins\n"
+        f"• Level reset to **1**\n"
+        f"• New XP Multiplier: **{multiplier:.0%}**"
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="cosmetics", description="View and purchase cosmetic upgrades", guild=GUILD_ID)
+@app_commands.choices(action=[
+    app_commands.Choice(name="Inventory", value="inventory"),
+    app_commands.Choice(name="Shop", value="shop"),
+])
+async def cosmetics(interaction: discord.Interaction, action: str):
+    from pokemon_game import WALLETS, _wallet
+    
+    uid = interaction.user.id
+
+    if action == "inventory":
+        owned = PLAYER_COSMETICS.get(uid, set())
+        if not owned:
+            await interaction.response.send_message(
+                "You don't own any cosmetics yet. Use `/cosmetics shop` to browse.",
+                ephemeral=True,
+            )
+            return
+        lines = []
+        for cos_id in owned:
+            cos = COSMETICS.get(cos_id)
+            if cos:
+                lines.append(f"• **{cos['name']}** — {cos['desc']}")
+        embed = discord.Embed(title="💎 Your Cosmetics", description="\n".join(lines), color=0x9B59B6)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    elif action == "shop":
+        coins = _wallet(uid)
+        lines = []
+        for cos_id, cos in COSMETICS.items():
+            affordable = "✅" if coins >= cos["cost"] else "❌"
+            owned = "🔒" if cos_id in PLAYER_COSMETICS.get(uid, set()) else ""
+            lines.append(
+                f"{affordable} **{cos['name']}** — {cos['desc']}\n"
+                f"   Cost: **{cos['cost']}** PokeCoins {owned}"
+            )
+        embed = discord.Embed(title="💎 Cosmetics Shop", color=0x9B59B6)
+        embed.description = "\n".join(lines)
+        embed.add_field(name="Your Balance", value=f"**{coins}** PokeCoins", inline=False)
+        embed.add_field(
+            name="How to Buy",
+            value="Use `/cosmeticsbuy <name>` to purchase.\nExample: `/cosmeticsbuy title_badge`",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="cosmeticsbuy", description="Purchase a cosmetic upgrade", guild=GUILD_ID)
+@app_commands.describe(cosmetic_id="The cosmetic ID (e.g., title_badge, border_glow)")
+async def cosmeticsbuy(interaction: discord.Interaction, cosmetic_id: str):
+    from pokemon_game import WALLETS, _wallet
+    
+    uid = interaction.user.id
+    cos_id = cosmetic_id.lower().strip()
+
+    if cos_id not in COSMETICS:
+        await interaction.response.send_message(
+            f"❌ Unknown cosmetic `{cos_id}`. Use `/cosmetics shop` to see available items.",
+            ephemeral=True,
+        )
+        return
+
+    cos = COSMETICS[cos_id]
+    coins = _wallet(uid)
+
+    if cos_id in PLAYER_COSMETICS.get(uid, set()):
+        await interaction.response.send_message("You already own this cosmetic!", ephemeral=True)
+        return
+
+    if coins < cos["cost"]:
+        await interaction.response.send_message(
+            f"❌ Not enough PokeCoins. You have **{coins}**, need **{cos['cost']}**.",
+            ephemeral=True,
+        )
+        return
+
+    WALLETS[uid] = coins - cos["cost"]
+    PLAYER_COSMETICS.setdefault(uid, set()).add(cos_id)
+    _save_cosmetics_inventory()
+
+    embed = discord.Embed(title="💎 Purchase Successful!", color=0x2ECC71)
+    embed.description = f"You now own **{cos['name']}**!\n{cos['desc']}"
+    embed.add_field(name="Spent", value=f"**{cos['cost']}** PokeCoins", inline=True)
+    embed.add_field(name="Remaining", value=f"**{WALLETS[uid]}** PokeCoins", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ── Invite Tracking Commands ──────────────────────────────────────────────────
 @client.tree.command(name="invites", description="Check how many members you or someone else has invited", guild=GUILD_ID)
 async def invites(interaction: discord.Interaction, user: discord.Member = None):
@@ -2660,23 +3945,29 @@ async def closeticket(interaction: discord.Interaction, channel: discord.TextCha
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    log_ch = discord.utils.get(interaction.guild.text_channels, name=TICKET_LOG_NAME)
-    if log_ch:
-        msgs = [m async for m in channel.history(limit=200, oldest_first=True)]
-        transcript = "\n".join(
-            f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
-            for m in msgs if not m.author.bot or m.content
-        )
-        embed = discord.Embed(title=f"Ticket Force-Closed - #{channel.name}", color=0xE74C3C)
-        embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
-        embed.add_field(name="Closed by", value=interaction.user.mention)
-        embed.add_field(name="Reason", value=reason)
-        embed.timestamp = discord.utils.utcnow()
-        await log_ch.send(embed=embed)
+    log_ch = _resolve_ticket_log_channel(interaction.guild)
+    if log_ch is None:
+        print(f"[Tickets] WARNING: #{TICKET_LOG_NAME} channel not found — transcript not saved for {channel.name}")
+    else:
+        try:
+            msgs = [m async for m in channel.history(limit=200, oldest_first=True)]
+            transcript = "\n".join(
+                f"[{m.created_at.strftime('%H:%M:%S')}] {m.author}: {m.content}"
+                for m in msgs if not m.author.bot or m.content
+            )
+            embed = discord.Embed(title=f"Ticket Force-Closed - #{channel.name}", color=0xE74C3C)
+            embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
+            embed.add_field(name="Closed by", value=interaction.user.mention)
+            embed.add_field(name="Reason", value=reason)
+            embed.timestamp = discord.utils.utcnow()
+            await log_ch.send(embed=embed)
+        except Exception as e:
+            print(f"[Tickets] ERROR logging transcript for {channel.name}: {e}")
     for uid, cid in list(OPEN_TICKETS.items()):
         if cid == channel.id:
             del OPEN_TICKETS[uid]
             break
+    TICKET_SLA_LAST_REMINDER.pop(channel.id, None)
     channel_name = channel.name
     await channel.delete(reason=f"Force closed by {interaction.user}: {reason}")
     await interaction.followup.send(f"Ticket #{channel_name} closed.", ephemeral=True)
@@ -2882,142 +4173,387 @@ async def liststreamers(interaction: discord.Interaction):
     embed.description = "\n".join(lines)
     await interaction.response.send_message(embed=embed)
 
-@client.tree.command(name="bot", description="About this bot and what it can do", guild=GUILD_ID)
-async def bot_info(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🤖 About This Bot",
-        description=(
-            "A fully-featured gaming community bot built for this server. "
-            "Here's everything it does:"
+
+@client.tree.command(name="serverhealth", description="Show bot/server health diagnostics (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def serverhealth(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    now = discord.utils.utcnow()
+    uptime = _format_uptime(int((now - BOT_BOOT_TIME_UTC).total_seconds()))
+
+    mod_log = _resolve_mod_log_channel(guild)
+    ticket_log = _resolve_ticket_log_channel(guild)
+    casino_ch = _resolve_or_track_text_channel(guild, "casino_channel", GAMBLING_CHANNEL_NAME, "casino-floor", "casino")
+    pokemon_ch = _resolve_or_track_text_channel(guild, "pokemon_channel", POKEMON_CHANNEL_NAME, "pokemon-battle", "pokemon")
+    music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
+    verify_ch = _resolve_or_track_text_channel(guild, "verify_channel", VERIFY_CHANNEL_NAME, "verify", "✅-verify", "-verify")
+    free_games_ch = _resolve_or_track_text_channel(guild, "free_games_channel", FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
+
+    tracked_ticket_channels = [cid for cid in OPEN_TICKETS.values() if isinstance(guild.get_channel(cid), discord.TextChannel)]
+    stale_tickets = 0
+    for cid in tracked_ticket_channels:
+        ch = guild.get_channel(cid)
+        if isinstance(ch, discord.TextChannel):
+            age_hours = (now - ch.created_at).total_seconds() / 3600.0
+            if age_hours >= TICKET_SLA_HOURS:
+                stale_tickets += 1
+
+    task_lines = [
+        f"giveaway_check: {'✅' if giveaway_check.is_running() else '❌'}",
+        f"streamer_check: {'✅' if streamer_check.is_running() else '❌'}",
+        f"free_games_check: {'✅' if free_games_check.is_running() else '❌'}",
+        f"empty_vc_cleanup: {'✅' if empty_vc_cleanup.is_running() else '❌'}",
+        f"ticket_sla_check: {'✅' if ticket_sla_check.is_running() else '❌'}",
+    ]
+
+    embed = discord.Embed(title="🩺 Server Health", color=0x2ECC71)
+    embed.add_field(name="Bot Runtime", value=f"Uptime: **{uptime}**\nMarker: `{STARTUP_MARKER}`\nPID: `{os.getpid()}`", inline=False)
+    embed.add_field(
+        name="Channel Wiring",
+        value=(
+            f"mod-log: {'✅' if mod_log else '❌'}\n"
+            f"ticket-log: {'✅' if ticket_log else '❌'}\n"
+            f"casino: {'✅' if casino_ch else '❌'}\n"
+            f"pokemon: {'✅' if pokemon_ch else '❌'}\n"
+            f"music: {'✅' if music_ch else '❌'}\n"
+            f"verify: {'✅' if verify_ch else '❌'}\n"
+            f"free-games: {'✅' if free_games_ch else '❌'}"
         ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Tickets",
+        value=(
+            f"Tracked open: **{len(tracked_ticket_channels)}**\n"
+            f"SLA threshold: **{TICKET_SLA_HOURS}h**\n"
+            f"Stale over SLA: **{stale_tickets}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="Background Tasks", value="\n".join(task_lines), inline=False)
+    embed.add_field(name="Data", value=f"Managed channel IDs: **{len(MANAGED_CHANNEL_IDS.get(str(guild.id), {}))}**\nPosted free-game IDs: **{len(POSTED_FREE_GAMES)}**", inline=False)
+    embed.timestamp = now
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="weeklyrecap", description="Show a weekly community recap", guild=GUILD_ID)
+async def weeklyrecap(interaction: discord.Interaction):
+    guild = interaction.guild
+    gid = guild.id
+    now = discord.utils.utcnow()
+    week_ago = now - datetime.timedelta(days=7)
+
+    xp_map = XP_DATA.get(gid, {})
+    voice_map = VOICE_MINUTES.get(gid, {})
+
+    top_xp = sorted(xp_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top_voice = sorted(voice_map.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    xp_lines = []
+    for idx, (uid, xp) in enumerate(top_xp, 1):
+        member = guild.get_member(uid)
+        name = member.mention if member else f"User `{uid}`"
+        xp_lines.append(f"`{idx}.` {name} — **{xp} XP**")
+    if not xp_lines:
+        xp_lines = ["No XP activity yet."]
+
+    voice_lines = []
+    for idx, (uid, mins) in enumerate(top_voice, 1):
+        member = guild.get_member(uid)
+        name = member.mention if member else f"User `{uid}`"
+        voice_lines.append(f"`{idx}.` {name} — **{mins} min**")
+    if not voice_lines:
+        voice_lines = ["No voice activity yet."]
+
+    new_members = [m for m in guild.members if m.joined_at and m.joined_at >= week_ago]
+    active_giveaways = sum(1 for g in GIVEAWAYS.values() if not g.get("ended", False))
+    open_tickets = sum(1 for cid in OPEN_TICKETS.values() if isinstance(guild.get_channel(cid), discord.TextChannel))
+    followed_streamers = len(STREAMERS)
+
+    embed = discord.Embed(title="📊 Weekly Community Recap", color=0x5865F2)
+    embed.description = (
+        f"Here is the latest pulse for **{guild.name}**.\n"
+        f"New members (7d): **{len(new_members)}**\n"
+        f"Open tickets: **{open_tickets}** • Active giveaways: **{active_giveaways}** • Followed streamers: **{followed_streamers}**"
+    )
+    embed.add_field(name="🏆 Top XP", value="\n".join(xp_lines), inline=False)
+    embed.add_field(name="🎙️ Top Voice Time", value="\n".join(voice_lines), inline=False)
+    embed.set_footer(text="Tip: run /serverhealth for live diagnostics")
+    embed.timestamp = now
+    await interaction.response.send_message(embed=embed)
+
+@client.tree.command(name="bot", description="About this bot and what it can do (Admin/Mod only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def bot_info(interaction: discord.Interaction):
+    if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.moderate_members):
+        await interaction.response.send_message("🔒 This command is restricted to Admins and Moderators.", ephemeral=True)
+        return
+    
+    # Page 1: Music & Gaming
+    embed1 = discord.Embed(
+        title="🤖 About This Bot — Page 1/4",
+        description="A fully-featured gaming community bot. Use ▶️ to see more.",
         color=0x5865F2,
     )
-    embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
-
-    embed.add_field(name="🎵 Music Player", value=(
+    embed1.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+    embed1.add_field(name="🎵 Music Player", value=(
         "Play YouTube audio directly in voice channels.\n"
         "Search with autocomplete, queue songs, control volume, skip, pause & more.\n"
         "Use commands in **#music-channel**."
     ), inline=False)
-
-    embed.add_field(name="🎮 Gaming Tools", value=(
+    embed1.add_field(name="🎮 Gaming Tools", value=(
         "Post LFG ads, save gamertags, and unlock hidden game channels via button roles.\n"
         "Use `/setupgames` to create channels for all 15 games."
     ), inline=False)
-
-    embed.add_field(name="📊 Levels & XP", value=(
+    
+    # Page 2: Community & Economy
+    embed2 = discord.Embed(
+        title="🤖 About This Bot — Page 2/4",
+        description="Community features and progression systems.",
+        color=0x5865F2,
+    )
+    embed2.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+    embed2.add_field(name="📊 Levels & XP", value=(
         "Members earn XP every minute of chatting or being in voice.\n"
         "Level ups are announced in-channel. Use `/rank` and `/leaderboard`."
     ), inline=False)
-
-    embed.add_field(name="🎉 Giveaways", value=(
+    embed2.add_field(name="🎉 Giveaways", value=(
         "Admins run timed giveaways with `/giveaway`. Members enter by reacting 🎉.\n"
         "Winners are picked randomly when the timer ends."
     ), inline=False)
-
-    embed.add_field(name="🎫 Support Tickets", value=(
+    
+    # Page 3: Support & Alerts
+    embed3 = discord.Embed(
+        title="🤖 About This Bot — Page 3/4",
+        description="Support and notification systems.",
+        color=0x5865F2,
+    )
+    embed3.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+    embed3.add_field(name="🎫 Support Tickets", value=(
         "Members open private support channels via a button panel.\n"
         "Transcripts are saved to #ticket-logs when closed."
     ), inline=False)
-
-    embed.add_field(name="📡 Streamer Alerts", value=(
+    embed3.add_field(name="📡 Streamer Alerts", value=(
         "Follow Twitch streamers and get notified in **#streamer-alerts** when they go live.\n"
         "Manage with `/addstreamer`, `/removestreamer`, `/streamers`."
     ), inline=False)
-
-    embed.add_field(name="🏷️ Reaction Roles", value=(
-        "Admins add reaction roles to any message with `/reactionrole`.\n"
-        "Members react to assign/remove roles automatically."
+    
+    # Page 4: Admin & Moderation
+    embed4 = discord.Embed(
+        title="🤖 About This Bot — Page 4/4",
+        description="Administrative and safety features.",
+        color=0x5865F2,
+    )
+    embed4.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+    embed4.add_field(name="🏷️ Reaction Roles & Free Games", value=(
+        "🏷️ Admins add reaction roles to messages with `/reactionrole`.\n"
+        "🎮 Auto-posts 100% off Steam games to **#free-games** every 4 hours."
     ), inline=False)
-
-    embed.add_field(name="📨 Invite Tracking", value=(
-        "The bot tracks who invited each member.\n"
-        "Welcome messages show the inviter. Use `/invites` to check your count."
+    embed4.add_field(name="📨 Tracking & Safety", value=(
+        "Invite tracking showing who invited each member.\n"
+        "🛡️ Auto-moderation, word filter, link quarantine, and comprehensive logging."
     ), inline=False)
+    embed4.set_footer(text="Use /help for user commands • Use /adminhelp for mod commands")
+    
+    embeds = [embed1, embed2, embed3, embed4]
+    view = PaginatedHelpView(embeds, interaction.user.id)
+    await interaction.response.send_message(embed=embeds[0], view=view, ephemeral=True)
 
-    embed.add_field(name="🔔 Social Alerts & Welcome", value=(
-        "Rich welcome cards in **#welcome** showing avatar and invite source.\n"
-        "Join/leave/boost alerts in **#social-alerts**."
-    ), inline=False)
-
-    embed.add_field(name="🎮 Free Games", value=(
-        "Automatically posts 100% off Steam games to **#free-games** every 4 hours.\n"
-        "Use `/setupfreegames` to create the channel and post current deals immediately."
-    ), inline=False)
-
-    embed.add_field(name="🛡️ Auto-Moderation & Logs", value=(
-        "Banned word filter + spam timeout. Logs message edits, deletes, role changes.\n"
-        "All mod actions logged to the mod log channel."
-    ), inline=False)
-
-    embed.set_footer(text="Type /help to see every available command.")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@client.tree.command(name="help", description="Show all available bot commands", guild=GUILD_ID)
+@client.tree.command(name="help", description="Show all available bot commands (Admin/Mod only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
 async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🤖 Bot Commands",
-        description="Here's a full list of available slash commands:",
+    if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.moderate_members):
+        await interaction.response.send_message("🔒 This command is restricted to Admins and Moderators.", ephemeral=True)
+        return
+    
+    # Page 1: Getting Started
+    embed1 = discord.Embed(
+        title="📖 Bot Commands — Page 1/5 (Getting Started)",
+        description="**New here?** Try `/quickstart` first!",
         color=0x5865F2
     )
+    embed1.add_field(name="🆕 Getting Started", value=(
+        "`/quickstart` — 30-second new-player guide (NEW PLAYERS START HERE)\n"
+        "`/setupverify` — Rebuild the verification button channel (admin)\n"
+        "`/gamertag` — Save your gaming profile\n"
+        "`/bot` — About this bot (admin/mod only)"
+    ), inline=False)
+    embed1.add_field(name="ℹ️ Navigation", value="Use ◀️ ▶️ to flip through pages", inline=False)
+    
+    # Page 2: Progression & Economy
+    embed2 = discord.Embed(
+        title="📖 Bot Commands — Page 2/5 (Progression & Economy)",
+        color=0x5865F2
+    )
+    embed2.add_field(name="📊 Progression & Economy", value=(
+        "`/rank [user]` — View level, XP, voice time\n"
+        "`/leaderboard` — Top 10 XP members\n"
+        "`/prestige [user]` — View prestige level & XP multiplier\n"
+        "`/prestigereset` — Reset to gain prestige (costs PokeCoins)\n"
+        "`/cosmetics inventory|shop` — View/browse cosmetics\n"
+        "`/cosmeticsbuy <id>` — Purchase cosmetic"
+    ), inline=False)
+    
+    # Page 3: Gaming & Social
+    embed3 = discord.Embed(
+        title="📖 Bot Commands — Page 3/5 (Gaming & Social)",
+        color=0x5865F2
+    )
+    embed3.add_field(name="🎮 Gaming & Social", value=(
+        "`/lfg <game> <players> [desc]` — Post LFG with RSVP buttons\n"
+        "`/lfgfilter [game] [platform] [region]` — Find active LFG posts\n"
+        "`/gamertags [user]` — View someone's gamertags\n"
+        "`/invites [user]` — Check invite count\n"
+        "`/personalspace` — Create dynamic voice rooms (admin only)"
+    ), inline=False)
+    
+    # Page 4: Music
+    embed4 = discord.Embed(
+        title="📖 Bot Commands — Page 4/5 (Music)",
+        color=0x5865F2
+    )
+    embed4.add_field(name="🎵 Music (in #music-channel)", value=(
+        "`/play <query>` — Search & play song\n"
+        "`/pause` — Pause playback\n"
+        "`/resume` — Resume playback\n"
+        "`/skip` — Skip current song\n"
+        "`/stop` — Stop & clear queue\n"
+        "`/leave` — Disconnect bot\n"
+        "`/queue` — View song queue\n"
+        "`/volume <0-100>` — Set volume"
+    ), inline=False)
+    
+    # Page 5: Community & Admin
+    embed5 = discord.Embed(
+        title="📖 Bot Commands — Page 5/5 (Community & Admin)",
+        color=0x5865F2
+    )
+    embed5.add_field(name="📈 Community & Info", value=(
+        "`/weeklyrecap` — Weekly community stats"
+    ), inline=False)
+    embed5.add_field(name="🔧 Admin/Mod Commands", value=(
+        "Use `/adminhelp` to see moderation, setup, and safety commands.\n"
+        "⭐ **Tip:** Only admins and moderators can view help commands!"
+    ), inline=False)
+    embed5.set_footer(text="Page 5/5 • Use /adminhelp for detailed mod commands")
+    
+    embeds = [embed1, embed2, embed3, embed4, embed5]
+    view = PaginatedHelpView(embeds, interaction.user.id)
+    await interaction.response.send_message(embed=embeds[0], view=view, ephemeral=True)
 
-    embed.add_field(name="🎵 Music (use in #music-channel)", value=(
-        "`/play <query>` — Search & play a song (autocomplete)\n"
-        "`/pause` `/resume` `/skip` `/stop` `/leave`\n"
-        "`/queue` — View the song queue\n"
-        "`/nowplaying` — Current song info\n"
-        "`/volume <0-100>` — Set playback volume"
+
+@client.tree.command(name="quickstart", description="New player guide — Get started in 30 seconds", guild=GUILD_ID)
+async def quickstart(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🚀 Welcome to the Gaming Zone!",
+        description="Follow these 4 quick steps to get started.",
+        color=0x2ECC71
+    )
+
+    embed.add_field(name="Step 1️⃣: Verify", value=(
+        f"Go to **#{VERIFY_CHANNEL_NAME}** and click **Verify — Get Access**.\n"
+        "This unlocks your member channels and game features."
     ), inline=False)
 
-    embed.add_field(name="📊 Levels", value=(
-        "`/rank [user]` — Show level, XP & voice time\n"
-        "`/leaderboard` — Top 10 XP members"
+    embed.add_field(name="Step 2️⃣: Save Your Gamertag", value=(
+        "Run `/gamertag <platform> <username>`\n"
+        "Example: `/gamertag ps5 MyPlayName`"
     ), inline=False)
 
-    embed.add_field(name="🎉 Giveaways *(Admin)*", value=(
-        "`/giveaway <prize> <minutes> [winners]` — Start a giveaway\n"
-        "`/endgiveaway <message_id>` — End early"
+    embed.add_field(name="Step 3️⃣: Find a Squad", value=(
+        "Post an LFG: `/lfg valorant 3 looking for comp`\n"
+        "Browse posts: `/lfgfilter game:valorant`\n"
+        "Join using the **Going** button"
     ), inline=False)
 
-    embed.add_field(name="🎫 Tickets *(Admin setup)*", value=(
-        "`/setupticketchannel <channel>` — Post the ticket panel\n"
-        "Members click **Open a Ticket** to create a private channel"
+    embed.add_field(name="Step 4️⃣: Earn XP & Level Up", value=(
+        "💬 Chat = 15 XP/min (with cooldown)\n"
+        "🎙️ Voice = 1 XP/min\n"
+        "View your rank: `/rank`"
     ), inline=False)
 
-    embed.add_field(name="🏷️ Reaction Roles *(Admin)*", value=(
-        "`/reactionrole <message_id> <emoji> <role>` — Bind a role to a reaction"
+    embed.add_field(name="💡 Pro Tips", value=(
+        f"• If verify is missing, ask an admin to run `/setupverify`\n"
+        "• Use `/prestige` to reset and gain multipliers\n"
+        "• Buy cosmetics with PokeCoins at `/cosmetics shop`\n"
+        "• Need help? Type `/help`"
     ), inline=False)
 
-    embed.add_field(name="📡 Streamers *(Admin)*", value=(
-        "`/addstreamer <username> <platform>` — Follow a streamer\n"
-        "`/removestreamer <username>` — Unfollow\n"
-        "`/streamers` — List all followed streamers"
-    ), inline=False)
-
-    embed.add_field(name="📨 Invites", value=(
-        "`/invites [user]` — Check invite count"
-    ), inline=False)
-
-    embed.add_field(name="🎮 Gaming", value=(
-        "`/lfg <game> <players> [desc]` — Post a LFG ad\n"
-        "`/gamertag <platform> <tag>` — Save gamertag\n"
-        "`/gamertags [user]` — View gamertags\n"
-        "`/setupgames` — Create game channels & role buttons *(Admin)*"
-    ), inline=False)
-
-    embed.add_field(name="🆓 Free Games", value=(
-        "`/setupfreegames` — Create #free-games channel and post current Steam deals *(Admin)*"
-    ), inline=False)
-
-    embed.add_field(name="⚒️ Moderation", value=(
-        "`/ban` `/kick` `/mute` `/unmute` `/timeout` `/clear` `/announce`\n"
-        "`/unban <user_id>` — Unban a user by ID\n"
-        "`/banlist` — View all currently banned users\n"
-        "`/whitelist` `/unwhitelist` — Protect members from mod actions"
-    ), inline=False)
-
-    embed.set_footer(text="All commands are slash commands — type / to get started!")
+    embed.set_footer(text="Questions? Ask a mod in #support")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="adminhelp", description="Admin/Mod command guide (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def adminhelp(interaction: discord.Interaction):
+    if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.moderate_members):
+        await interaction.response.send_message("🔒 Moderator permission required.", ephemeral=True)
+        return
+
+    # Page 1: Moderation & Utilities
+    embed1 = discord.Embed(
+        title="🔧 Admin & Moderation — Page 1/3",
+        description="Moderator command reference",
+        color=0xFF6B6B
+    )
+    embed1.add_field(name="🔨 Core Moderation", value=(
+        "`/ban <user> [reason]` — Ban a member\n"
+        "`/unban <user_id> [reason]` — Unban by ID\n"
+        "`/kick <user> [reason]` — Kick a member\n"
+        "`/mute <user>` — Mute indefinitely\n"
+        "`/unmute <user>` — Remove mute\n"
+        "`/timeout <user> <hours> <minutes> [reason]` — Timeout a member\n"
+        "`/banlist` — View all bans\n"
+        "`/clear <amount>` — Delete messages"
+    ), inline=False)
+    
+    # Page 2: Safety & Setup
+    embed2 = discord.Embed(
+        title="🔧 Admin & Moderation — Page 2/3",
+        description="Safety automation and community setup",
+        color=0xFF6B6B
+    )
+    embed2.add_field(name="👮 Mod Utilities", value=(
+        "`/whitelist <user>` — Protect from mod actions\n"
+        "`/unwhitelist <user>` — Remove protection\n"
+        "`/announce <channel> <message>` — Post announcement"
+    ), inline=False)
+    embed2.add_field(name="🔒 Safety Automation (Phase 4)", value=(
+        "`/raidmode <enable|disable>` — Lock server (mods only)\n"
+        "`/accountage <days> [enabled]` — Block new accounts from links\n"
+        "`/linkquarantine <view|clear> [user_id]` — Manage link records"
+    ), inline=False)
+    
+    # Page 3: Channels & Community
+    embed3 = discord.Embed(
+        title="🔧 Admin & Moderation — Page 3/3",
+        description="Channel setup and community features",
+        color=0xFF6B6B
+    )
+    embed3.add_field(name="🎫 Tickets & Roles", value=(
+        "`/setupticketchannel <channel>` — Post ticket panel\n"
+        "`/reactionrole <message_id> <emoji> <role>` — Bind role to reaction\n"
+        "`/setupgames` — Create game channels & buttons\n"
+        "`/personalspace [category]` — Create dynamic voice rooms"
+    ), inline=False)
+    embed3.add_field(name="📡 Community & Events", value=(
+        "`/addstreamer <username> <platform>` — Follow streamer\n"
+        "`/removestreamer <username>` — Unfollow streamer\n"
+        "`/setupfreegames` — Post free Steam games\n"
+        "`/giveaway <prize> <minutes> [winners]` — Start giveaway\n"
+        "`/endgiveaway <message_id>` — End early\n"
+        "`/serverhealth` — View bot diagnostics"
+    ), inline=False)
+    embed3.set_footer(text="Page 3/3 • Check the wiki for additional admin guides")
+    
+    embeds = [embed1, embed2, embed3]
+    view = PaginatedHelpView(embeds, interaction.user.id)
+    await interaction.response.send_message(embed=embeds[0], view=view, ephemeral=True)
+
 
 @client.tree.command(name="setupfreegames", description="Create #free-games and post current Steam deals now (Admin only)", guild=GUILD_ID)
 @app_commands.default_permissions(administrator=True)
@@ -3028,13 +4564,14 @@ async def setupfreegames(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    ch = discord.utils.get(guild.text_channels, name=FREE_GAMES_CHANNEL_NAME)
+    ch = _resolve_or_track_text_channel(guild, "free_games_channel", FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
     if not ch:
         ch = await guild.create_text_channel(
             FREE_GAMES_CHANNEL_NAME,
             topic="🎮 Free games on Steam — auto-updated every 4 hours",
             reason="Free games setup",
         )
+        _remember_channel(guild, "free_games_channel", ch)
         intro = discord.Embed(
             title="🎮 Free Games on Steam",
             description=(
@@ -3047,22 +4584,27 @@ async def setupfreegames(interaction: discord.Interaction):
         )
         intro.set_footer(text="Powered by GamerPower + Steam Store API")
         await ch.send(embed=intro)
+    else:
+        _remember_channel(guild, "free_games_channel", ch)
 
     await interaction.followup.send(f"✅ Fetching current free games and posting to {ch.mention}…", ephemeral=True)
 
     loop = asyncio.get_running_loop()
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
+    announced_urls = await _recent_announced_free_game_urls(ch)
 
-    for game in games:
+    games_to_post = [g for g in games if g.get("url", "").strip() not in announced_urls]
+
+    for game in games_to_post:
         POSTED_FREE_GAMES.add(game["id"])
     _save_posted_games()
-    await _post_free_games(ch, games)
+    await _post_free_games(ch, games_to_post)
 
     await interaction.followup.send(
-        f"{'✅ Posted **' + str(len(games)) + '** free game(s) with images and claim buttons.' if games else '⚠️ No free games found right now.'} The channel auto-updates every 4 hours.",
+        f"{'✅ Posted **' + str(len(games_to_post)) + '** new free game(s) with images and claim buttons.' if games_to_post else '⚠️ No new free games found right now.'} The channel auto-updates every 4 hours.",
         ephemeral=True,
     )
-    await _log_admin_cmd(interaction, "setupfreegames", f"Channel: {ch.mention} | Games posted: {len(games)}")
+    await _log_admin_cmd(interaction, "setupfreegames", f"Channel: {ch.mention} | Games posted: {len(games_to_post)}")
 
 
 @client.tree.command(name="setupchannels", description="Create the casino, Pokémon battle, and music channels (Admin only)", guild=GUILD_ID)
