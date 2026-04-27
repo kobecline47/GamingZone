@@ -40,6 +40,7 @@ class Client(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._feature_cmds_registered = False
+        self._startup_completed = False
 
     async def on_member_join(self, member: discord.Member):
         # ── Invite tracking ───────────────────────────────────────────────
@@ -306,6 +307,9 @@ class Client(commands.Bot):
 
     async def on_ready(self):
         print(f'Logged on as {self.user}!')
+        if self._startup_completed:
+            # on_ready can fire multiple times (reconnects); avoid re-running startup setup.
+            return
         if not discord.opus.is_loaded():
             try:
                 opus_lib = None
@@ -379,6 +383,7 @@ class Client(commands.Bot):
                     print(f"[Sync] Could not sync guild {g.id}: {e}")
             # Inject the running event loop into the dashboard now that the bot is connected
             dashboard._state["bot_loop"] = asyncio.get_event_loop()
+            self._startup_completed = True
         except Exception as e:
             print(f'Error syncing commands: {e}')
 
@@ -1224,6 +1229,21 @@ async def _post_free_games(ch: discord.TextChannel, games: list[dict]):
         await ch.send(embed=embed, view=view)
 
 
+async def _recent_announced_free_game_urls(ch: discord.TextChannel, limit: int = 250) -> set[str]:
+    """Collect recently posted free-game URLs from bot embeds in channel history."""
+    announced: set[str] = set()
+    try:
+        async for msg in ch.history(limit=limit):
+            if msg.author != ch.guild.me:
+                continue
+            for emb in msg.embeds:
+                if emb.url:
+                    announced.add(emb.url.strip())
+    except Exception as e:
+        print(f"[FreeGames] Could not read channel history for dedupe: {e}")
+    return announced
+
+
 @tasks.loop(hours=4)
 async def free_games_check():
     guild = client.get_guild(GUILD_ID.id)
@@ -1257,8 +1277,12 @@ async def free_games_check():
 
     loop = asyncio.get_running_loop()
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
+    announced_urls = await _recent_announced_free_game_urls(ch)
 
-    new_games = [g for g in games if g["id"] not in POSTED_FREE_GAMES]
+    new_games = [
+        g for g in games
+        if g["id"] not in POSTED_FREE_GAMES and g.get("url", "").strip() not in announced_urls
+    ]
     if new_games:
         for g in new_games:
             POSTED_FREE_GAMES.add(g["id"])
@@ -3192,17 +3216,20 @@ async def setupfreegames(interaction: discord.Interaction):
 
     loop = asyncio.get_running_loop()
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
+    announced_urls = await _recent_announced_free_game_urls(ch)
 
-    for game in games:
+    games_to_post = [g for g in games if g.get("url", "").strip() not in announced_urls]
+
+    for game in games_to_post:
         POSTED_FREE_GAMES.add(game["id"])
     _save_posted_games()
-    await _post_free_games(ch, games)
+    await _post_free_games(ch, games_to_post)
 
     await interaction.followup.send(
-        f"{'✅ Posted **' + str(len(games)) + '** free game(s) with images and claim buttons.' if games else '⚠️ No free games found right now.'} The channel auto-updates every 4 hours.",
+        f"{'✅ Posted **' + str(len(games_to_post)) + '** new free game(s) with images and claim buttons.' if games_to_post else '⚠️ No new free games found right now.'} The channel auto-updates every 4 hours.",
         ephemeral=True,
     )
-    await _log_admin_cmd(interaction, "setupfreegames", f"Channel: {ch.mention} | Games posted: {len(games)}")
+    await _log_admin_cmd(interaction, "setupfreegames", f"Channel: {ch.mention} | Games posted: {len(games_to_post)}")
 
 
 @client.tree.command(name="setupchannels", description="Create the casino, Pokémon battle, and music channels (Admin only)", guild=GUILD_ID)
