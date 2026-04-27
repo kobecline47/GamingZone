@@ -822,6 +822,24 @@ ONBOARDING_STEPS: list[tuple[str, str]] = [
 ]
 ONBOARDING_REWARD_XP = 250
 
+# ── Prestige System ────────────────────────────────────────────────────────
+# Enables players to "reset" and gain permanent bonuses at higher levels
+_PRESTIGE_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prestige_data.json")
+PRESTIGE_DATA: dict[int, dict[str, int]] = {}  # user_id -> {prestige: int, resets: int, total_xp_earned: int}
+PRESTIGE_LEVELS = 10  # max prestige level
+PRESTIGE_BONUS_XP_PER_LEVEL = 0.05  # 5% XP bonus per prestige level
+PRESTIGE_RESET_COST = 2500  # PokeCoins to reset and gain prestige (from gambling.py)
+
+# ── Economy Sinks + Cosmetics ────────────────────────────────────────────────
+COSMETICS = {
+    "title_badge": {"name": "Title Badge", "cost": 500, "desc": "Custom title prefix in chat"},
+    "border_glow": {"name": "Border Glow", "cost": 300, "desc": "Glowing effect on battle embeds"},
+    "avatar_frame": {"name": "Avatar Frame", "cost": 400, "desc": "Custom frame around your profile"},
+    "speed_boost": {"name": "Speed Boost", "cost": 1000, "desc": "+10% to all XP gains for 1 week"},
+}
+_COSMETICS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cosmetics_inventory.json")
+PLAYER_COSMETICS: dict[int, set[str]] = {}  # user_id -> {cosmetic_ids}
+
 # ── Ticket SLA Monitoring ───────────────────────────────────────────────────
 TICKET_SLA_HOURS = 6
 TICKET_SLA_REMINDER_COOLDOWN_MINUTES = 180
@@ -946,6 +964,66 @@ def _lfg_rsvp_text(message_id: int, players_needed: int) -> str:
 
 _load_posted_games()
 _load_onboarding_progress()
+
+
+def _load_prestige_data() -> None:
+    global PRESTIGE_DATA
+    if not os.path.exists(_PRESTIGE_SAVE):
+        return
+    try:
+        with open(_PRESTIGE_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            PRESTIGE_DATA = {int(uid): profile for uid, profile in data.items() if isinstance(profile, dict)}
+    except Exception as e:
+        print(f"[Prestige] Warning: could not load prestige data — {e}")
+
+
+def _save_prestige_data() -> None:
+    try:
+        with open(_PRESTIGE_SAVE, "w", encoding="utf-8") as f:
+            json.dump(PRESTIGE_DATA, f)
+    except Exception as e:
+        print(f"[Prestige] Warning: could not save prestige data — {e}")
+
+
+def _load_cosmetics_inventory() -> None:
+    global PLAYER_COSMETICS
+    if not os.path.exists(_COSMETICS_SAVE):
+        return
+    try:
+        with open(_COSMETICS_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            PLAYER_COSMETICS = {int(uid): set(items) for uid, items in data.items() if isinstance(items, list)}
+    except Exception as e:
+        print(f"[Cosmetics] Warning: could not load cosmetics — {e}")
+
+
+def _save_cosmetics_inventory() -> None:
+    try:
+        with open(_COSMETICS_SAVE, "w", encoding="utf-8") as f:
+            json.dump({uid: list(items) for uid, items in PLAYER_COSMETICS.items()}, f)
+    except Exception as e:
+        print(f"[Cosmetics] Warning: could not save cosmetics — {e}")
+
+
+def _prestige_profile(user_id: int) -> dict[str, int]:
+    profile = PRESTIGE_DATA.setdefault(user_id, {"prestige": 0, "resets": 0, "total_xp_earned": 0})
+    return profile
+
+
+def _get_prestige(user_id: int) -> int:
+    return _prestige_profile(user_id).get("prestige", 0)
+
+
+def _xp_multiplier(user_id: int) -> float:
+    prestige = _get_prestige(user_id)
+    return 1.0 + (prestige * PRESTIGE_BONUS_XP_PER_LEVEL)
+
+
+_load_prestige_data()
+_load_cosmetics_inventory()
 
 # ── Personal Space (private temp voice channels) ──────────────────────────────
 # guild_id -> lobby voice channel ID that triggers creation
@@ -3289,6 +3367,168 @@ async def leaderboard(interaction: discord.Interaction):
     embed.description = "\n".join(lines)
     await interaction.response.send_message(embed=embed)
 
+
+@client.tree.command(name="prestige", description="View and manage your prestige level (Phase 3 retention)", guild=GUILD_ID)
+async def prestige(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    profile = _prestige_profile(target.id)
+    prestige_lvl = profile.get("prestige", 0)
+    resets = profile.get("resets", 0)
+    gid = interaction.guild.id
+    xp = XP_DATA.get(gid, {}).get(target.id, 0)
+    level = _xp_to_level(xp)
+
+    embed = discord.Embed(title=f"⭐ Prestige Profile — {target.display_name}", color=0xFFD700)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Prestige Level", value=f"**{prestige_lvl}/{PRESTIGE_LEVELS}**", inline=True)
+    embed.add_field(name="Total Resets", value=str(resets), inline=True)
+    embed.add_field(name="XP Multiplier", value=f"**{_xp_multiplier(target.id):.0%}**", inline=True)
+    embed.add_field(name="Current Level", value=str(level), inline=True)
+    embed.add_field(
+        name="How to Level Prestige",
+        value=(
+            f"Use `/prestigereset` to reset your level to 1 and gain +1 Prestige.\n"
+            f"Cost: **{PRESTIGE_RESET_COST}** PokeCoins (from casino)\n"
+            f"Benefit: **{PRESTIGE_BONUS_XP_PER_LEVEL:.0%}** XP boost per prestige level"
+        ),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="prestigereset", description="Reset your level to gain prestige (costs PokeCoins)", guild=GUILD_ID)
+async def prestigereset(interaction: discord.Interaction):
+    from pokemon_game import WALLETS, _wallet, STARTER_COINS
+    
+    uid = interaction.user.id
+    profile = _prestige_profile(uid)
+    prestige_lvl = profile.get("prestige", 0)
+
+    if prestige_lvl >= PRESTIGE_LEVELS:
+        await interaction.response.send_message("You've reached max prestige!", ephemeral=True)
+        return
+
+    coins = _wallet(uid)
+    if coins < PRESTIGE_RESET_COST:
+        await interaction.response.send_message(
+            f"❌ Not enough PokeCoins. You have **{coins}**, need **{PRESTIGE_RESET_COST}**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Deduct coins
+    WALLETS[uid] = coins - PRESTIGE_RESET_COST
+
+    # Increment prestige
+    profile["prestige"] = min(prestige_lvl + 1, PRESTIGE_LEVELS)
+    profile["resets"] = profile.get("resets", 0) + 1
+    _save_prestige_data()
+
+    # Reset guild XP to starter level
+    gid = interaction.guild.id
+    XP_DATA.setdefault(gid, {})[uid] = 100  # slight head-start
+
+    new_prestige = profile.get("prestige", 0)
+    multiplier = _xp_multiplier(uid)
+
+    embed = discord.Embed(title="⭐ Prestige Achieved!", color=0xFFD700)
+    embed.description = (
+        f"You have reached **Prestige {new_prestige}/{PRESTIGE_LEVELS}**!\n\n"
+        f"• Paid: **{PRESTIGE_RESET_COST}** PokeCoins\n"
+        f"• Level reset to **1**\n"
+        f"• New XP Multiplier: **{multiplier:.0%}**"
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="cosmetics", description="View and purchase cosmetic upgrades", guild=GUILD_ID)
+@app_commands.choices(action=[
+    app_commands.Choice(name="Inventory", value="inventory"),
+    app_commands.Choice(name="Shop", value="shop"),
+])
+async def cosmetics(interaction: discord.Interaction, action: str):
+    from pokemon_game import WALLETS, _wallet
+    
+    uid = interaction.user.id
+
+    if action == "inventory":
+        owned = PLAYER_COSMETICS.get(uid, set())
+        if not owned:
+            await interaction.response.send_message(
+                "You don't own any cosmetics yet. Use `/cosmetics shop` to browse.",
+                ephemeral=True,
+            )
+            return
+        lines = []
+        for cos_id in owned:
+            cos = COSMETICS.get(cos_id)
+            if cos:
+                lines.append(f"• **{cos['name']}** — {cos['desc']}")
+        embed = discord.Embed(title="💎 Your Cosmetics", description="\n".join(lines), color=0x9B59B6)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    elif action == "shop":
+        coins = _wallet(uid)
+        lines = []
+        for cos_id, cos in COSMETICS.items():
+            affordable = "✅" if coins >= cos["cost"] else "❌"
+            owned = "🔒" if cos_id in PLAYER_COSMETICS.get(uid, set()) else ""
+            lines.append(
+                f"{affordable} **{cos['name']}** — {cos['desc']}\n"
+                f"   Cost: **{cos['cost']}** PokeCoins {owned}"
+            )
+        embed = discord.Embed(title="💎 Cosmetics Shop", color=0x9B59B6)
+        embed.description = "\n".join(lines)
+        embed.add_field(name="Your Balance", value=f"**{coins}** PokeCoins", inline=False)
+        embed.add_field(
+            name="How to Buy",
+            value="Use `/cosmeticsbuy <name>` to purchase.\nExample: `/cosmeticsbuy title_badge`",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="cosmeticsbuy", description="Purchase a cosmetic upgrade", guild=GUILD_ID)
+@app_commands.describe(cosmetic_id="The cosmetic ID (e.g., title_badge, border_glow)")
+async def cosmeticsbuy(interaction: discord.Interaction, cosmetic_id: str):
+    from pokemon_game import WALLETS, _wallet
+    
+    uid = interaction.user.id
+    cos_id = cosmetic_id.lower().strip()
+
+    if cos_id not in COSMETICS:
+        await interaction.response.send_message(
+            f"❌ Unknown cosmetic `{cos_id}`. Use `/cosmetics shop` to see available items.",
+            ephemeral=True,
+        )
+        return
+
+    cos = COSMETICS[cos_id]
+    coins = _wallet(uid)
+
+    if cos_id in PLAYER_COSMETICS.get(uid, set()):
+        await interaction.response.send_message("You already own this cosmetic!", ephemeral=True)
+        return
+
+    if coins < cos["cost"]:
+        await interaction.response.send_message(
+            f"❌ Not enough PokeCoins. You have **{coins}**, need **{cos['cost']}**.",
+            ephemeral=True,
+        )
+        return
+
+    WALLETS[uid] = coins - cos["cost"]
+    PLAYER_COSMETICS.setdefault(uid, set()).add(cos_id)
+    _save_cosmetics_inventory()
+
+    embed = discord.Embed(title="💎 Purchase Successful!", color=0x2ECC71)
+    embed.description = f"You now own **{cos['name']}**!\n{cos['desc']}"
+    embed.add_field(name="Spent", value=f"**{cos['cost']}** PokeCoins", inline=True)
+    embed.add_field(name="Remaining", value=f"**{WALLETS[uid]}** PokeCoins", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ── Invite Tracking Commands ──────────────────────────────────────────────────
 @client.tree.command(name="invites", description="Check how many members you or someone else has invited", guild=GUILD_ID)
 async def invites(interaction: discord.Interaction, user: discord.Member = None):
@@ -3779,6 +4019,19 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="📊 Levels", value=(
         "`/rank [user]` — Show level, XP & voice time\n"
         "`/leaderboard` — Top 10 XP members"
+    ), inline=False)
+
+    embed.add_field(name="⭐ Prestige & Cosmetics (Phase 3)", value=(
+        "`/prestige [user]` — View prestige level & XP multiplier\n"
+        "`/prestigereset` — Reset level to gain prestige (+{} PokeCoins) — **5% XP boost per level**\n"
+        "`/cosmetics inventory|shop` — View owned cosmetics or browse the shop\n"
+        "`/cosmeticsbuy <id>` — Purchase a cosmetic upgrade"
+    ).format(PRESTIGE_RESET_COST), inline=False)
+
+    embed.add_field(name="🎮 Pokemon Gyms & Raids (Phase 3)", value=(
+        "`/pokemon gym` — Challenge gym leaders and earn badges\n"
+        "`/pokemon raid` — Join group raids against boss Pokemon\n"
+        "`/pokemon ladder` — View seasonal ranking leaderboard"
     ), inline=False)
 
     embed.add_field(name="🎉 Giveaways *(Admin)*", value=(

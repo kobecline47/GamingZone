@@ -174,6 +174,31 @@ CHALLENGES: dict[int, dict] = {}
 
 import time as _time
 
+# ── Gym + Badge System (Phase 3 retention) ─────────────────────────────────
+# Gyms led by strong AI trainers; defeating grants a badge
+GYMS = {
+    "fire_gym": {"name": "Blaze Citadel", "leader": "Charizard", "badge": "🔥", "reward_coins": 500, "level": 30},
+    "water_gym": {"name": "Aqua Palace", "leader": "Blastoise", "badge": "💧", "reward_coins": 500, "level": 30},
+    "grass_gym": {"name": "Verdant Grove", "leader": "Venusaur", "badge": "🌿", "reward_coins": 500, "level": 30},
+    "electric_gym": {"name": "Thunder Station", "leader": "Pikachu", "badge": "⚡", "reward_coins": 500, "level": 28},
+    "psychic_gym": {"name": "Mind Palace", "leader": "Alakazam", "badge": "🔮", "reward_coins": 600, "level": 32},
+    "dragon_gym": {"name": "Dragon's Peak", "leader": "Dragonite", "badge": "🐉", "reward_coins": 750, "level": 35},
+}
+GYM_BADGES: dict[int, set[str]] = {}  # user_id -> {gym_ids}
+
+# ── Raid System (Phase 3 retention) ────────────────────────────────────────
+# Group battles against a powerful raid boss
+RAID_BOSS = {"name": "Mewtwo", "hp": 1000, "level": 45, "reward_coins": 2000}
+ACTIVE_RAIDS: dict[int, dict] = {}  # raid_id -> {channel_id, boss_hp, team_members, started_at}
+RAID_ID_COUNTER = 0
+
+# ── Seasonal Ladder (Phase 3 retention) ───────────────────────────────────
+# Track seasonal rankings; reset each month
+import datetime as _dt
+SEASON_START = _dt.datetime.now()
+SEASON_BATTLES_WON: dict[int, int] = {}  # user_id -> wins this season
+SEASON_RANK_POINTS: dict[int, int] = {}  # user_id -> ELO/rank points
+
 # ── Type Colors ──────────────────────────────────────────────────────────────
 TYPE_COLORS = {
     "Fire":     (238, 129, 48),      # Orange
