@@ -7,6 +7,14 @@ import random
 import discord
 from discord import app_commands
 from discord.ext import commands
+import io
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 
 # ── Pokemon Roster ────────────────────────────────────────────────────────────
 POKEMON_ROSTER = [
@@ -163,6 +171,146 @@ BATTLES: dict[int, dict] = {}
 CHALLENGES: dict[int, dict] = {}
 
 import time as _time
+
+# ── Type Colors ──────────────────────────────────────────────────────────────
+TYPE_COLORS = {
+    "Fire":     (238, 129, 48),      # Orange
+    "Water":    (63, 131, 248),      # Blue
+    "Grass":    (120, 200, 80),      # Green
+    "Electric": (248, 208, 48),      # Yellow
+    "Psychic":  (248, 88, 136),      # Pink
+    "Ghost":    (112, 88, 152),      # Purple
+    "Dragon":   (112, 56, 248),      # Dark Purple
+    "Fighting": (200, 48, 48),       # Red
+    "Poison":   (160, 64, 160),      # Magenta
+    "Ground":   (224, 192, 104),     # Brown
+    "Rock":     (184, 160, 56),      # Gray-Brown
+    "Ice":      (152, 216, 216),     # Cyan
+    "Dark":     (112, 88, 72),       # Dark Gray
+    "Steel":    (184, 184, 208),     # Silver
+    "Flying":   (168, 144, 240),     # Light Purple
+    "Fairy":    (238, 154, 172),     # Light Pink
+    "Normal":   (168, 168, 120),     # Gray
+}
+
+
+def _load_font(size: int = 24, bold: bool = False) -> ImageFont.FreeTypeFont | None:
+    """Load a font at the given size, with DejaVu fallback."""
+    if not ImageFont:
+        return None
+    candidates = [
+        "c:/windows/fonts/arial.ttf",
+        "c:/windows/fonts/arialbd.ttf" if bold else "c:/windows/fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return None
+
+
+def _save_battle_file(img: Image.Image, filename: str) -> discord.File | None:
+    """Convert PIL image to a Discord file."""
+    if not img:
+        return None
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return discord.File(bio, filename=filename)
+
+
+def _pokemon_battle_render(battle: dict) -> discord.File | None:
+    """Render a 960x600 battle scene with both Pokemon, HP bars, types, and statuses."""
+    if not Image or not ImageDraw:
+        return None
+
+    img = Image.new("RGBA", (960, 600), (45, 45, 48, 255))
+    draw = ImageDraw.Draw(img)
+    font_name = _load_font(28, bold=True)
+    font_hp = _load_font(18, bold=False)
+    font_type = _load_font(16, bold=False)
+    font_status = _load_font(14, bold=False)
+
+    p1, p2 = battle["p1"], battle["p2"]
+    p1_name, p2_name = battle["p1_name"], battle["p2_name"]
+
+    # ─── Left side: Player 1 ────────────────────────────────────────────────
+    # Pokemon name + emoji
+    draw.text((40, 30), f"{p1['emoji']} {p1['name']}", fill=(236, 236, 236, 255), font=font_name)
+    # Trainer name
+    draw.text((40, 65), f"*{p1_name}*", fill=(180, 180, 180, 255), font=_load_font(16))
+    # Type badge
+    type_color_rgb = TYPE_COLORS.get(p1["type"], (128, 128, 128))
+    type_color = type_color_rgb + (255,)
+    draw.rounded_rectangle((40, 95, 140, 120), radius=6, fill=type_color, outline=(200, 200, 200, 255), width=2)
+    draw.text((50, 99), p1["type"], fill=(255, 255, 255, 255), font=_load_font(12, bold=True))
+    # HP bar background
+    draw.rounded_rectangle((40, 150, 380, 175), radius=6, fill=(60, 60, 60, 255), outline=(100, 100, 100, 255), width=2)
+    # HP bar fill (green gradient)
+    hp_ratio = max(0.0, p1["current_hp"] / p1["max_hp"])
+    bar_width = int((380 - 40) * hp_ratio)
+    bar_color = (76, 175, 80, 255) if hp_ratio > 0.5 else ((255, 193, 7, 255) if hp_ratio > 0.25 else (244, 67, 54, 255))
+    if bar_width > 0:
+        draw.rounded_rectangle((40, 150, 40 + bar_width, 175), radius=6, fill=bar_color)
+    # HP text
+    hp_text = f"{p1['current_hp']} / {p1['max_hp']}"
+    draw.text((200, 152), hp_text, fill=(255, 255, 255, 255), font=font_hp)
+    # Status condition
+    if p1.get("status"):
+        status_icon = {"poison": "☠️", "burn": "🔥", "freeze": "🧊", "paralysis": "⚡"}.get(p1["status"], "❓")
+        draw.text((40, 195), f"Status: {status_icon} {p1['status'].upper()}", fill=(255, 150, 0, 255), font=font_status)
+
+    # ─── Right side: Player 2 ───────────────────────────────────────────────
+    # Pokemon name + emoji (right-aligned)
+    p2_name_text = f"{p2['emoji']} {p2['name']}"
+    p2_bbox = draw.textbbox((0, 0), p2_name_text, font=font_name)
+    p2_name_x = 960 - (p2_bbox[2] - p2_bbox[0]) - 40
+    draw.text((p2_name_x, 30), p2_name_text, fill=(236, 236, 236, 255), font=font_name)
+    # Trainer name
+    p2_trainer_bbox = draw.textbbox((0, 0), f"*{p2_name}*", font=_load_font(16))
+    p2_trainer_x = 960 - (p2_trainer_bbox[2] - p2_trainer_bbox[0]) - 40
+    draw.text((p2_trainer_x, 65), f"*{p2_name}*", fill=(180, 180, 180, 255), font=_load_font(16))
+    # Type badge
+    type_color_rgb_p2 = TYPE_COLORS.get(p2["type"], (128, 128, 128))
+    type_color_p2 = type_color_rgb_p2 + (255,)
+    draw.rounded_rectangle((820, 95, 920, 120), radius=6, fill=type_color_p2, outline=(200, 200, 200, 255), width=2)
+    p2_type_bbox = draw.textbbox((0, 0), p2["type"], font=_load_font(12, bold=True))
+    p2_type_x = 870 - (p2_type_bbox[2] - p2_type_bbox[0]) // 2
+    draw.text((p2_type_x, 99), p2["type"], fill=(255, 255, 255, 255), font=_load_font(12, bold=True))
+    # HP bar background
+    draw.rounded_rectangle((580, 150, 920, 175), radius=6, fill=(60, 60, 60, 255), outline=(100, 100, 100, 255), width=2)
+    # HP bar fill
+    hp_ratio_p2 = max(0.0, p2["current_hp"] / p2["max_hp"])
+    bar_width_p2 = int((920 - 580) * hp_ratio_p2)
+    bar_color_p2 = (76, 175, 80, 255) if hp_ratio_p2 > 0.5 else ((255, 193, 7, 255) if hp_ratio_p2 > 0.25 else (244, 67, 54, 255))
+    if bar_width_p2 > 0:
+        draw.rounded_rectangle((920 - bar_width_p2, 150, 920, 175), radius=6, fill=bar_color_p2)
+    # HP text (right-aligned)
+    hp_text_p2 = f"{p2['current_hp']} / {p2['max_hp']}"
+    hp_p2_bbox = draw.textbbox((0, 0), hp_text_p2, font=font_hp)
+    hp_p2_x = 750 - (hp_p2_bbox[2] - hp_p2_bbox[0]) // 2
+    draw.text((hp_p2_x, 152), hp_text_p2, fill=(255, 255, 255, 255), font=font_hp)
+    # Status condition
+    if p2.get("status"):
+        status_icon = {"poison": "☠️", "burn": "🔥", "freeze": "🧊", "paralysis": "⚡"}.get(p2["status"], "❓")
+        status_text = f"Status: {status_icon} {p2['status'].upper()}"
+        status_bbox = draw.textbbox((0, 0), status_text, font=font_status)
+        status_x = 920 - (status_bbox[2] - status_bbox[0]) - 40
+        draw.text((status_x, 195), status_text, fill=(255, 150, 0, 255), font=font_status)
+
+    # ─── VS separator ───────────────────────────────────────────────────────
+    draw.text((450, 280), "⚔️ VS ⚔️", fill=(255, 215, 0, 255), font=_load_font(32, bold=True))
+
+    # ─── Turn indicator (bottom) ─────────────────────────────────────────────
+    current_trainer = battle["p1_name"] if battle["turn"] == "p1" else battle["p2_name"]
+    turn_text = f"🎮 {current_trainer}'s Turn"
+    turn_bbox = draw.textbbox((0, 0), turn_text, font=_load_font(20, bold=True))
+    turn_x = (960 - (turn_bbox[2] - turn_bbox[0])) // 2
+    draw.text((turn_x, 520), turn_text, fill=(255, 200, 0, 255), font=_load_font(20, bold=True))
+
+    return _save_battle_file(img, "pokemon_battle.png")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -411,7 +559,9 @@ def setup_pokemon(bot: commands.Bot) -> None:
             ),
             color=0x00FF88,
         )
-        await interaction.response.send_message(embed=embed)
+        battle_file = _pokemon_battle_render(battle)
+        embed.set_image(url="attachment://pokemon_battle.png") if battle_file else None
+        await interaction.response.send_message(embed=embed, file=battle_file)
 
     # ── /pokemon decline ──────────────────────────────────────────────────────
     @pokemon_group.command(name="decline", description="Decline a Pokemon battle challenge")
@@ -530,7 +680,9 @@ def setup_pokemon(bot: commands.Bot) -> None:
             loser_id  = battle["p2_id"] if battle["turn"] == "p1" else battle["p1_id"]
             WALLETS[winner_id] = _wallet(winner_id) + WIN_COINS
             WALLETS[loser_id]  = _wallet(loser_id)  + LOSE_COINS
-            await interaction.response.send_message(embed=embed)
+            battle_file = _pokemon_battle_render(battle)
+            embed.set_image(url="attachment://pokemon_battle.png") if battle_file else None
+            await interaction.response.send_message(embed=embed, file=battle_file)
             return
 
         # ── Check: attacker fainted (status tick damage) ──
@@ -550,13 +702,17 @@ def setup_pokemon(bot: commands.Bot) -> None:
             loser_id  = battle["p1_id"] if battle["turn"] == "p1" else battle["p2_id"]
             WALLETS[winner_id] = _wallet(winner_id) + WIN_COINS
             WALLETS[loser_id]  = _wallet(loser_id)  + LOSE_COINS
-            await interaction.response.send_message(embed=embed)
+            battle_file = _pokemon_battle_render(battle)
+            embed.set_image(url="attachment://pokemon_battle.png") if battle_file else None
+            await interaction.response.send_message(embed=embed, file=battle_file)
             return
 
         # ── Continue battle ──
         battle["turn"] = next_turn
         embed = _battle_embed(battle, "⚔️ Pokemon Battle", "\n".join(lines) or "\u200b", color=0x5865F2)
-        await interaction.response.send_message(embed=embed)
+        battle_file = _pokemon_battle_render(battle)
+        embed.set_image(url="attachment://pokemon_battle.png") if battle_file else None
+        await interaction.response.send_message(embed=embed, file=battle_file)
 
     # ── Autocomplete for /pokemon attack ─────────────────────────────────────
     @cmd_attack.autocomplete("move")
