@@ -34,6 +34,7 @@ if sys.platform == "win32":
 
 GUILD_ID  = discord.Object(id=711335159189864468)
 GUILD_ID_2 = discord.Object(id=1495449662755442698)
+PRIMARY_GUILD_ID = GUILD_ID.id
 
 
 class Client(commands.Bot):
@@ -339,11 +340,14 @@ class Client(commands.Bot):
             client.add_view(GameRoleView())
             client.add_view(TicketView())
             client.add_view(OpenTicketView())
-            # Cache invites for all guilds
-            for guild in self.guilds:
+            # Cache invites for the primary guild only.
+            primary_guild = self.get_guild(PRIMARY_GUILD_ID)
+            if primary_guild is None:
+                print(f"[Startup] WARNING: primary guild {PRIMARY_GUILD_ID} not found in connected guilds.")
+            else:
                 try:
-                    invites = await guild.invites()
-                    INVITE_CACHE[guild.id] = {inv.code: inv for inv in invites}
+                    invites = await primary_guild.invites()
+                    INVITE_CACHE[primary_guild.id] = {inv.code: inv for inv in invites}
                 except Exception:
                     pass
             # Start background tasks once
@@ -366,34 +370,30 @@ class Client(commands.Bot):
                 self._feature_cmds_registered = True
 
             # Do NOT auto-create channels on startup/restart.
-            # Only validate and warn; admins can run setup commands explicitly.
-            for g in self.guilds:
+            # Only validate and warn in the primary guild; admins can run setup commands explicitly.
+            if primary_guild is not None:
                 try:
-                    if _resolve_mod_log_channel(g) is None:
-                        print(f"[Startup] Missing mod log channel in {g.name} (expected ID {LOG_CHANNEL_ID} or name #{MOD_LOG_NAME})")
-                    if _resolve_ticket_log_channel(g) is None:
-                        print(f"[Startup] Missing ticket log channel in {g.name} (expected #{TICKET_LOG_NAME})")
-                    marker_ch = _resolve_mod_log_channel(g)
+                    if _resolve_mod_log_channel(primary_guild) is None:
+                        print(f"[Startup] Missing mod log channel in {primary_guild.name} (expected ID {LOG_CHANNEL_ID} or name #{MOD_LOG_NAME})")
+                    if _resolve_ticket_log_channel(primary_guild) is None:
+                        print(f"[Startup] Missing ticket log channel in {primary_guild.name} (expected #{TICKET_LOG_NAME})")
+                    marker_ch = _resolve_mod_log_channel(primary_guild)
                     if marker_ch:
                         marker_embed = discord.Embed(title="🟢 Bot Startup Marker", color=0x2ECC71)
                         marker_embed.add_field(name="Marker", value=f"`{STARTUP_MARKER}`", inline=False)
                         marker_embed.add_field(name="PID", value=f"`{os.getpid()}`", inline=True)
-                        marker_embed.add_field(name="Guild", value=f"`{g.id}`", inline=True)
+                        marker_embed.add_field(name="Guild", value=f"`{primary_guild.id}`", inline=True)
                         marker_embed.timestamp = discord.utils.utcnow()
                         await marker_ch.send(embed=marker_embed)
                 except Exception as e:
-                    print(f"[Startup] Channel validation failed in {g.name}: {e}")
+                    print(f"[Startup] Channel validation failed in {primary_guild.name}: {e}")
 
-            # Global sync plus per-guild fast sync so new servers get commands immediately
-            synced_global = await self.tree.sync()
-            print(f'Synced {len(synced_global)} global slash commands.')
-            for g in self.guilds:
-                try:
-                    # Sync guild-only commands without copying globals into guild scope.
-                    synced_guild = await self.tree.sync(guild=g)
-                    print(f'Synced {len(synced_guild)} slash commands to guild {g.id}')
-                except Exception as e:
-                    print(f"[Sync] Could not sync guild {g.id}: {e}")
+            # Sync slash commands only to the primary guild.
+            try:
+                synced_guild = await self.tree.sync(guild=GUILD_ID)
+                print(f"Synced {len(synced_guild)} slash commands to primary guild {PRIMARY_GUILD_ID}")
+            except Exception as e:
+                print(f"[Sync] Could not sync primary guild {PRIMARY_GUILD_ID}: {e}")
             # Inject the running event loop into the dashboard now that the bot is connected
             dashboard._state["bot_loop"] = asyncio.get_event_loop()
             self._startup_completed = True
@@ -401,6 +401,9 @@ class Client(commands.Bot):
             print(f'Error syncing commands: {e}')
 
     async def on_guild_join(self, guild: discord.Guild):
+        if guild.id != PRIMARY_GUILD_ID:
+            print(f"[Guild Join] Ignoring non-primary guild {guild.name} ({guild.id})")
+            return
         try:
             synced = await self.tree.sync(guild=guild)
             print(f"[Guild Join] Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
@@ -1042,77 +1045,82 @@ async def ticket_sla_check():
         if cid not in live_ticket_channel_ids:
             TICKET_SLA_LAST_REMINDER.pop(cid, None)
 
-    for guild in client.guilds:
-        ticket_log = _resolve_ticket_log_channel(guild)
-        guild_tickets = [(uid, cid) for uid, cid in OPEN_TICKETS.items() if isinstance(guild.get_channel(cid), discord.TextChannel)]
-        for owner_id, channel_id in guild_tickets:
-            ch = guild.get_channel(channel_id)
-            if not isinstance(ch, discord.TextChannel):
-                continue
+    guild = client.get_guild(PRIMARY_GUILD_ID)
+    if guild is None:
+        return
 
-            age_hours = (now_dt - ch.created_at).total_seconds() / 3600.0
-            if age_hours < TICKET_SLA_HOURS:
-                continue
+    ticket_log = _resolve_ticket_log_channel(guild)
+    guild_tickets = [(uid, cid) for uid, cid in OPEN_TICKETS.items() if isinstance(guild.get_channel(cid), discord.TextChannel)]
+    for owner_id, channel_id in guild_tickets:
+        ch = guild.get_channel(channel_id)
+        if not isinstance(ch, discord.TextChannel):
+            continue
 
-            last = TICKET_SLA_LAST_REMINDER.get(channel_id, 0)
-            if now_unix - last < TICKET_SLA_REMINDER_COOLDOWN_MINUTES * 60:
-                continue
+        age_hours = (now_dt - ch.created_at).total_seconds() / 3600.0
+        if age_hours < TICKET_SLA_HOURS:
+            continue
 
-            TICKET_SLA_LAST_REMINDER[channel_id] = now_unix
+        last = TICKET_SLA_LAST_REMINDER.get(channel_id, 0)
+        if now_unix - last < TICKET_SLA_REMINDER_COOLDOWN_MINUTES * 60:
+            continue
 
-            staff_mentions = [r.mention for r in guild.roles if r.permissions.manage_channels and not r.is_default()][:3]
-            ping = " ".join(staff_mentions) if staff_mentions else "@here"
-            age_txt = f"{age_hours:.1f}h"
+        TICKET_SLA_LAST_REMINDER[channel_id] = now_unix
 
+        staff_mentions = [r.mention for r in guild.roles if r.permissions.manage_channels and not r.is_default()][:3]
+        ping = " ".join(staff_mentions) if staff_mentions else "@here"
+        age_txt = f"{age_hours:.1f}h"
+
+        try:
+            await ch.send(
+                f"⏰ **Ticket SLA Reminder**: this ticket has been open for **{age_txt}**. {ping}\n"
+                f"Opened by <@{owner_id}>."
+            )
+        except Exception as e:
+            print(f"[TicketSLA] Could not post reminder in #{ch.name}: {e}")
+
+        if ticket_log:
             try:
-                await ch.send(
-                    f"⏰ **Ticket SLA Reminder**: this ticket has been open for **{age_txt}**. {ping}\n"
-                    f"Opened by <@{owner_id}>."
-                )
+                embed = discord.Embed(title="⏰ Ticket SLA Reminder", color=0xF39C12)
+                embed.add_field(name="Ticket", value=ch.mention, inline=True)
+                embed.add_field(name="Opened By", value=f"<@{owner_id}>", inline=True)
+                embed.add_field(name="Open Time", value=age_txt, inline=True)
+                embed.timestamp = now_dt
+                await ticket_log.send(embed=embed)
             except Exception as e:
-                print(f"[TicketSLA] Could not post reminder in #{ch.name}: {e}")
-
-            if ticket_log:
-                try:
-                    embed = discord.Embed(title="⏰ Ticket SLA Reminder", color=0xF39C12)
-                    embed.add_field(name="Ticket", value=ch.mention, inline=True)
-                    embed.add_field(name="Opened By", value=f"<@{owner_id}>", inline=True)
-                    embed.add_field(name="Open Time", value=age_txt, inline=True)
-                    embed.timestamp = now_dt
-                    await ticket_log.send(embed=embed)
-                except Exception as e:
-                    print(f"[TicketSLA] Could not log SLA reminder for #{ch.name}: {e}")
+                print(f"[TicketSLA] Could not log SLA reminder for #{ch.name}: {e}")
 
 
 @tasks.loop(minutes=2)
 async def empty_vc_cleanup():
     """Scan all guilds for empty user-created voice channels and delete them."""
-    for guild in client.guilds:
-        # Channels to always keep: lobby triggers, AFK channel, channels with 0 user limit that are permanent
-        protected_ids: set[int] = set()
-        if guild.afk_channel:
-            protected_ids.add(guild.afk_channel.id)
-        # Protect all Personal Space lobby channels
-        lobby_id = PERSONAL_SPACE_LOBBY.get(guild.id)
-        if lobby_id:
-            protected_ids.add(lobby_id)
-        # Protect all known music / permanent VCs by name keywords
-        permanent_keywords = ("music", "stream", "stage", "afk", "join to create", "general", "lounge", "waiting")
-        for vc in guild.voice_channels:
-            if any(kw in vc.name.lower() for kw in permanent_keywords):
-                protected_ids.add(vc.id)
-        for vc in guild.voice_channels:
-            if vc.id in protected_ids:
-                continue
-            if len(vc.members) == 0:
-                # Only delete channels that were explicitly created by the Personal Space system
-                if vc.id in PERSONAL_SPACE_CHANNELS:
-                    try:
-                        PERSONAL_SPACE_CHANNELS.pop(vc.id, None)
-                        await vc.delete(reason="Empty Personal Space channel — auto-cleaned")
-                        print(f"[VCCleanup] Deleted empty Personal Space channel: #{vc.name} in {guild.name}")
-                    except Exception as e:
-                        print(f"[VCCleanup] Could not delete #{vc.name}: {e}")
+    guild = client.get_guild(PRIMARY_GUILD_ID)
+    if guild is None:
+        return
+    # Channels to always keep: lobby triggers, AFK channel, channels with 0 user limit that are permanent
+    protected_ids: set[int] = set()
+    if guild.afk_channel:
+        protected_ids.add(guild.afk_channel.id)
+    # Protect all Personal Space lobby channels
+    lobby_id = PERSONAL_SPACE_LOBBY.get(guild.id)
+    if lobby_id:
+        protected_ids.add(lobby_id)
+    # Protect all known music / permanent VCs by name keywords
+    permanent_keywords = ("music", "stream", "stage", "afk", "join to create", "general", "lounge", "waiting")
+    for vc in guild.voice_channels:
+        if any(kw in vc.name.lower() for kw in permanent_keywords):
+            protected_ids.add(vc.id)
+    for vc in guild.voice_channels:
+        if vc.id in protected_ids:
+            continue
+        if len(vc.members) == 0:
+            # Only delete channels that were explicitly created by the Personal Space system
+            if vc.id in PERSONAL_SPACE_CHANNELS:
+                try:
+                    PERSONAL_SPACE_CHANNELS.pop(vc.id, None)
+                    await vc.delete(reason="Empty Personal Space channel — auto-cleaned")
+                    print(f"[VCCleanup] Deleted empty Personal Space channel: #{vc.name} in {guild.name}")
+                except Exception as e:
+                    print(f"[VCCleanup] Could not delete #{vc.name}: {e}")
 
 @tasks.loop(seconds=30)
 async def giveaway_check():
