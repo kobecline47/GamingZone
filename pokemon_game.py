@@ -361,6 +361,7 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
     p1_name, p2_name = battle["p1_name"], battle["p2_name"]
     p1_avatar = _load_remote_image(battle.get("p1_avatar_url"))
     p2_avatar = _load_remote_image(battle.get("p2_avatar_url"))
+    fx = battle.pop("_fx", None)
     p1_type_color = TYPE_COLORS.get(p1["type"], (128, 128, 128))
     p2_type_color = TYPE_COLORS.get(p2["type"], (128, 128, 128))
 
@@ -412,6 +413,26 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
         _paste_battle_sprite(img, p2_sprite, center_x=675, baseline_y=250, max_w=210, max_h=210, flip=True)
     else:
         draw.text((640, 180), p2["emoji"], fill=(255, 255, 255, 255), font=_load_font(84, bold=True))
+
+    # One-frame move impact flash on the side that got hit.
+    if fx:
+        side = fx.get("side")
+        base_color = fx.get("color", (255, 96, 96))
+        crit = bool(fx.get("crit"))
+        cx, cy = (285, 260) if side == "p1" else (675, 185)
+        burst_size = 180 if crit else 145
+        for i in range(7):
+            alpha = max(18, (140 if crit else 105) - i * 16)
+            pad = i * 13
+            draw.ellipse(
+                (cx - burst_size // 2 - pad, cy - burst_size // 2 - pad, cx + burst_size // 2 + pad, cy + burst_size // 2 + pad),
+                outline=(base_color[0], base_color[1], base_color[2], alpha),
+                width=3 if i < 3 else 2,
+            )
+        draw.line((cx - 70, cy, cx + 70, cy), fill=(255, 255, 255, 130), width=2)
+        draw.line((cx, cy - 70, cx, cy + 70), fill=(255, 255, 255, 130), width=2)
+        if crit:
+            draw.text((cx - 28, cy - 104), "CRIT!", fill=(255, 235, 130, 255), font=_load_font(22, bold=True))
 
     # Trainer portraits near each side of the arena.
     p1_active = battle["turn"] == "p1"
@@ -788,6 +809,7 @@ def setup_pokemon(bot: commands.Bot) -> None:
 
         battle  = BATTLES[channel_id]
         user_id = interaction.user.id
+        battle.pop("_fx", None)
 
         # Validate turn
         if battle["turn"] == "p1" and user_id != battle["p1_id"]:
@@ -804,9 +826,11 @@ def setup_pokemon(bot: commands.Bot) -> None:
         if battle["turn"] == "p1":
             attacker, defender        = battle["p1"], battle["p2"]
             attacker_name, next_turn  = battle["p1_name"], "p2"
+            attacker_side, defender_side = "p1", "p2"
         else:
             attacker, defender        = battle["p2"], battle["p1"]
             attacker_name, next_turn  = battle["p2_name"], "p1"
+            attacker_side, defender_side = "p2", "p1"
 
         # Validate move
         move_map = {m.lower(): m for m in attacker["moves"]}
@@ -838,6 +862,14 @@ def setup_pokemon(bot: commands.Bot) -> None:
                 lines.append(f"{attacker['emoji']} **{attacker['name']}** used **{actual_move}**... it has **no effect**!")
             else:
                 defender["current_hp"] = max(0, defender["current_hp"] - damage)
+                move_type = MOVES.get(actual_move, {}).get("type", "Normal")
+                fx_color = TYPE_COLORS.get(move_type, (255, 96, 96))
+                battle["_fx"] = {
+                    "side": defender_side,
+                    "kind": "hit",
+                    "color": fx_color,
+                    "crit": is_crit,
+                }
 
                 crit_txt = "  💥 **Critical hit!**" if is_crit else ""
                 eff_txt  = ""
