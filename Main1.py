@@ -362,14 +362,16 @@ class Client(commands.Bot):
                 gambling.setup_gambling(self)
                 self._feature_cmds_registered = True
 
-            # Ensure private log channels exist in all guilds
+            # Do NOT auto-create channels on startup/restart.
+            # Only validate and warn; admins can run setup commands explicitly.
             for g in self.guilds:
                 try:
-                    await _ensure_log_channels(g)
-                    await _ensure_feature_channels(g)
-                    await _post_verify_embed(g)
+                    if _resolve_mod_log_channel(g) is None:
+                        print(f"[Startup] Missing mod log channel in {g.name} (expected ID {LOG_CHANNEL_ID} or name #{MOD_LOG_NAME})")
+                    if _resolve_ticket_log_channel(g) is None:
+                        print(f"[Startup] Missing ticket log channel in {g.name} (expected #{TICKET_LOG_NAME})")
                 except Exception as e:
-                    print(f"[Logs] Could not create channels in {g.name}: {e}")
+                    print(f"[Startup] Channel validation failed in {g.name}: {e}")
 
             # Global sync plus per-guild fast sync so new servers get commands immediately
             synced_global = await self.tree.sync()
@@ -692,6 +694,7 @@ STREAMER_CHANNEL_NAME = "streamer-alerts"
 FREE_GAMES_CHANNEL_NAME = "free-games"
 _FREE_GAMES_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "posted_free_games.json")
 POSTED_FREE_GAMES: set[int] = set()  # app IDs already announced
+FREE_GAMES_FIRST_CYCLE = True
 
 def _load_posted_games() -> None:
     """Load previously posted game IDs from disk so we never repost them."""
@@ -1246,34 +1249,22 @@ async def _recent_announced_free_game_urls(ch: discord.TextChannel, limit: int =
 
 @tasks.loop(hours=4)
 async def free_games_check():
+    global FREE_GAMES_FIRST_CYCLE
     guild = client.get_guild(GUILD_ID.id)
     if not guild:
         return
 
-    # Get or create the free-games channel
-    ch = discord.utils.get(guild.text_channels, name=FREE_GAMES_CHANNEL_NAME)
+    # Skip first cycle after boot to avoid restart repost storms.
+    if FREE_GAMES_FIRST_CYCLE:
+        FREE_GAMES_FIRST_CYCLE = False
+        print("[FreeGames] First cycle after startup skipped.")
+        return
+
+    # Background loop should not create channels; only post if target channel exists.
+    ch = _find_text_channel_ci(guild, FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
     if not ch:
-        try:
-            ch = await guild.create_text_channel(
-                FREE_GAMES_CHANNEL_NAME,
-                topic="🎮 Free games on Steam — auto-updated every 4 hours",
-                reason="Free games auto-channel",
-            )
-            # Post a header message the first time the channel is created
-            intro = discord.Embed(
-                title="🎮 Free Games on Steam",
-                description=(
-                    "This channel is automatically updated every **4 hours** "
-                    "with games that are currently **100% off** on Steam.\n\n"
-                    "Grab them before the offer ends!"
-                ),
-                color=0x1B2838,
-            )
-            intro.set_footer(text="Powered by the Steam store API")
-            await ch.send(embed=intro)
-        except Exception as e:
-            print(f"[FreeGames] Could not create channel: {e}")
-            return
+        print(f"[FreeGames] Channel #{FREE_GAMES_CHANNEL_NAME} not found in {guild.name}; skipping cycle.")
+        return
 
     loop = asyncio.get_running_loop()
     games = await loop.run_in_executor(None, _fetch_steam_free_games)
@@ -3192,7 +3183,7 @@ async def setupfreegames(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    ch = discord.utils.get(guild.text_channels, name=FREE_GAMES_CHANNEL_NAME)
+    ch = _find_text_channel_ci(guild, FREE_GAMES_CHANNEL_NAME, "freegames", "free-games")
     if not ch:
         ch = await guild.create_text_channel(
             FREE_GAMES_CHANNEL_NAME,
