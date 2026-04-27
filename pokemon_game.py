@@ -348,50 +348,94 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
     if not Image or not ImageDraw:
         return None
 
-    img = Image.new("RGBA", (960, 600), (45, 45, 48, 255))
+    width, height = 960, 600
+    img = Image.new("RGBA", (width, height), (10, 16, 26, 255))
     draw = ImageDraw.Draw(img)
     font_name = _load_font(28, bold=True)
     font_hp = _load_font(18, bold=False)
-    font_type = _load_font(16, bold=False)
     font_status = _load_font(14, bold=False)
+    font_small = _load_font(12, bold=True)
+    font_turn = _load_font(21, bold=True)
 
     p1, p2 = battle["p1"], battle["p2"]
     p1_name, p2_name = battle["p1_name"], battle["p2_name"]
     p1_avatar = _load_remote_image(battle.get("p1_avatar_url"))
     p2_avatar = _load_remote_image(battle.get("p2_avatar_url"))
+    p1_type_color = TYPE_COLORS.get(p1["type"], (128, 128, 128))
+    p2_type_color = TYPE_COLORS.get(p2["type"], (128, 128, 128))
+
+    # Vertical sky gradient + subtle scanlines for a premium arena look.
+    for y in range(height):
+        t = y / max(1, height - 1)
+        r = int(14 + (38 - 14) * t)
+        g = int(20 + (42 - 20) * t)
+        b = int(34 + (66 - 34) * t)
+        draw.line((0, y, width, y), fill=(r, g, b, 255), width=1)
+        if y % 4 == 0:
+            draw.line((0, y, width, y), fill=(255, 255, 255, 10), width=1)
+
+    # Corner color washes based on each Pokemon type.
+    for i in range(9):
+        alpha = max(8, 70 - i * 7)
+        pad = i * 18
+        draw.ellipse((20 + pad, 40 + pad, 360 - pad, 380 - pad), fill=(*p1_type_color, alpha))
+        draw.ellipse((600 + pad, 10 + pad, 940 - pad, 350 - pad), fill=(*p2_type_color, alpha))
 
     # Arena floor so sprites visibly appear on a battlefield.
-    draw.ellipse((140, 310, 430, 460), fill=(70, 90, 70, 235), outline=(120, 140, 120, 255), width=3)
-    draw.ellipse((530, 230, 820, 370), fill=(70, 90, 70, 235), outline=(120, 140, 120, 255), width=3)
+    draw.ellipse((130, 302, 440, 468), fill=(64, 94, 72, 235), outline=(170, 214, 184, 255), width=3)
+    draw.ellipse((520, 222, 830, 378), fill=(64, 94, 72, 235), outline=(170, 214, 184, 255), width=3)
+    draw.ellipse((160, 330, 410, 450), fill=(20, 30, 26, 100))
+    draw.ellipse((550, 250, 800, 360), fill=(20, 30, 26, 100))
+
+    # Glass HUD panels on top of scene.
+    draw.rounded_rectangle((24, 18, 412, 214), radius=18, fill=(12, 20, 36, 170), outline=(140, 170, 210, 150), width=2)
+    draw.rounded_rectangle((548, 18, 936, 214), radius=18, fill=(12, 20, 36, 170), outline=(140, 170, 210, 150), width=2)
+
+    # VS medallion + center split beam.
+    draw.rectangle((475, 190, 485, 470), fill=(255, 255, 255, 22))
+    draw.ellipse((424, 238, 536, 350), fill=(32, 40, 56, 220), outline=(255, 214, 128, 255), width=3)
+    draw.text((455, 275), "VS", fill=(255, 220, 150, 255), font=_load_font(30, bold=True))
 
     p1_sprite = _load_pokemon_sprite(p1["name"])
     p2_sprite = _load_pokemon_sprite(p2["name"])
     if p1_sprite:
+        # Warm sprite glow to reduce flatness on dark backgrounds.
+        for i in range(4):
+            draw.ellipse((208 - i * 5, 210 - i * 4, 362 + i * 5, 360 + i * 4), fill=(255, 240, 200, 20 - i * 3))
         _paste_battle_sprite(img, p1_sprite, center_x=285, baseline_y=332, max_w=230, max_h=230, flip=False)
     else:
         draw.text((250, 250), p1["emoji"], fill=(255, 255, 255, 255), font=_load_font(96, bold=True))
 
     if p2_sprite:
+        for i in range(4):
+            draw.ellipse((598 - i * 5, 125 - i * 4, 752 + i * 5, 280 + i * 4), fill=(220, 240, 255, 20 - i * 3))
         _paste_battle_sprite(img, p2_sprite, center_x=675, baseline_y=250, max_w=210, max_h=210, flip=True)
     else:
         draw.text((640, 180), p2["emoji"], fill=(255, 255, 255, 255), font=_load_font(84, bold=True))
 
     # Trainer portraits near each side of the arena.
+    p1_active = battle["turn"] == "p1"
+    p2_active = battle["turn"] == "p2"
     if p1_avatar:
         _paste_round_portrait(img, p1_avatar, center_x=100, center_y=305, size=82, ring_color=(80, 180, 255, 255))
+        if p1_active:
+            for i in range(4):
+                draw.ellipse((56 - i * 5, 261 - i * 5, 144 + i * 5, 349 + i * 5), outline=(80, 200, 255, 130 - i * 28), width=2)
     if p2_avatar:
         _paste_round_portrait(img, p2_avatar, center_x=860, center_y=225, size=82, ring_color=(255, 150, 70, 255))
+        if p2_active:
+            for i in range(4):
+                draw.ellipse((816 - i * 5, 181 - i * 5, 904 + i * 5, 269 + i * 5), outline=(255, 170, 90, 130 - i * 28), width=2)
 
     # ─── Left side: Player 1 ────────────────────────────────────────────────
     # Pokemon name + emoji
     draw.text((40, 30), f"{p1['emoji']} {p1['name']}", fill=(236, 236, 236, 255), font=font_name)
     # Trainer name
-    draw.text((40, 65), f"*{p1_name}*", fill=(180, 180, 180, 255), font=_load_font(16))
+    draw.text((40, 65), p1_name, fill=(180, 180, 180, 255), font=_load_font(16))
     # Type badge
-    type_color_rgb = TYPE_COLORS.get(p1["type"], (128, 128, 128))
-    type_color = type_color_rgb + (255,)
+    type_color = p1_type_color + (255,)
     draw.rounded_rectangle((40, 95, 140, 120), radius=6, fill=type_color, outline=(200, 200, 200, 255), width=2)
-    draw.text((50, 99), p1["type"], fill=(255, 255, 255, 255), font=_load_font(12, bold=True))
+    draw.text((50, 99), p1["type"], fill=(255, 255, 255, 255), font=font_small)
     # HP bar background
     draw.rounded_rectangle((40, 150, 380, 175), radius=6, fill=(60, 60, 60, 255), outline=(100, 100, 100, 255), width=2)
     # HP bar fill (green gradient)
@@ -415,16 +459,15 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
     p2_name_x = 960 - (p2_bbox[2] - p2_bbox[0]) - 40
     draw.text((p2_name_x, 30), p2_name_text, fill=(236, 236, 236, 255), font=font_name)
     # Trainer name
-    p2_trainer_bbox = draw.textbbox((0, 0), f"*{p2_name}*", font=_load_font(16))
+    p2_trainer_bbox = draw.textbbox((0, 0), p2_name, font=_load_font(16))
     p2_trainer_x = 960 - (p2_trainer_bbox[2] - p2_trainer_bbox[0]) - 40
-    draw.text((p2_trainer_x, 65), f"*{p2_name}*", fill=(180, 180, 180, 255), font=_load_font(16))
+    draw.text((p2_trainer_x, 65), p2_name, fill=(180, 180, 180, 255), font=_load_font(16))
     # Type badge
-    type_color_rgb_p2 = TYPE_COLORS.get(p2["type"], (128, 128, 128))
-    type_color_p2 = type_color_rgb_p2 + (255,)
+    type_color_p2 = p2_type_color + (255,)
     draw.rounded_rectangle((820, 95, 920, 120), radius=6, fill=type_color_p2, outline=(200, 200, 200, 255), width=2)
-    p2_type_bbox = draw.textbbox((0, 0), p2["type"], font=_load_font(12, bold=True))
+    p2_type_bbox = draw.textbbox((0, 0), p2["type"], font=font_small)
     p2_type_x = 870 - (p2_type_bbox[2] - p2_type_bbox[0]) // 2
-    draw.text((p2_type_x, 99), p2["type"], fill=(255, 255, 255, 255), font=_load_font(12, bold=True))
+    draw.text((p2_type_x, 99), p2["type"], fill=(255, 255, 255, 255), font=font_small)
     # HP bar background
     draw.rounded_rectangle((580, 150, 920, 175), radius=6, fill=(60, 60, 60, 255), outline=(100, 100, 100, 255), width=2)
     # HP bar fill
@@ -447,14 +490,15 @@ def _pokemon_battle_render(battle: dict) -> discord.File | None:
         draw.text((status_x, 195), status_text, fill=(255, 150, 0, 255), font=font_status)
 
     # ─── VS separator ───────────────────────────────────────────────────────
-    draw.text((450, 280), "⚔️ VS ⚔️", fill=(255, 215, 0, 255), font=_load_font(32, bold=True))
+    draw.text((405, 360), "⚔️  Arena Clash  ⚔️", fill=(255, 215, 150, 210), font=_load_font(24, bold=True))
 
     # ─── Turn indicator (bottom) ─────────────────────────────────────────────
     current_trainer = battle["p1_name"] if battle["turn"] == "p1" else battle["p2_name"]
     turn_text = f"🎮 {current_trainer}'s Turn"
-    turn_bbox = draw.textbbox((0, 0), turn_text, font=_load_font(20, bold=True))
+    draw.rounded_rectangle((280, 506, 680, 560), radius=16, fill=(10, 14, 24, 185), outline=(255, 220, 130, 200), width=2)
+    turn_bbox = draw.textbbox((0, 0), turn_text, font=font_turn)
     turn_x = (960 - (turn_bbox[2] - turn_bbox[0])) // 2
-    draw.text((turn_x, 520), turn_text, fill=(255, 200, 0, 255), font=_load_font(20, bold=True))
+    draw.text((turn_x, 522), turn_text, fill=(255, 211, 94, 255), font=font_turn)
 
     return _save_battle_file(img, "pokemon_battle.png")
 
