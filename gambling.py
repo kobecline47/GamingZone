@@ -33,6 +33,8 @@ except Exception:
 
 from pokemon_game import _wallet, _ensure_player, WALLETS
 
+BOT_LOG_NAME = "🤖┃bot-logs"
+
 # ── Config ────────────────────────────────────────────────────────────────────
 MIN_BET      = 10
 MAX_BET      = 50_000
@@ -139,6 +141,40 @@ def _check_bet(uid: int, amount: int) -> str | None:
 
 def _bal_line(uid: int) -> str:
     return f"💼 **Balance:** `{_wallet(uid):,}` PokeCoins"
+
+
+async def _log_coin_event(
+    guild: discord.Guild,
+    recipient: discord.abc.User,
+    amount: int,
+    source: str,
+    actor: discord.abc.User | None = None,
+    reason: str | None = None,
+) -> None:
+    """Log PokeCoin gains/losses to #mod-logs when available."""
+    if guild is None or recipient is None or amount == 0:
+        return
+    log_ch = discord.utils.get(guild.text_channels, name=BOT_LOG_NAME)
+    if not log_ch:
+        log_ch = discord.utils.get(guild.text_channels, name="bot-logs")
+    if not log_ch:
+        log_ch = discord.utils.get(guild.text_channels, name="mod-logs")
+    if not log_ch:
+        return
+
+    sign = "+" if amount > 0 else ""
+    color = 0x2ECC71 if amount > 0 else 0xE67E22
+    embed = discord.Embed(title="💰 PokeCoin Event", color=color)
+    embed.add_field(name="Recipient", value=f"{recipient.mention} (`{recipient.id}`)", inline=True)
+    embed.add_field(name="Amount", value=f"`{sign}{amount:,}` PokeCoins", inline=True)
+    embed.add_field(name="Balance", value=f"`{_wallet(recipient.id):,}` PokeCoins", inline=True)
+    embed.add_field(name="Source", value=source, inline=False)
+    if actor is not None:
+        embed.add_field(name="Actor", value=f"{actor.mention} (`{actor.id}`)", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    embed.timestamp = discord.utils.utcnow()
+    await log_ch.send(embed=embed)
 
 
 def _bonus_roll(uid: int, base_win: int) -> tuple[int, bool]:
@@ -481,12 +517,12 @@ def _bj_render_image_file(
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
 
-    card_w, card_h = 92, 132
-    gap = 20
-    side = 26
-    top = 22
+    card_w, card_h = 132, 188
+    gap = 22
+    side = 24
+    top = 20
     row_gap = 42
-    label_h = 22
+    label_h = 34
 
     visible_dealer = dealer if not hide_dealer else dealer[:1] + [dealer[1]]
     max_cards = max(len(player), len(visible_dealer), 2)
@@ -505,9 +541,9 @@ def _bj_render_image_file(
         draw.line((18, y, width - 18, y), fill=(16, 78, 58, 32), width=1)
 
     try:
-        font_rank = ImageFont.truetype("DejaVuSans.ttf", 22)
-        font_center = ImageFont.truetype("DejaVuSans.ttf", 30)
-        font_label = ImageFont.truetype("DejaVuSans.ttf", 16)
+        font_rank = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+        font_center = ImageFont.truetype("DejaVuSans-Bold.ttf", 62)
+        font_label = ImageFont.truetype("DejaVuSans-Bold.ttf", 30)
     except Exception:
         font_rank = ImageFont.load_default()
         font_center = ImageFont.load_default()
@@ -521,29 +557,44 @@ def _bj_render_image_file(
     def _draw_card_glow(x: int, y: int, glow_rgb: tuple[int, int, int]) -> None:
         glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         gd = ImageDraw.Draw(glow)
-        for spread, alpha in ((10, 52), (7, 78), (4, 110)):
+        for spread, alpha in ((8, 34), (5, 52), (3, 74)):
             gd.rounded_rectangle(
                 (x - spread, y - spread, x + card_w + spread, y + card_h + spread),
                 radius=12 + spread,
                 outline=(glow_rgb[0], glow_rgb[1], glow_rgb[2], alpha),
-                width=2,
+                width=1,
             )
         img.alpha_composite(glow)
 
     def draw_card(x: int, y: int, rank: str, suit: str, hidden: bool = False) -> None:
         if hidden:
             _draw_card_glow(x, y, (76, 190, 142))
-            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=11, fill=(26, 110, 79, 255), outline=(96, 208, 160, 255), width=3)
-            draw.text((x + 31, y + 49), "🂠", fill=(228, 243, 235), font=font_center)
+            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=11, fill=(30, 120, 86, 255), outline=(110, 220, 174, 255), width=3)
+            # Use a geometric card-back motif so it renders consistently across fonts.
+            pad = 14
+            draw.rounded_rectangle((x + pad, y + pad, x + card_w - pad, y + card_h - pad), radius=8, outline=(195, 243, 224, 235), width=2)
+            for yy in range(y + pad + 6, y + card_h - pad - 5, 10):
+                draw.line((x + pad + 3, yy, x + card_w - pad - 3, yy), fill=(165, 228, 202, 120), width=1)
+            inner = 20
+            draw.rounded_rectangle((x + inner, y + inner + 10, x + card_w - inner, y + card_h - inner - 10), radius=6, outline=(228, 246, 238, 230), width=2)
             return
 
         _draw_card_glow(x, y, (118, 225, 174))
         draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=11, fill=(248, 248, 248, 255), outline=(56, 176, 120, 255), width=3)
         c = suit_color(suit)
         suit_char = "♥" if "♥" in suit else "♦" if "♦" in suit else "♣" if "♣" in suit else "♠"
-        draw.text((x + 9, y + 7), rank, fill=c, font=font_rank)
-        draw.text((x + card_w // 2 - 10, y + card_h // 2 - 14), suit_char, fill=c, font=font_center)
-        draw.text((x + card_w - 26, y + card_h - 30), rank, fill=c, font=font_rank)
+        rank_bbox = draw.textbbox((0, 0), rank, font=font_rank)
+        rank_w = rank_bbox[2] - rank_bbox[0]
+        rank_h = rank_bbox[3] - rank_bbox[1]
+        suit_bbox = draw.textbbox((0, 0), suit_char, font=font_center)
+        suit_w = suit_bbox[2] - suit_bbox[0]
+        suit_h = suit_bbox[3] - suit_bbox[1]
+
+        top_pad = 12
+        side_pad = 12
+        draw.text((x + side_pad, y + top_pad), rank, fill=c, font=font_rank)
+        draw.text((x + (card_w - suit_w) // 2, y + (card_h - suit_h) // 2 - 4), suit_char, fill=c, font=font_center)
+        draw.text((x + card_w - rank_w - side_pad, y + card_h - rank_h - top_pad), rank, fill=c, font=font_rank)
 
     draw.text((side, top), "Dealer", fill=(226, 245, 235), font=font_label)
     y_dealer = top + label_h
@@ -551,7 +602,7 @@ def _bj_render_image_file(
         x = side + i * (card_w + gap)
         draw_card(x, y_dealer, r, s, hidden=(hide_dealer and i == 1))
 
-    draw.text((side, y_dealer + card_h + row_gap - 18), "You", fill=(226, 245, 235), font=font_label)
+    draw.text((side, y_dealer + card_h + row_gap - 10), "You", fill=(226, 245, 235), font=font_label)
     y_player = y_dealer + card_h + row_gap
     for i, (r, s) in enumerate(player):
         x = side + i * (card_w + gap)
@@ -948,17 +999,21 @@ def _wheel_slice(landed: int) -> str:
 
 def _roulette_embed(
     landed: int | None, choice: str, bet: int, uid: int,
-    spinning: bool = False, bonus: bool = False,
+    spinning: bool = False, bonus: bool = False, countdown: int | None = None,
 ) -> discord.Embed:
     if spinning:
-        idx  = random.randint(0, 36)
-        nums = [_WHEEL_ORDER[(idx + i) % len(_WHEEL_ORDER)] for i in range(5)]
-        line = "  ".join(f"{_r_color(n)[0]}{n:02d}" for n in nums)
-        return discord.Embed(
-            title="🎡 Roulette  ·  🌀 Spinning...",
-            description=f"```\n🎡  {line}  🎡\n    🌀🌀🌀🌀🌀🌀🌀\n```",
-            color=0x5865F2,
-        )
+        title = "🎡 Roulette  ·  🌀 Spinning..."
+        if countdown is not None:
+            title += f"  `{countdown}s`"
+        embed = discord.Embed(title=title, color=0x5865F2)
+        embed.add_field(name="🎲 Your Bet", value=f"`{choice}` → `{bet:,}` coins", inline=True)
+        embed.add_field(name="💼 Balance", value=f"`{_wallet(uid):,}` PokeCoins", inline=True)
+        if countdown is not None:
+            if countdown > 5:
+                embed.add_field(name="⏱️ Betting Window", value=f"Ball spinning... bets lock in **{countdown}s**", inline=False)
+            else:
+                embed.add_field(name="⏱️ Betting Window", value=f"🚫 No more bets... resolving in **{countdown}s**", inline=False)
+        return embed
     assert landed is not None
     emoji, color_name = _r_color(landed)
     is_num = choice.lstrip("-").isdigit()
@@ -987,153 +1042,163 @@ def _roulette_embed(
     return embed
 
 
-def _roulette_render_image_file(landed: int | None, spinning: bool = False) -> discord.File | None:
+def _roulette_render_image_file(
+    landed: int | None,
+    spinning: bool = False,
+    spin_phase: float = 0.0,
+) -> discord.File | None:
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
 
-    size = 900
-    img = Image.new("RGBA", (size, size), (20, 20, 20, 255))
+    width, height = 1100, 620
+    img = Image.new("RGBA", (width, height), (14, 23, 19, 255))
     draw = ImageDraw.Draw(img)
 
-    cx = size // 2
-    # Push center far below canvas so only the top arc of the wheel is visible.
-    cy = 1160
-    outer_r = 970
-    inner_r = 580
-    ball_track_r = inner_r - 55   # rail sits just inside the number band
+    # Background glow.
+    draw.ellipse((-120, -80, width + 120, height + 180), fill=(31, 54, 42, 120))
+
+    # Table body.
+    table = (28, 44, width - 28, height - 44)
+    draw.rounded_rectangle(table, radius=70, fill=(44, 90, 40, 255), outline=(228, 205, 150, 255), width=8)
+    draw.rounded_rectangle((44, 60, width - 44, height - 60), radius=60, fill=(37, 113, 46, 255), outline=(248, 232, 192, 170), width=2)
+
+    # Left wheel panel and right betting panel.
+    left_panel = (52, 92, 480, 528)
+    right_panel = (500, 92, 1048, 528)
+    draw.rounded_rectangle(left_panel, radius=26, fill=(74, 45, 19, 255), outline=(204, 170, 116, 255), width=3)
+    draw.rounded_rectangle(right_panel, radius=26, fill=(28, 112, 45, 255), outline=(200, 232, 204, 130), width=3)
+
+    cx, cy = 266, 310
+    outer_r = 188
+    mid_r = 162
+    inner_r = 130
+    hub_r = 52
     seg_deg = 360.0 / len(_WHEEL_ORDER)
 
-    target = landed if landed is not None else random.choice(_WHEEL_ORDER)
-    target_idx = _WHEEL_ORDER.index(target)
+    # Wheel wood/metal rings.
+    draw.ellipse((cx - outer_r - 18, cy - outer_r - 18, cx + outer_r + 18, cy + outer_r + 18), fill=(209, 168, 102, 255))
+    draw.ellipse((cx - outer_r - 8, cy - outer_r - 8, cx + outer_r + 8, cy + outer_r + 8), fill=(123, 76, 34, 255))
+    draw.ellipse((cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r), fill=(40, 40, 40, 255))
 
-    # Rotate so the target segment is centred at the top of the arc.
-    base = -90.0 - ((target_idx + 0.5) * seg_deg)
-
-    def seg_base_color(n: int) -> tuple[int, int, int]:
-        if n == 0:       return (10, 110, 60)
-        if n in _RED_NUMS: return (175, 20, 22)
-        return (12, 12, 14)
-
-    def seg_highlight_color(n: int) -> tuple[int, int, int]:
-        if n == 0:       return (30, 175, 90)
-        if n in _RED_NUMS: return (230, 60, 60)
-        return (55, 55, 60)
-
-    # Draw each segment with a 2-step gradient: base color outer, highlight inner.
-    mid_r = (outer_r + inner_r) // 2
-    grad_steps = 6
+    # Segment ring.
     for i, n in enumerate(_WHEEL_ORDER):
-        a0 = base + i * seg_deg
+        a0 = -90 + i * seg_deg
         a1 = a0 + seg_deg
-        base_c = seg_base_color(n)
-        high_c = seg_highlight_color(n)
-        for step in range(grad_steps):
-            t = step / (grad_steps - 1)
-            # Blend from base (outer) to highlight (inner).
-            rc = int(base_c[0] + t * (high_c[0] - base_c[0]))
-            gc = int(base_c[1] + t * (high_c[1] - base_c[1]))
-            bc = int(base_c[2] + t * (high_c[2] - base_c[2]))
-            r_outer = outer_r - int(step * (outer_r - inner_r) / grad_steps)
-            r_inner = outer_r - int((step + 1) * (outer_r - inner_r) / grad_steps)
-            draw.pieslice(
-                (cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer),
-                a0, a1, fill=(rc, gc, bc, 255),
-            )
-        # Overdraw inner part with base background to clip inner portion.
-        draw.pieslice(
-            (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
-            a0, a1, fill=seg_base_color(n),
-        )
+        if n == 0:
+            col = (22, 152, 76, 255)
+        elif n in _RED_NUMS:
+            col = (200, 28, 28, 255)
+        else:
+            col = (32, 32, 36, 255)
+        draw.pieslice((cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r), a0, a1, fill=col)
+        draw.pieslice((cx - mid_r, cy - mid_r, cx + mid_r, cy + mid_r), a0, a1, fill=(18, 18, 19, 255))
 
-    # Thin white separator lines between segments.
-    for i in range(len(_WHEEL_ORDER)):
-        a = math.radians(base + i * seg_deg)
-        x0 = int(cx + math.cos(a) * inner_r)
-        y0 = int(cy + math.sin(a) * inner_r)
-        x1 = int(cx + math.cos(a) * outer_r)
-        y1 = int(cy + math.sin(a) * outer_r)
-        draw.line((x0, y0, x1, y1), fill=(220, 220, 220, 200), width=2)
-
-    # Numbers: center segment large+bold, adjacent shrink with distance.
-    font_sizes = {0: 70, 1: 52, 2: 36}   # offset → font size
     try:
-        font_large  = ImageFont.truetype("DejaVuSans-Bold.ttf", 70)
-        font_med    = ImageFont.truetype("DejaVuSans-Bold.ttf", 52)
-        font_small  = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+        font_num = ImageFont.truetype("DejaVuSans-Bold.ttf", 14)
+        font_table_num = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
+        font_table_small = ImageFont.truetype("DejaVuSans-Bold.ttf", 17)
     except Exception:
-        font_large = font_med = font_small = ImageFont.load_default()
-    font_map = {0: font_large, 1: font_med, 2: font_small}
-    alpha_map = {0: 255, 1: 210, 2: 160}
-    label_r = inner_r + int((outer_r - inner_r) * 0.50)
+        font_num = ImageFont.load_default()
+        font_table_num = ImageFont.load_default()
+        font_table_small = ImageFont.load_default()
 
-    for offset in range(-3, 4):
-        idx = (target_idx + offset) % len(_WHEEL_ORDER)
-        n   = _WHEEL_ORDER[idx]
-        ang = math.radians(base + (idx + 0.5) * seg_deg)
-        tx  = int(cx + math.cos(ang) * label_r)
-        ty  = int(cy + math.sin(ang) * label_r)
-        # Only render if inside visible canvas.
-        if ty > size + 10 or tx < -30 or tx > size + 30:
-            continue
-        abs_off = min(abs(offset), 2)
-        fnt     = font_map[abs_off]
-        alpha   = alpha_map[abs_off]
-        t       = str(n)
-        bb      = draw.textbbox((0, 0), t, font=fnt)
-        tw, th  = bb[2] - bb[0], bb[3] - bb[1]
-        draw.text((tx - tw // 2, ty - th // 2), t, fill=(255, 255, 255, alpha), font=fnt)
+    # Wheel labels.
+    label_r = (outer_r + mid_r) // 2
+    for i, n in enumerate(_WHEEL_ORDER):
+        ang = math.radians(-90 + (i + 0.5) * seg_deg)
+        tx = int(cx + math.cos(ang) * label_r)
+        ty = int(cy + math.sin(ang) * label_r)
+        txt = str(n)
+        bb = draw.textbbox((0, 0), txt, font=font_num)
+        draw.text((tx - (bb[2] - bb[0]) // 2, ty - (bb[3] - bb[1]) // 2), txt, fill=(240, 240, 240, 255), font=font_num)
 
-    # Hollow center — fill with background color to hide pie centers.
-    draw.ellipse(
-        (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
-        fill=(20, 20, 20, 255),
-    )
+    # Inner bowl and hub.
+    draw.ellipse((cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r), fill=(122, 76, 34, 255), outline=(228, 188, 128, 255), width=3)
+    draw.ellipse((cx - hub_r, cy - hub_r, cx + hub_r, cy + hub_r), fill=(168, 120, 62, 255), outline=(238, 210, 155, 255), width=3)
 
-    # ── Rails ───────────────────────────────────────────────────────────────
-    # Outer rail (outermost border of number band).
-    draw.arc(
-        (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
-        start=200, end=340, fill=(70, 140, 50, 255), width=42,
-    )
-    # Inner rail (border between number band and ball track).
-    draw.arc(
-        (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
-        start=200, end=340, fill=(60, 130, 45, 255), width=36,
-    )
-    # Ball track floor (dark strip just inside inner rail).
-    draw.arc(
-        (cx - ball_track_r, cy - ball_track_r, cx + ball_track_r, cy + ball_track_r),
-        start=200, end=340, fill=(28, 28, 30, 255), width=48,
-    )
+    # Spokes.
+    for deg in (20, 140, 260):
+        a = math.radians(deg)
+        x2 = int(cx + math.cos(a) * (hub_r + 28))
+        y2 = int(cy + math.sin(a) * (hub_r + 28))
+        draw.line((cx, cy, x2, y2), fill=(236, 215, 173, 230), width=3)
 
-    # ── Metallic Ball ───────────────────────────────────────────────────────
-    ball_num = random.choice(_WHEEL_ORDER) if spinning else target
-    ball_idx = _WHEEL_ORDER.index(ball_num)
-    ball_ang = math.radians(base + (ball_idx + 0.5) * seg_deg)
+    # Ball movement.
+    ball_track_r = outer_r - 10
+    if spinning:
+        # Ease-out motion so the ball starts fast and slows near the end.
+        t = max(0.0, min(1.0, spin_phase))
+        eased = 1.0 - ((1.0 - t) ** 2.6)
+        turns = 7.0
+        ball_ang = math.radians(-90 + ((eased * turns * 360.0) % 360.0))
+    else:
+        target = landed if landed is not None else random.choice(_WHEEL_ORDER)
+        target_idx = _WHEEL_ORDER.index(target)
+        ball_ang = math.radians(-90 + (target_idx + 0.5) * seg_deg)
+
     bx = int(cx + math.cos(ball_ang) * ball_track_r)
     by = int(cy + math.sin(ball_ang) * ball_track_r)
-    br = 26
-    # Only draw if ball is visible on canvas.
-    if by < size + br:
-        # Shadow.
-        draw.ellipse(
-            (bx - br + 4, by - br + 4, bx + br + 4, by + br + 4),
-            fill=(0, 0, 0, 160),
-        )
-        # Ball body gradient: dark bottom, lighter top.
-        for ring in range(br, 0, -1):
-            t = (br - ring) / br
-            rc = int(80 + t * 140)
-            draw.ellipse(
-                (bx - ring, by - ring, bx + ring, by + ring),
-                fill=(rc, rc, rc, 255),
-            )
-        # Specular highlight top-left.
-        hl_x, hl_y, hl_r = bx - br // 3, by - br // 3, max(4, br // 3)
-        draw.ellipse(
-            (hl_x - hl_r, hl_y - hl_r, hl_x + hl_r, hl_y + hl_r),
-            fill=(255, 255, 255, 240),
-        )
+    br = 10
+    draw.ellipse((bx - br + 2, by - br + 2, bx + br + 2, by + br + 2), fill=(0, 0, 0, 130))
+    draw.ellipse((bx - br, by - br, bx + br, by + br), fill=(220, 220, 220, 255), outline=(250, 250, 250, 220), width=1)
+    draw.ellipse((bx - 3, by - 4, bx + 1, by), fill=(255, 255, 255, 220))
+
+    # Betting grid (right side) like a roulette felt table.
+    gx0, gy0 = 538, 154
+    cell_w, cell_h = 40, 58
+
+    # Zero column.
+    draw.rectangle((gx0 - 34, gy0, gx0, gy0 + cell_h * 3), fill=(12, 130, 68, 255), outline=(220, 238, 220, 230), width=2)
+    zbb = draw.textbbox((0, 0), "0", font=font_table_num)
+    draw.text((gx0 - 17 - (zbb[2] - zbb[0]) // 2, gy0 + (cell_h * 3 - (zbb[3] - zbb[1])) // 2), "0", fill=(245, 245, 245, 255), font=font_table_num)
+
+    for col in range(12):
+        nums = [3 + col * 3, 2 + col * 3, 1 + col * 3]
+        for row, n in enumerate(nums):
+            x0 = gx0 + col * cell_w
+            y0 = gy0 + row * cell_h
+            x1 = x0 + cell_w
+            y1 = y0 + cell_h
+            if n in _RED_NUMS:
+                fill = (198, 28, 28, 255)
+            else:
+                fill = (28, 33, 37, 255)
+            draw.rectangle((x0, y0, x1, y1), fill=fill, outline=(220, 238, 220, 210), width=2)
+            t = str(n)
+            bb = draw.textbbox((0, 0), t, font=font_table_num)
+            draw.text((x0 + (cell_w - (bb[2] - bb[0])) // 2, y0 + (cell_h - (bb[3] - bb[1])) // 2), t, fill=(244, 244, 244, 255), font=font_table_num)
+
+    # Dozens row.
+    y_dozen = gy0 + cell_h * 3 + 10
+    labels = ["1st 12", "2nd 12", "3rd 12"]
+    for i, lbl in enumerate(labels):
+        x0 = gx0 + i * 160
+        x1 = x0 + 156
+        draw.rectangle((x0, y_dozen, x1, y_dozen + 42), fill=(44, 98, 45, 255), outline=(220, 238, 220, 210), width=2)
+        bb = draw.textbbox((0, 0), lbl, font=font_table_small)
+        draw.text((x0 + (156 - (bb[2] - bb[0])) // 2, y_dozen + (42 - (bb[3] - bb[1])) // 2), lbl, fill=(234, 244, 234, 255), font=font_table_small)
+
+    # Even chance row.
+    y_even = y_dozen + 50
+    labels2 = ["1 to 18", "EVEN", "RED", "BLACK", "ODD", "19 to 36"]
+    widths = [80, 70, 70, 80, 70, 90]
+    x = gx0
+    for i, lbl in enumerate(labels2):
+        w = widths[i]
+        fill = (38, 88, 41, 255)
+        if lbl == "RED":
+            fill = (198, 28, 28, 255)
+        elif lbl == "BLACK":
+            fill = (24, 26, 30, 255)
+        draw.rectangle((x, y_even, x + w, y_even + 42), fill=fill, outline=(220, 238, 220, 200), width=2)
+        bb = draw.textbbox((0, 0), lbl, font=font_table_small)
+        draw.text((x + (w - (bb[2] - bb[0])) // 2, y_even + (42 - (bb[3] - bb[1])) // 2), lbl, fill=(238, 244, 238, 255), font=font_table_small)
+        x += w
+
+    # Chips near top-right for style.
+    for cx2, cy2, col in ((720, 112, (220, 42, 42, 255)), (742, 142, (220, 42, 42, 255)), (772, 118, (24, 24, 28, 255))):
+        draw.ellipse((cx2 - 12, cy2 - 12, cx2 + 12, cy2 + 12), fill=col, outline=(250, 250, 250, 180), width=2)
+        draw.ellipse((cx2 - 4, cy2 - 4, cx2 + 4, cy2 + 4), fill=(245, 245, 245, 220))
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG")
@@ -1148,9 +1213,11 @@ def _roulette_embed_with_image(
     uid: int,
     spinning: bool = False,
     bonus: bool = False,
+    spin_phase: float = 0.0,
+    countdown: int | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
-    embed = _roulette_embed(landed, choice, bet, uid, spinning=spinning, bonus=bonus)
-    img_file = _roulette_render_image_file(landed, spinning=spinning)
+    embed = _roulette_embed(landed, choice, bet, uid, spinning=spinning, bonus=bonus, countdown=countdown)
+    img_file = _roulette_render_image_file(landed, spinning=spinning, spin_phase=spin_phase)
     if img_file:
         # Remove old text wheel so only the new rendered wheel is shown.
         embed.description = None
@@ -1914,6 +1981,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         )
         embed.set_footer(text="Come back in 24 hours for your next reward!  •  /slots /blackjack /roulette")
         await interaction.response.send_message(embed=embed)
+        await _log_coin_event(interaction.guild, interaction.user, amount, "daily")
 
     # ── /work ─────────────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -1947,6 +2015,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         )
         embed.set_footer(text="Use /work again after cooldown  •  /daily /slots /blackjack")
         await interaction.response.send_message(embed=embed)
+        await _log_coin_event(interaction.guild, interaction.user, amount, "work")
 
     # ── /givepokcoin ───────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -1993,16 +2062,14 @@ def setup_gambling(bot: commands.Bot) -> None:
         embed.add_field(name="💼 New Balance", value=f"`{_wallet(member.id):,}` PokeCoins", inline=True)
         await interaction.response.send_message(embed=embed)
 
-        log_ch = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
-        if log_ch:
-            log_embed = discord.Embed(title="💰 Admin Coin Grant", color=0xFFD700)
-            log_embed.add_field(name="Admin", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
-            log_embed.add_field(name="Recipient", value=f"{member.mention} (`{member.id}`)", inline=True)
-            log_embed.add_field(name="Amount", value=f"`+{amount:,}` PokeCoins", inline=True)
-            log_embed.add_field(name="Reason", value=reason, inline=False)
-            log_embed.add_field(name="New Balance", value=f"`{_wallet(member.id):,}` PokeCoins", inline=True)
-            log_embed.timestamp = discord.utils.utcnow()
-            await log_ch.send(embed=log_embed)
+        await _log_coin_event(
+            interaction.guild,
+            member,
+            amount,
+            "admin gift",
+            actor=interaction.user,
+            reason=reason,
+        )
 
     # ── /slots ────────────────────────────────────────────────────────────────
     @bot.tree.command(name="slots", description="🎰 Spin the slot machine")
@@ -2195,12 +2262,38 @@ def setup_gambling(bot: commands.Bot) -> None:
                     ephemeral=True,
                 )
                 return
-        spin_embed, spin_img = _roulette_embed_with_image(None, choice, bet, uid, spinning=True)
+        spin_seconds = 45
+        spin_embed, spin_img = _roulette_embed_with_image(
+            None,
+            choice,
+            bet,
+            uid,
+            spinning=True,
+            spin_phase=0.0,
+            countdown=spin_seconds,
+        )
         if spin_img:
             await interaction.response.send_message(embed=spin_embed, file=spin_img)
         else:
             await interaction.response.send_message(embed=spin_embed)
-        await asyncio.sleep(2.5)
+
+        for remaining in range(spin_seconds - 1, 0, -1):
+            await asyncio.sleep(1)
+            phase = (spin_seconds - remaining) / spin_seconds
+            spin_embed, spin_img = _roulette_embed_with_image(
+                None,
+                choice,
+                bet,
+                uid,
+                spinning=True,
+                spin_phase=phase,
+                countdown=remaining,
+            )
+            if spin_img:
+                await interaction.edit_original_response(embed=spin_embed, attachments=[spin_img])
+            else:
+                await interaction.edit_original_response(embed=spin_embed)
+
         landed = random.randint(0, 36)
         is_num = choice.lstrip("-").isdigit()
         if is_num:        won = landed == int(choice); mult = 35

@@ -728,6 +728,11 @@ def setup_pokemon(bot: commands.Bot) -> None:
         description="⚔️ Pokemon-style turn-based battle mini game",
     )
 
+    raid_group = app_commands.Group(
+        name="raid",
+        description="🦹 Team up for raid boss battles",
+    )
+
     # ── /pokemon battle ───────────────────────────────────────────────────────
     @pokemon_group.command(name="battle", description="Challenge another member to a Pokemon battle!")
     @app_commands.describe(opponent="The member you want to challenge")
@@ -1065,8 +1070,173 @@ def setup_pokemon(bot: commands.Bot) -> None:
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    def _raid_embed(raid_data: dict) -> discord.Embed:
+        team_members = raid_data.get("team_members", [])
+        ready_members = raid_data.get("ready_members", [])
+        embed = discord.Embed(
+            title="🦹 **RAID BOSS APPEARED!**",
+            description=(
+                f"**{RAID_BOSS['name']}** (Lv. {RAID_BOSS['level']}) has appeared!\n\n"
+                f"**HP:** `{raid_data['boss_hp']:,} / {raid_data['max_hp']:,}`\n"
+                f"**Reward:** `{RAID_BOSS['reward_coins']:,} PokeCoins` per member"
+            ),
+            color=0xFF4444,
+        )
+        if team_members:
+            embed.add_field(
+                name=f"⚔️ Team Members ({len(team_members)})",
+                value="\n".join(f"<@{uid}>" for uid in team_members),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="⚔️ Team Members (0)", value="No one joined yet.", inline=False)
+
+        if ready_members:
+            embed.add_field(
+                name=f"✅ Ready ({len(ready_members)}/{len(team_members) if team_members else 0})",
+                value="\n".join(f"<@{uid}>" for uid in ready_members),
+                inline=False,
+            )
+
+        embed.add_field(
+            name="📋 Controls",
+            value="Use the buttons below: **Join**, **Ready**, **Leave**.",
+            inline=False,
+        )
+        embed.set_footer(text=f"Raid ID: {raid_data['raid_id']}")
+        return embed
+
+    class RaidBossView(discord.ui.View):
+        def __init__(self, raid_id: int):
+            super().__init__(timeout=300)
+            self.raid_id = raid_id
+
+        def _get_raid(self) -> dict | None:
+            return ACTIVE_RAIDS.get(self.raid_id)
+
+        async def _refresh(self, interaction: discord.Interaction):
+            raid = self._get_raid()
+            if raid is None:
+                for item in self.children:
+                    item.disabled = True
+                if interaction.response.is_done():
+                    await interaction.edit_original_response(content="❌ This raid is no longer active.", view=self)
+                else:
+                    await interaction.response.edit_message(content="❌ This raid is no longer active.", view=self)
+                return
+            embed = _raid_embed(raid)
+            if interaction.response.is_done():
+                await interaction.edit_original_response(embed=embed, view=self)
+            else:
+                await interaction.response.edit_message(embed=embed, view=self)
+
+        async def on_timeout(self):
+            raid = self._get_raid()
+            if raid is not None:
+                ACTIVE_RAIDS.pop(self.raid_id, None)
+            for item in self.children:
+                item.disabled = True
+
+        @discord.ui.button(label="Join", emoji="🎯", style=discord.ButtonStyle.success)
+        async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+            raid = self._get_raid()
+            if raid is None:
+                await interaction.response.send_message("❌ This raid is no longer active.", ephemeral=True)
+                return
+            user_id = interaction.user.id
+            _ensure_player(user_id)
+            if user_id not in raid["team_members"]:
+                raid["team_members"].append(user_id)
+            if user_id in raid["ready_members"]:
+                raid["ready_members"].remove(user_id)
+            await self._refresh(interaction)
+
+        @discord.ui.button(label="Ready", emoji="⏱️", style=discord.ButtonStyle.primary)
+        async def ready(self, interaction: discord.Interaction, button: discord.ui.Button):
+            raid = self._get_raid()
+            if raid is None:
+                await interaction.response.send_message("❌ This raid is no longer active.", ephemeral=True)
+                return
+            user_id = interaction.user.id
+            if user_id not in raid["team_members"]:
+                await interaction.response.send_message("❌ Join the raid first using **Join**.", ephemeral=True)
+                return
+            if user_id not in raid["ready_members"]:
+                raid["ready_members"].append(user_id)
+            raid["ready"] = len(raid["team_members"]) > 0 and len(raid["ready_members"]) == len(raid["team_members"])
+            await self._refresh(interaction)
+
+        @discord.ui.button(label="Leave", emoji="🛑", style=discord.ButtonStyle.danger)
+        async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+            raid = self._get_raid()
+            if raid is None:
+                await interaction.response.send_message("❌ This raid is no longer active.", ephemeral=True)
+                return
+            user_id = interaction.user.id
+            if user_id in raid["team_members"]:
+                raid["team_members"].remove(user_id)
+            if user_id in raid["ready_members"]:
+                raid["ready_members"].remove(user_id)
+            raid["ready"] = len(raid["team_members"]) > 0 and len(raid["ready_members"]) == len(raid["team_members"])
+            if not raid["team_members"]:
+                ACTIVE_RAIDS.pop(self.raid_id, None)
+                for item in self.children:
+                    item.disabled = True
+                if interaction.response.is_done():
+                    await interaction.edit_original_response(content="❌ Raid canceled (no team members left).", view=self)
+                else:
+                    await interaction.response.edit_message(content="❌ Raid canceled (no team members left).", view=self)
+                return
+            await self._refresh(interaction)
+
+    async def _start_raid_boss(interaction: discord.Interaction):
+        import time
+        global RAID_ID_COUNTER
+
+        _ensure_player(interaction.user.id)
+        channel_id = interaction.channel_id
+
+        existing_raid = next((r for r in ACTIVE_RAIDS.values() if r.get("channel_id") == channel_id), None)
+        if existing_raid:
+            await interaction.response.send_message(
+                "❌ A raid is already active in this channel! Wait for it to finish.",
+                ephemeral=True,
+            )
+            return
+
+        raid_id = RAID_ID_COUNTER
+        RAID_ID_COUNTER += 1
+
+        boss_hp = RAID_BOSS["hp"]
+        raid_data = {
+            "raid_id": raid_id,
+            "channel_id": channel_id,
+            "boss_hp": boss_hp,
+            "max_hp": boss_hp,
+            "team_members": [interaction.user.id],
+            "ready_members": [],
+            "started_at": time.time(),
+            "ready": False,
+            "round": 0,
+        }
+        ACTIVE_RAIDS[raid_id] = raid_data
+
+        view = RaidBossView(raid_id)
+        await interaction.response.send_message(embed=_raid_embed(raid_data), view=view)
+
+    # ── /pokemon boss ─────────────────────────────────────────────────────────
+    @pokemon_group.command(name="boss", description="🦹 Challenge the legendary Raid Boss Mewtwo as a team!")
+    async def cmd_pokemon_boss(interaction: discord.Interaction):
+        await _start_raid_boss(interaction)
+
+    # ── /raid boss ────────────────────────────────────────────────────────────
+    @raid_group.command(name="boss", description="🦹 Challenge the legendary Raid Boss Mewtwo as a team!")
+    async def cmd_raid_boss(interaction: discord.Interaction):
+        await _start_raid_boss(interaction)
+
     # Register the group globally
     bot.tree.add_command(pokemon_group)
+    bot.tree.add_command(raid_group)
 
 
 def setup_pokemon_economy(bot: commands.Bot) -> None:
