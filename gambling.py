@@ -729,76 +729,149 @@ def _roulette_render_image_file(landed: int | None, spinning: bool = False) -> d
     if Image is None or ImageDraw is None or ImageFont is None:
         return None
 
-    size = 768
-    img = Image.new("RGBA", (size, size), (85, 120, 52, 255))
+    size = 900
+    img = Image.new("RGBA", (size, size), (20, 20, 20, 255))
     draw = ImageDraw.Draw(img)
 
     cx = size // 2
-    cy = 860  # push center off canvas to create curved wheel bands similar to reference
-    outer_r = 700
-    inner_r = 420
+    # Push center far below canvas so only the top arc of the wheel is visible.
+    cy = 1160
+    outer_r = 970
+    inner_r = 580
+    ball_track_r = inner_r - 55   # rail sits just inside the number band
     seg_deg = 360.0 / len(_WHEEL_ORDER)
 
     target = landed if landed is not None else random.choice(_WHEEL_ORDER)
     target_idx = _WHEEL_ORDER.index(target)
 
-    def seg_color(n: int) -> tuple[int, int, int]:
-        if n == 0:
-            return (19, 129, 86)
-        if n in _RED_NUMS:
-            return (204, 30, 36)
-        return (18, 18, 22)
-
-    # Center the landed segment near top-middle of the visible arc.
+    # Rotate so the target segment is centred at the top of the arc.
     base = -90.0 - ((target_idx + 0.5) * seg_deg)
 
+    def seg_base_color(n: int) -> tuple[int, int, int]:
+        if n == 0:       return (10, 110, 60)
+        if n in _RED_NUMS: return (175, 20, 22)
+        return (12, 12, 14)
+
+    def seg_highlight_color(n: int) -> tuple[int, int, int]:
+        if n == 0:       return (30, 175, 90)
+        if n in _RED_NUMS: return (230, 60, 60)
+        return (55, 55, 60)
+
+    # Draw each segment with a 2-step gradient: base color outer, highlight inner.
+    mid_r = (outer_r + inner_r) // 2
+    grad_steps = 6
     for i, n in enumerate(_WHEEL_ORDER):
         a0 = base + i * seg_deg
         a1 = a0 + seg_deg
-        draw.pieslice((cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r), a0, a1, fill=seg_color(n))
+        base_c = seg_base_color(n)
+        high_c = seg_highlight_color(n)
+        for step in range(grad_steps):
+            t = step / (grad_steps - 1)
+            # Blend from base (outer) to highlight (inner).
+            rc = int(base_c[0] + t * (high_c[0] - base_c[0]))
+            gc = int(base_c[1] + t * (high_c[1] - base_c[1]))
+            bc = int(base_c[2] + t * (high_c[2] - base_c[2]))
+            r_outer = outer_r - int(step * (outer_r - inner_r) / grad_steps)
+            r_inner = outer_r - int((step + 1) * (outer_r - inner_r) / grad_steps)
+            draw.pieslice(
+                (cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer),
+                a0, a1, fill=(rc, gc, bc, 255),
+            )
+        # Overdraw inner part with base background to clip inner portion.
+        draw.pieslice(
+            (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
+            a0, a1, fill=seg_base_color(n),
+        )
 
-    # Hollow center to form wheel band.
-    draw.ellipse((cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r), fill=(85, 120, 52, 255))
-
-    # White separators for each segment edge.
-    mid_r = (outer_r + inner_r) // 2
+    # Thin white separator lines between segments.
     for i in range(len(_WHEEL_ORDER)):
         a = math.radians(base + i * seg_deg)
         x0 = int(cx + math.cos(a) * inner_r)
         y0 = int(cy + math.sin(a) * inner_r)
         x1 = int(cx + math.cos(a) * outer_r)
         y1 = int(cy + math.sin(a) * outer_r)
-        draw.line((x0, y0, x1, y1), fill=(242, 242, 242, 245), width=3)
+        draw.line((x0, y0, x1, y1), fill=(220, 220, 220, 200), width=2)
 
-    # Show nearby numbers only (cleaner look, like screenshot).
+    # Numbers: center segment large+bold, adjacent shrink with distance.
+    font_sizes = {0: 70, 1: 52, 2: 36}   # offset → font size
     try:
-        num_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 22)
+        font_large  = ImageFont.truetype("DejaVuSans-Bold.ttf", 70)
+        font_med    = ImageFont.truetype("DejaVuSans-Bold.ttf", 52)
+        font_small  = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
     except Exception:
-        num_font = ImageFont.load_default()
-    for offset in range(-2, 3):
-        idx = (target_idx + offset) % len(_WHEEL_ORDER)
-        n = _WHEEL_ORDER[idx]
-        ang = math.radians(base + (idx + 0.5) * seg_deg)
-        tx = int(cx + math.cos(ang) * mid_r)
-        ty = int(cy + math.sin(ang) * mid_r)
-        t = str(n)
-        tw, th = draw.textbbox((0, 0), t, font=num_font)[2:4]
-        draw.text((tx - tw // 2, ty - th // 2), t, fill=(232, 232, 232, 255), font=num_font)
+        font_large = font_med = font_small = ImageFont.load_default()
+    font_map = {0: font_large, 1: font_med, 2: font_small}
+    alpha_map = {0: 255, 1: 210, 2: 160}
+    label_r = inner_r + int((outer_r - inner_r) * 0.50)
 
-    # Ball on landed segment (or randomized if spinning).
+    for offset in range(-3, 4):
+        idx = (target_idx + offset) % len(_WHEEL_ORDER)
+        n   = _WHEEL_ORDER[idx]
+        ang = math.radians(base + (idx + 0.5) * seg_deg)
+        tx  = int(cx + math.cos(ang) * label_r)
+        ty  = int(cy + math.sin(ang) * label_r)
+        # Only render if inside visible canvas.
+        if ty > size + 10 or tx < -30 or tx > size + 30:
+            continue
+        abs_off = min(abs(offset), 2)
+        fnt     = font_map[abs_off]
+        alpha   = alpha_map[abs_off]
+        t       = str(n)
+        bb      = draw.textbbox((0, 0), t, font=fnt)
+        tw, th  = bb[2] - bb[0], bb[3] - bb[1]
+        draw.text((tx - tw // 2, ty - th // 2), t, fill=(255, 255, 255, alpha), font=fnt)
+
+    # Hollow center — fill with background color to hide pie centers.
+    draw.ellipse(
+        (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
+        fill=(20, 20, 20, 255),
+    )
+
+    # ── Rails ───────────────────────────────────────────────────────────────
+    # Outer rail (outermost border of number band).
+    draw.arc(
+        (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
+        start=200, end=340, fill=(70, 140, 50, 255), width=42,
+    )
+    # Inner rail (border between number band and ball track).
+    draw.arc(
+        (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
+        start=200, end=340, fill=(60, 130, 45, 255), width=36,
+    )
+    # Ball track floor (dark strip just inside inner rail).
+    draw.arc(
+        (cx - ball_track_r, cy - ball_track_r, cx + ball_track_r, cy + ball_track_r),
+        start=200, end=340, fill=(28, 28, 30, 255), width=48,
+    )
+
+    # ── Metallic Ball ───────────────────────────────────────────────────────
     ball_num = random.choice(_WHEEL_ORDER) if spinning else target
     ball_idx = _WHEEL_ORDER.index(ball_num)
     ball_ang = math.radians(base + (ball_idx + 0.5) * seg_deg)
-    ball_r = inner_r + int((outer_r - inner_r) * 0.58)
-    bx = int(cx + math.cos(ball_ang) * ball_r)
-    by = int(cy + math.sin(ball_ang) * ball_r)
-    br = 60
-    draw.ellipse((bx - br, by - br, bx + br, by + br), fill=(200, 200, 200, 255), outline=(20, 20, 20, 255), width=3)
-    draw.ellipse((bx - br + 18, by - br + 18, bx - br + 34, by - br + 34), fill=(236, 236, 236, 190))
-
-    # Curved green rails above/below wheel for depth.
-    draw.arc((cx - 760, cy - 760, cx + 760, cy + 760), start=196, end=346, fill=(146, 186, 88, 255), width=26)
-    draw.arc((cx - 560, cy - 560, cx + 560, cy + 560), start=199, end=343, fill=(146, 186, 88, 255), width=24)
+    bx = int(cx + math.cos(ball_ang) * ball_track_r)
+    by = int(cy + math.sin(ball_ang) * ball_track_r)
+    br = 26
+    # Only draw if ball is visible on canvas.
+    if by < size + br:
+        # Shadow.
+        draw.ellipse(
+            (bx - br + 4, by - br + 4, bx + br + 4, by + br + 4),
+            fill=(0, 0, 0, 160),
+        )
+        # Ball body gradient: dark bottom, lighter top.
+        for ring in range(br, 0, -1):
+            t = (br - ring) / br
+            rc = int(80 + t * 140)
+            draw.ellipse(
+                (bx - ring, by - ring, bx + ring, by + ring),
+                fill=(rc, rc, rc, 255),
+            )
+        # Specular highlight top-left.
+        hl_x, hl_y, hl_r = bx - br // 3, by - br // 3, max(4, br // 3)
+        draw.ellipse(
+            (hl_x - hl_r, hl_y - hl_r, hl_x + hl_r, hl_y + hl_r),
+            fill=(255, 255, 255, 240),
+        )
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG")
