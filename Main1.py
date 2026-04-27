@@ -845,7 +845,21 @@ TICKET_SLA_HOURS = 6
 TICKET_SLA_REMINDER_COOLDOWN_MINUTES = 180
 TICKET_SLA_LAST_REMINDER: dict[int, float] = {}  # channel_id -> unix timestamp
 
-# ── Runtime Metadata ─────────────────────────────────────────────────────────
+# ── Phase 4: Moderation Safety Automation ──────────────────────────────────
+# Raid mode: lock down channels during raids or high spam
+RAID_MODE_ACTIVE: dict[int, bool] = {}  # guild_id -> is_raid_mode_on
+RAID_MODE_ROLES_MUTED: dict[int, set[int]] = {}  # guild_id -> {role_ids that can't message}
+
+# Link quarantine: prevent suspicious URLs (non-Discord, malware-like)
+_QUARANTINE_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_quarantine.json")
+LINK_QUARANTINE: dict[int, dict[str, int]] = {}  # user_id -> {quarantine_level: 0-2, last_violation_time: unix}
+LINK_QUARANTINE_LEVELS = 3  # 0=normal, 1=quarantine (needs review), 2=banned
+
+# Account age gate: restrict new accounts from certain features
+ACCOUNT_AGE_GATE_DAYS = 7  # minimum account age to post links/participate in gyms/raids
+ACCOUNT_AGE_GATE_ENABLED: dict[int, bool] = {}  # guild_id -> is_enabled
+
+# Runtime Metadata
 BOT_BOOT_TIME_UTC = discord.utils.utcnow()
 
 def _load_posted_games() -> None:
@@ -1022,8 +1036,32 @@ def _xp_multiplier(user_id: int) -> float:
     return 1.0 + (prestige * PRESTIGE_BONUS_XP_PER_LEVEL)
 
 
+def _load_link_quarantine() -> None:
+    """Load link quarantine data from disk."""
+    global LINK_QUARANTINE
+    if not os.path.exists(_QUARANTINE_SAVE):
+        return
+    try:
+        with open(_QUARANTINE_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            LINK_QUARANTINE = {int(uid): record for uid, record in data.items() if isinstance(record, dict)}
+    except Exception as e:
+        print(f"[LinkQuarantine] Warning: could not load quarantine data — {e}")
+
+
+def _save_link_quarantine() -> None:
+    """Persist link quarantine data to disk."""
+    try:
+        with open(_QUARANTINE_SAVE, "w", encoding="utf-8") as f:
+            json.dump(LINK_QUARANTINE, f)
+    except Exception as e:
+        print(f"[LinkQuarantine] Warning: could not save quarantine data — {e}")
+
+
 _load_prestige_data()
 _load_cosmetics_inventory()
+_load_link_quarantine()
 
 # ── Personal Space (private temp voice channels) ──────────────────────────────
 # guild_id -> lobby voice channel ID that triggers creation
@@ -1957,6 +1995,103 @@ async def on_message(message: discord.Message):
                     await log_ch.send(embed=embed)
             return
 
+        # ── Phase 4: Raid Mode (lockdown) ──────────────────────────────────────
+        # During raid mode, only mods/admins can message
+        gid = message.guild.id
+        if RAID_MODE_ACTIVE.get(gid, False):
+            if not (message.author.guild_permissions.administrator or message.author.guild_permissions.moderate_members):
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+                notice = await message.channel.send(
+                    f"{message.author.mention} 🔒 **Raid mode is active.** Only moderators can message during this time.",
+                    delete_after=5,
+                )
+                return
+
+        # ── Phase 4: Account Age Gate ──────────────────────────────────────────
+        # Prevent new accounts from posting certain content
+        if ACCOUNT_AGE_GATE_ENABLED.get(gid, False):
+            account_age = (discord.utils.utcnow() - message.author.created_at).total_seconds() / 86400
+            if account_age < ACCOUNT_AGE_GATE_DAYS:
+                # Check for links or suspicious content
+                if "http://" in message.content or "https://" in message.content or "discord.gg" in message.content:
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+                    notice = await message.channel.send(
+                        f"{message.author.mention} ⏳ New accounts ({ACCOUNT_AGE_GATE_DAYS}+ days required) cannot post external links. "
+                        f"Your account is {account_age:.1f} days old.",
+                        delete_after=7,
+                    )
+                    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+                    if log_ch:
+                        embed = discord.Embed(title="🔐 Auto-Mod: Account Age Gate (Link Blocked)", color=0x3498DB)
+                        embed.add_field(name="User", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Account Age (days)", value=f"{account_age:.1f}", inline=False)
+                        embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                        embed.timestamp = discord.utils.utcnow()
+                        await log_ch.send(embed=embed)
+                    return
+
+        # ── Phase 4: Link Quarantine ───────────────────────────────────────────
+        # Detect and quarantine suspicious non-Discord links
+        _SAFE_DOMAINS = {"youtube.com", "youtu.be", "twitch.tv", "github.com", "imgur.com", "tenor.com"}
+        if "http://" in message.content or "https://" in message.content:
+            links = re.findall(r'https?://([^\s/]+)', message.content)
+            suspicious_links = [link for link in links if link not in _SAFE_DOMAINS and "discord" not in link.lower()]
+            
+            if suspicious_links:
+                record = LINK_QUARANTINE.setdefault(message.author.id, {"quarantine_level": 0, "last_violation_time": 0})
+                record["last_violation_time"] = time.time()
+                record["quarantine_level"] = min(record["quarantine_level"] + 1, 2)
+                _save_link_quarantine()
+                
+                q_level = record["quarantine_level"]
+                if q_level >= 2:
+                    # Level 2: ban user
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+                    try:
+                        await message.author.ban(reason="Auto-mod: suspicious link (quarantine level 2)")
+                    except discord.HTTPException:
+                        pass
+                    notice = await message.channel.send(
+                        f"{message.author.mention} 🚫 You have been **banned** for repeated suspicious link posting.",
+                        delete_after=5,
+                    )
+                    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+                    if log_ch:
+                        embed = discord.Embed(title="🚫 Auto-Mod: Banned (Suspicious Links - Level 2)", color=0x992D22)
+                        embed.add_field(name="User", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                        embed.add_field(name="Links Detected", value=", ".join(suspicious_links[:5]), inline=False)
+                        embed.timestamp = discord.utils.utcnow()
+                        await log_ch.send(embed=embed)
+                elif q_level == 1:
+                    # Level 1: quarantine (delete message, warn)
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+                    warning = await message.channel.send(
+                        f"{message.author.mention} ⚠️ **Message removed:** Suspicious link detected (requires staff review). "
+                        f"A second offense will result in a **ban**.",
+                        delete_after=8,
+                    )
+                    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+                    if log_ch:
+                        embed = discord.Embed(title="⚠️ Auto-Mod: Suspicious Link Detected (Level 1)", color=0xFF6B6B)
+                        embed.add_field(name="User", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Channel", value=message.channel.mention, inline=False)
+                        embed.add_field(name="Links Detected", value=", ".join(suspicious_links[:5]), inline=False)
+                        embed.timestamp = discord.utils.utcnow()
+                        await log_ch.send(embed=embed)
+                return
 
 
 async def get_mod_log_channel(guild: discord.Guild):
@@ -2156,6 +2291,92 @@ async def clear(interaction: discord.Interaction, amount: int = 10):
     deleted = await interaction.channel.purge(limit=amount) # pyright: ignore[reportAttributeAccessIssue]
     await interaction.followup.send(f'Cleared {len(deleted)} messages.', ephemeral=True)
     await log_action(interaction, "Clear", f"Channel: {interaction.channel.name}", f"Deleted: {len(deleted)} messages")
+
+# ── Phase 4: Moderation Safety (Raid Mode, Link Quarantine, Account Age Gate) ──
+@client.tree.command(name="raidmode", description="Toggle raid mode lockdown (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def raidmode(interaction: discord.Interaction, enabled: bool):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    gid = interaction.guild.id
+    RAID_MODE_ACTIVE[gid] = enabled
+    status = "🔒 **enabled**" if enabled else "🔓 **disabled**"
+    embed = discord.Embed(
+        title="Raid Mode",
+        description=f"Raid mode is now {status}.",
+        color=0xFF6B6B if enabled else 0x2ECC71
+    )
+    if enabled:
+        embed.add_field(name="Effect", value="Only moderators and admins can send messages.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await log_action(interaction, "Raid Mode", f"Status: {'Enabled' if enabled else 'Disabled'}")
+
+@client.tree.command(name="accountage", description="Set minimum account age gate (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def accountage(interaction: discord.Interaction, days: int, enabled: bool = True):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    if days < 0 or days > 365:
+        await interaction.response.send_message("Account age must be between 0 and 365 days.", ephemeral=True)
+        return
+    gid = interaction.guild.id
+    ACCOUNT_AGE_GATE_ENABLED[gid] = enabled
+    global ACCOUNT_AGE_GATE_DAYS
+    ACCOUNT_AGE_GATE_DAYS = days
+    status = "**enabled**" if enabled else "**disabled**"
+    embed = discord.Embed(
+        title="Account Age Gate",
+        description=f"Account age gate is now {status} (minimum: **{days} days**).",
+        color=0x3498DB if enabled else 0x95A5A6
+    )
+    if enabled:
+        embed.add_field(name="Effect", value=f"Accounts younger than {days} days cannot post external links.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await log_action(interaction, "Account Age Gate", f"Days: {days}, Status: {'Enabled' if enabled else 'Disabled'}")
+
+@client.tree.command(name="linkquarantine", description="View or clear link quarantine records (Admin only)", guild=GUILD_ID)
+@app_commands.default_permissions(administrator=True)
+async def linkquarantine(interaction: discord.Interaction, action: str = "view", user_id: str = ""):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    
+    if action.lower() == "view":
+        if not LINK_QUARANTINE:
+            await interaction.response.send_message("No users in quarantine.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        embed = discord.Embed(title="🔐 Link Quarantine Records", color=0xFF6B6B)
+        lines = []
+        for uid, record in sorted(LINK_QUARANTINE.items()):
+            q_level = record.get("quarantine_level", 0)
+            level_text = {0: "None", 1: "⚠️ Quarantine", 2: "🚫 Banned"}
+            lines.append(f"`{uid}` — {level_text.get(q_level, 'Unknown')}")
+        embed.description = "\n".join(lines[:25]) if lines else "None"
+        if len(lines) > 25:
+            embed.set_footer(text=f"...and {len(lines) - 25} more")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    elif action.lower() == "clear":
+        if not user_id:
+            await interaction.response.send_message("Specify a user ID to clear (e.g., `/linkquarantine clear 123456`)", ephemeral=True)
+            return
+        try:
+            uid = int(user_id)
+        except ValueError:
+            await interaction.response.send_message("Invalid user ID.", ephemeral=True)
+            return
+        if uid not in LINK_QUARANTINE:
+            await interaction.response.send_message(f"User `{uid}` is not in quarantine.", ephemeral=True)
+            return
+        LINK_QUARANTINE.pop(uid, None)
+        _save_link_quarantine()
+        await interaction.response.send_message(f"✅ Cleared quarantine record for user `{uid}`.", ephemeral=True)
+        await log_action(interaction, "Link Quarantine Clear", f"User ID: {uid}")
+    else:
+        await interaction.response.send_message("Action must be `view` or `clear`.", ephemeral=True)
 
 # ── Music System ─────────────────────────────────────────────────────────────
 
@@ -4081,6 +4302,12 @@ async def help_command(interaction: discord.Interaction):
         "`/unban <user_id>` — Unban a user by ID\n"
         "`/banlist` — View all currently banned users\n"
         "`/whitelist` `/unwhitelist` — Protect members from mod actions"
+    ), inline=False)
+
+    embed.add_field(name="🔒 Moderation Safety (Phase 4)", value=(
+        "`/raidmode <enable|disable>` — Lock down server (mods only can message)\n"
+        "`/accountage <days> [enabled]` — Set minimum account age for links (default: 7 days)\n"
+        "`/linkquarantine <view|clear> [user_id]` — View or clear suspicious link records"
     ), inline=False)
 
     embed.set_footer(text="All commands are slash commands — type / to get started!")
