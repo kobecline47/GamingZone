@@ -38,11 +38,27 @@ MIN_BET      = 10
 MAX_BET      = 50_000
 BONUS_CHANCE = 0.07          # 7 % chance of 3× bonus on any win
 DAILY_RANGE  = (200, 600)    # min / max free daily coins
+WORK_RANGE   = (120, 420)    # min / max coins from /work
+WORK_COOLDOWN_SECONDS = 3_600
 
 # ── Per-user casino stats ─────────────────────────────────────────────────────
 # uid → {games, won, lost, biggest_win, streak, streak_type}
 CASINO_STATS: dict[int, dict] = {}
 _DAILY_CD:    dict[int, float] = {}   # uid → epoch of last /daily claim
+_WORK_CD:     dict[int, float] = {}   # uid → epoch of last /work claim
+
+_WORK_EVENTS = [
+    "You refereed a ranked Pokemon battle and earned **{coins:,}** PokeCoins.",
+    "You repaired the roulette wheel rails before tournament night and got paid **{coins:,}** PokeCoins.",
+    "You polished a trainer's badges for the Hall display and made **{coins:,}** PokeCoins.",
+    "You caddied for the Celadon Game Corner and took home **{coins:,}** PokeCoins.",
+    "You delivered rare Pokeballs to the battle arena and earned **{coins:,}** PokeCoins.",
+    "You worked the casino cashier desk during rush hour and made **{coins:,}** PokeCoins.",
+    "You helped Nurse Joy restock battle supplies and received **{coins:,}** PokeCoins.",
+    "You trained rookie trainers on type matchups and earned **{coins:,}** PokeCoins.",
+    "You commentated a gym challenge stream and got tipped **{coins:,}** PokeCoins.",
+    "You maintained the slots cabinet reels and were paid **{coins:,}** PokeCoins.",
+]
 
 
 def _stats(uid: int) -> dict:
@@ -1451,6 +1467,7 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
     embed.add_field(name="🎯 /plinko <bet>",            value="Drop the ball through 8 rows of pegs. Up to **3× your bet!**",        inline=False)
     embed.add_field(name="🦹 /heist <bet> <target>",    value="Multi-stage crew heist. Pick your target — up to **15× your bet!**",  inline=False)
     embed.add_field(name="📅 /daily",                   value=f"Claim **{DAILY_RANGE[0]}–{DAILY_RANGE[1]} free PokeCoins** every 24 hours!", inline=False)
+    embed.add_field(name="💼 /work",                    value=f"Do a random game-themed job for **{WORK_RANGE[0]}–{WORK_RANGE[1]}** coins (1h cooldown)", inline=False)
     if s["games"] > 0:
         embed.add_field(
             name="📊 Your Casino Stats",
@@ -1536,7 +1553,8 @@ def setup_gambling(bot: commands.Bot) -> None:
                 "🎯 `/plinko` — Drop the ball, up to **3×** payout!\n"
                 "🦹 `/heist` — Multi-stage heist, up to **15×** payout!\n"
                 "📅 `/daily` — Claim free coins every 24 hours!\n"
-                "📊 `/casinomenu` — See all games & your personal stats!\n\n"
+                "� `/work` — Do random game jobs for extra PokeCoins!\n"
+                "�📊 `/casinomenu` — See all games & your personal stats!\n\n"
                 "⚡ **Every win** has a **7% chance** of a 🌟 **3× BONUS ROUND!**\n"
                 "*All bets use your PokeCoin wallet — earn more with `/daily` & Pokémon!*"
             ),
@@ -1581,6 +1599,84 @@ def setup_gambling(bot: commands.Bot) -> None:
             color=0x2ECC71,
         )
         embed.set_footer(text="Come back in 24 hours for your next reward!  •  /slots /blackjack /roulette")
+        await interaction.response.send_message(embed=embed)
+
+    # ── /work ─────────────────────────────────────────────────────────────────
+    @bot.tree.command(
+        name="work",
+        description="💼 Do a random game-themed job to earn PokeCoins (1h cooldown)",
+    )
+    async def cmd_work(interaction: discord.Interaction):
+        uid = interaction.user.id
+        _ensure_player(uid)
+        now = time.time()
+        last = _WORK_CD.get(uid, 0)
+        cd = WORK_COOLDOWN_SECONDS - (now - last)
+        if cd > 0:
+            m = int(cd // 60)
+            s = int(cd % 60)
+            await interaction.response.send_message(
+                f"⏳ You already worked recently. Try again in **{m}m {s}s**.",
+                ephemeral=True,
+            )
+            return
+
+        amount = random.randint(*WORK_RANGE)
+        WALLETS[uid] = _wallet(uid) + amount
+        _WORK_CD[uid] = now
+        event = random.choice(_WORK_EVENTS).format(coins=amount)
+
+        embed = discord.Embed(
+            title="💼 Shift Complete!",
+            description=f"{event}\n\n{_bal_line(uid)}",
+            color=0x2ECC71,
+        )
+        embed.set_footer(text="Use /work again after cooldown  •  /daily /slots /blackjack")
+        await interaction.response.send_message(embed=embed)
+
+    # ── /givepokcoin ───────────────────────────────────────────────────────────
+    @bot.tree.command(
+        name="givepokcoin",
+        description="🛠️ Admin: give PokeCoins to a player",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        member="Player to receive PokeCoins",
+        amount="Amount of PokeCoins to give",
+        reason="Optional reason for this grant",
+    )
+    async def cmd_givepokcoin(
+        interaction: discord.Interaction,
+        member: discord.Member,
+        amount: int,
+        reason: str = "Admin grant",
+    ):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Administrator permission required.",
+                ephemeral=True,
+            )
+            return
+        if amount <= 0:
+            await interaction.response.send_message(
+                "❌ Amount must be greater than 0.",
+                ephemeral=True,
+            )
+            return
+
+        _ensure_player(member.id)
+        WALLETS[member.id] = _wallet(member.id) + amount
+
+        embed = discord.Embed(
+            title="🪙 PokeCoins Granted",
+            color=0x3498DB,
+            description=(
+                f"{member.mention} received **{amount:,}** PokeCoins.\n"
+                f"Reason: **{reason}**"
+            ),
+        )
+        embed.add_field(name="👮 Granted by", value=interaction.user.mention, inline=True)
+        embed.add_field(name="💼 New Balance", value=f"`{_wallet(member.id):,}` PokeCoins", inline=True)
         await interaction.response.send_message(embed=embed)
 
     # ── /slots ────────────────────────────────────────────────────────────────
