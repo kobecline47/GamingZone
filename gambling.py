@@ -745,6 +745,82 @@ class BlackjackView(discord.ui.View):
 # 🪙  COIN FLIP
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _load_font(size: int, bold: bool = False):
+    if ImageFont is None:
+        return None
+    try:
+        name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+        return ImageFont.truetype(name, size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _casino_panel_canvas(
+    width: int = 980,
+    height: int = 560,
+    accent: tuple[int, int, int] = (87, 170, 129),
+) -> tuple[object | None, object | None]:
+    if Image is None or ImageDraw is None:
+        return None, None
+    img = Image.new("RGBA", (width, height), (8, 52, 40, 255))
+    draw = ImageDraw.Draw(img)
+    for y in range(0, height, 4):
+        shade = 28 + ((y // 4) % 2) * 2
+        draw.line((0, y, width, y), fill=(8, shade, 26, 255), width=2)
+    draw.rounded_rectangle((12, 12, width - 12, height - 12), radius=34, outline=(*accent, 230), width=4)
+    draw.rounded_rectangle((36, 36, width - 36, height - 36), radius=26, fill=(17, 24, 30, 255), outline=(58, 70, 84, 220), width=2)
+    return img, draw
+
+
+def _save_panel_file(img: object, filename: str) -> discord.File:
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename=filename)
+
+
+def _coinflip_render_image_file(result: str, spinning: bool = False) -> discord.File | None:
+    img, draw = _casino_panel_canvas(accent=(213, 163, 54))
+    if img is None or draw is None:
+        return None
+
+    font_title = _load_font(46, bold=True)
+    font_big = _load_font(72, bold=True)
+    font_small = _load_font(24, bold=True)
+
+    draw.text((348, 68), "COIN FLIP", fill=(244, 211, 112, 255), font=font_title)
+
+    coin_box = (330, 165, 650, 485)
+    draw.ellipse(coin_box, fill=(52, 60, 70, 255), outline=(192, 154, 63, 255), width=8)
+    draw.ellipse((346, 181, 634, 469), fill=(178, 138, 56, 255), outline=(228, 195, 111, 255), width=5)
+
+    if spinning:
+        draw.text((444, 285), "..", fill=(245, 245, 245, 255), font=font_big)
+        draw.text((416, 420), "FLIPPING", fill=(197, 212, 234, 240), font=font_small)
+    else:
+        face = "H" if result == "heads" else "T"
+        draw.text((448, 276), face, fill=(250, 247, 231, 255), font=font_big)
+        draw.text((410, 420), result.upper(), fill=(244, 244, 244, 255), font=font_small)
+        draw.ellipse((410, 230, 448, 268), fill=(255, 255, 255, 210))
+
+    return _save_panel_file(img, "coinflip_table.png")
+
+
+def _coinflip_embed_with_image(
+    result: str,
+    choice: str,
+    bet: int,
+    uid: int,
+    spinning: bool = False,
+    bonus: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = _coinflip_embed(result, choice, bet, uid, spinning=spinning, bonus=bonus)
+    img_file = _coinflip_render_image_file(result, spinning=spinning)
+    if img_file:
+        embed.description = None
+        embed.set_image(url="attachment://coinflip_table.png")
+    return embed, img_file
+
 def _coinflip_embed(
     result: str, choice: str, bet: int, uid: int,
     spinning: bool = False, bonus: bool = False,
@@ -1101,6 +1177,52 @@ def _dice_embed(
     return embed
 
 
+def _dice_render_image_file(p_roll: int | None, b_roll: int | None, spinning: bool = False) -> discord.File | None:
+    img, draw = _casino_panel_canvas(accent=(111, 187, 153))
+    if img is None or draw is None:
+        return None
+
+    font_title = _load_font(42, bold=True)
+    font_die = _load_font(70, bold=True)
+    font_num = _load_font(34, bold=True)
+    font_lbl = _load_font(24, bold=True)
+
+    draw.text((388, 66), "DICE DUEL", fill=(194, 234, 214, 255), font=font_title)
+
+    boxes = [(220, 180, 450, 430), (530, 180, 760, 430)]
+    labels = ["YOU", "BOT"]
+    vals = [p_roll, b_roll]
+    for i, (x0, y0, x1, y1) in enumerate(boxes):
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=24, fill=(30, 37, 44, 255), outline=(133, 147, 166, 255), width=3)
+        if spinning:
+            face = "?"
+            num = "-"
+        else:
+            assert vals[i] is not None
+            face = _DICE_FACES[vals[i] - 1]
+            num = str(vals[i])
+        draw.text((x0 + 86, y0 + 58), face, fill=(247, 247, 247, 255), font=font_die)
+        draw.text((x0 + 103, y0 + 160), num, fill=(235, 235, 235, 255), font=font_num)
+        draw.text((x0 + 88, y1 + 18), labels[i], fill=(170, 195, 210, 240), font=font_lbl)
+
+    return _save_panel_file(img, "dice_table.png")
+
+
+def _dice_embed_with_image(
+    p_roll: int | None,
+    b_roll: int | None,
+    bet: int,
+    uid: int,
+    spinning: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = _dice_embed(p_roll, b_roll, bet, uid, spinning=spinning)
+    img_file = _dice_render_image_file(p_roll, b_roll, spinning=spinning)
+    if img_file:
+        embed.description = None
+        embed.set_image(url="attachment://dice_table.png")
+    return embed, img_file
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 🃏  HIGH-LOW  (new)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1155,6 +1277,116 @@ def _hl_embed(
         embed.add_field(name="⚡ CASINO BONUS", value="🎊 3× MULTIPLIER!", inline=True)
     embed.set_footer(text="Aces are LOW (1)  |  Correct guess = 1.9× payout  |  /highlow to play again")
     return embed
+
+
+def _hl_render_image_file(
+    current: tuple[str, str],
+    next_card: tuple[str, str] | None,
+    spinning: bool = False,
+) -> discord.File | None:
+    img, draw = _casino_panel_canvas(accent=(166, 126, 209))
+    if img is None or draw is None:
+        return None
+
+    font_title = _load_font(42, bold=True)
+    font_rank = _load_font(54, bold=True)
+    font_suit = _load_font(40, bold=False)
+    font_lbl = _load_font(22, bold=True)
+
+    draw.text((385, 64), "HIGH LOW", fill=(222, 194, 244, 255), font=font_title)
+
+    cards = [current, ("?", "?") if spinning or next_card is None else next_card]
+    x_positions = [260, 560]
+    labels = ["CURRENT", "NEXT"]
+
+    for i, (rank, suit) in enumerate(cards):
+        x0, y0 = x_positions[i], 170
+        x1, y1 = x0 + 170, y0 + 245
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=16, fill=(248, 248, 248, 255), outline=(82, 190, 142, 220), width=3)
+        sc = (210, 44, 44) if suit in {"♥️", "♦️"} else (26, 26, 28)
+        suit_ch = "?" if suit == "?" else ("♥" if "♥" in suit else "♦" if "♦" in suit else "♣" if "♣" in suit else "♠")
+        draw.text((x0 + 22, y0 + 18), rank, fill=sc, font=font_rank)
+        draw.text((x0 + 64, y0 + 120), suit_ch, fill=sc, font=font_suit)
+        draw.text((x0 + 38, y1 + 16), labels[i], fill=(178, 198, 213, 240), font=font_lbl)
+
+    draw.text((480, 260), "->", fill=(235, 235, 235, 255), font=font_rank)
+    return _save_panel_file(img, "highlow_table.png")
+
+
+def _hl_embed_with_image(
+    current: tuple[str, str],
+    next_card: tuple[str, str] | None,
+    guess: str,
+    bet: int,
+    uid: int,
+    won: bool = False,
+    result: str = "",
+    spinning: bool = False,
+    bonus: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = _hl_embed(current, next_card, guess, bet, uid, won=won, result=result, spinning=spinning, bonus=bonus)
+    img_file = _hl_render_image_file(current, next_card, spinning=spinning)
+    if img_file:
+        if spinning:
+            embed.description = f"Drawing the next card...\n\nYour guess: **{guess}**"
+        else:
+            embed.description = f"Your guess: **{guess}**"
+        embed.set_image(url="attachment://highlow_table.png")
+    return embed, img_file
+
+
+def _plinko_render_image_file(col: int | None = None, spinning: bool = False) -> discord.File | None:
+    img, draw = _casino_panel_canvas(accent=(86, 166, 212))
+    if img is None or draw is None:
+        return None
+
+    font_title = _load_font(42, bold=True)
+    font_lbl = _load_font(20, bold=True)
+    draw.text((420, 66), "PLINKO", fill=(177, 219, 246, 255), font=font_title)
+
+    start_x, start_y = 205, 140
+    step_x, step_y = 64, 42
+    for r in range(8):
+        off = 0 if r % 2 == 0 else step_x // 2
+        count = 9 if r % 2 == 0 else 8
+        for c in range(count):
+            x = start_x + off + c * step_x
+            y = start_y + r * step_y
+            draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=(214, 214, 214, 255))
+
+    buckets_y = 466
+    for i, lbl in enumerate(_PLINKO_LBLS):
+        x0 = 172 + i * 72
+        x1 = x0 + 66
+        fill = (38, 47, 57, 255)
+        if col is not None and i == col and not spinning:
+            fill = (68, 136, 82, 255)
+        draw.rounded_rectangle((x0, buckets_y, x1, 518), radius=8, fill=fill, outline=(126, 138, 150, 220), width=2)
+        draw.text((x0 + 12, buckets_y + 14), lbl.strip(), fill=(237, 237, 237, 255), font=font_lbl)
+
+    if spinning:
+        bx, by = 493, 110
+    else:
+        landing = 205 + (col or 4) * 72
+        bx, by = landing + 30, 445
+    draw.ellipse((bx - 12, by - 12, bx + 12, by + 12), fill=(218, 51, 57, 255), outline=(248, 210, 210, 230), width=2)
+    return _save_panel_file(img, "plinko_board.png")
+
+
+def _heist_render_image_file(title: str, lines: list[str], accent: tuple[int, int, int]) -> discord.File | None:
+    img, draw = _casino_panel_canvas(accent=accent)
+    if img is None or draw is None:
+        return None
+    font_title = _load_font(38, bold=True)
+    font_line = _load_font(24, bold=False)
+    draw.text((74, 62), title.upper(), fill=(236, 236, 236, 255), font=font_title)
+
+    y = 148
+    for line in lines[:9]:
+        clean = line.replace("**", "")
+        draw.text((84, y), clean[:72], fill=(216, 226, 236, 250), font=font_line)
+        y += 42
+    return _save_panel_file(img, "heist_panel.png")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1497,9 +1729,11 @@ def setup_gambling(bot: commands.Bot) -> None:
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message(
-            embed=_coinflip_embed("", "", bet, uid, spinning=True)
-        )
+        spin_embed, spin_img = _coinflip_embed_with_image("", "", bet, uid, spinning=True)
+        if spin_img:
+            await interaction.response.send_message(embed=spin_embed, file=spin_img)
+        else:
+            await interaction.response.send_message(embed=spin_embed)
         await asyncio.sleep(1.8)
         result = random.choice(["heads", "tails"])
         bonus  = False
@@ -1510,9 +1744,11 @@ def setup_gambling(bot: commands.Bot) -> None:
         else:
             WALLETS[uid] = _wallet(uid) - bet
             _record_loss(uid, bet)
-        await interaction.edit_original_response(
-            embed=_coinflip_embed(result, choice, bet, uid, bonus=bonus)
-        )
+        result_embed, result_img = _coinflip_embed_with_image(result, choice, bet, uid, bonus=bonus)
+        if result_img:
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+        else:
+            await interaction.edit_original_response(embed=result_embed)
 
     # ── /roulette ─────────────────────────────────────────────────────────────
     @bot.tree.command(name="roulette", description="🎡 Spin the roulette wheel!")
@@ -1573,15 +1809,19 @@ def setup_gambling(bot: commands.Bot) -> None:
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message(
-            embed=_dice_embed(None, None, bet, uid, spinning=True)
-        )
+        spin_embed, spin_img = _dice_embed_with_image(None, None, bet, uid, spinning=True)
+        if spin_img:
+            await interaction.response.send_message(embed=spin_embed, file=spin_img)
+        else:
+            await interaction.response.send_message(embed=spin_embed)
         await asyncio.sleep(1.8)
         p_roll = random.randint(1, 6)
         b_roll = random.randint(1, 6)
-        await interaction.edit_original_response(
-            embed=_dice_embed(p_roll, b_roll, bet, uid)
-        )
+        result_embed, result_img = _dice_embed_with_image(p_roll, b_roll, bet, uid)
+        if result_img:
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+        else:
+            await interaction.edit_original_response(embed=result_embed)
 
     # ── /highlow ──────────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -1601,9 +1841,11 @@ def setup_gambling(bot: commands.Bot) -> None:
             return
         deck    = _new_deck()
         current = deck.pop()
-        await interaction.response.send_message(
-            embed=_hl_embed(current, None, guess, bet, uid, spinning=True)
-        )
+        spin_embed, spin_img = _hl_embed_with_image(current, None, guess, bet, uid, spinning=True)
+        if spin_img:
+            await interaction.response.send_message(embed=spin_embed, file=spin_img)
+        else:
+            await interaction.response.send_message(embed=spin_embed)
         await asyncio.sleep(1.5)
         next_card = deck.pop()
         cv = _hl_rank_val(current[0])
@@ -1623,10 +1865,20 @@ def setup_gambling(bot: commands.Bot) -> None:
             _record_loss(uid, bet)
             result = f"💸 **WRONG** — −**{bet:,}** PokeCoins."
             won    = False
-        await interaction.edit_original_response(
-            embed=_hl_embed(current, next_card, guess, bet, uid,
-                            won=bool(won), result=result, bonus=bonus)
+        result_embed, result_img = _hl_embed_with_image(
+            current,
+            next_card,
+            guess,
+            bet,
+            uid,
+            won=bool(won),
+            result=result,
+            bonus=bonus,
         )
+        if result_img:
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+        else:
+            await interaction.edit_original_response(embed=result_embed)
 
     # ── /plinko ───────────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -1653,7 +1905,13 @@ def setup_gambling(bot: commands.Bot) -> None:
             ),
             color=0xFF6B35,
         )
-        await interaction.response.send_message(embed=spin_embed)
+        spin_img = _plinko_render_image_file(spinning=True)
+        if spin_img:
+            spin_embed.description = None
+            spin_embed.set_image(url="attachment://plinko_board.png")
+            await interaction.response.send_message(embed=spin_embed, file=spin_img)
+        else:
+            await interaction.response.send_message(embed=spin_embed)
         await asyncio.sleep(2.2)
 
         col, mult = _plinko_drop()
@@ -1691,7 +1949,13 @@ def setup_gambling(bot: commands.Bot) -> None:
         if bonus:
             result_embed.add_field(name="⚡ CASINO BONUS", value="🎊 **3× MULTIPLIER** applied!", inline=False)
         result_embed.set_footer(text="🎯 /plinko  |  📅 /daily for free coins  |  📊 /casinomenu")
-        await interaction.edit_original_response(embed=result_embed)
+        result_img = _plinko_render_image_file(col=col, spinning=False)
+        if result_img:
+            result_embed.description = None
+            result_embed.set_image(url="attachment://plinko_board.png")
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+        else:
+            await interaction.edit_original_response(embed=result_embed)
 
     # ── /heist ────────────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -1736,7 +2000,20 @@ def setup_gambling(bot: commands.Bot) -> None:
             color=t["color"],
         )
         plan_embed.set_footer(text="Heist begins in 2 seconds...")
-        await interaction.response.send_message(embed=plan_embed)
+        plan_lines = [
+            f"Target: {t['name']}",
+            f"Potential payout: {int(bet * t['mult']):,} (x{t['mult']})",
+            f"Base success: {int(t['success_base'] * 100)}%",
+            "Studying the blueprints...",
+            "Sourcing equipment...",
+            "Recruiting the crew...",
+        ]
+        plan_img = _heist_render_image_file("Heist Planning Room", plan_lines, (103, 152, 214))
+        if plan_img:
+            plan_embed.set_image(url="attachment://heist_panel.png")
+            await interaction.response.send_message(embed=plan_embed, file=plan_img)
+        else:
+            await interaction.response.send_message(embed=plan_embed)
         await asyncio.sleep(2)
 
         # Phase 2 — Crew assembly
@@ -1767,7 +2044,12 @@ def setup_gambling(bot: commands.Bot) -> None:
         )
         crew_embed.add_field(name="💰 Bet", value=f"`{bet:,}` PokeCoins", inline=True)
         crew_embed.set_footer(text="Executing the heist...")
-        await interaction.edit_original_response(embed=crew_embed)
+        crew_img = _heist_render_image_file("Crew Assembled", crew_lines, (120, 178, 137))
+        if crew_img:
+            crew_embed.set_image(url="attachment://heist_panel.png")
+            await interaction.edit_original_response(embed=crew_embed, attachments=[crew_img])
+        else:
+            await interaction.edit_original_response(embed=crew_embed)
         await asyncio.sleep(2.5)
 
         # Phase 3 — Heist stages
@@ -1837,4 +2119,12 @@ def setup_gambling(bot: commands.Bot) -> None:
                 name="⚡ CASINO BONUS", value="🎊 **3× MULTIPLIER** applied to your payout!", inline=False
             )
         result_embed.set_footer(text="Plan your next heist with /heist!  |  /daily for free coins")
-        await interaction.edit_original_response(embed=result_embed)
+        result_lines = stage_lines if stage_lines else ["Could not get inside."]
+        result_lines.append(outcome.replace("\n", " "))
+        heist_accent = (97, 185, 125) if "SUCCESS" in title else ((196, 154, 78) if "PARTIAL" in title else (198, 79, 79))
+        result_img = _heist_render_image_file(title, result_lines, heist_accent)
+        if result_img:
+            result_embed.set_image(url="attachment://heist_panel.png")
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+        else:
+            await interaction.edit_original_response(embed=result_embed)
