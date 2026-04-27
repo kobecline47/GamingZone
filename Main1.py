@@ -508,12 +508,12 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
     )
 
     channels = [
-        (GAMBLING_CHANNEL_NAME, "🎰 Use all casino commands here! /slots /blackjack /poker /crash and more", None),
-        (POKEMON_CHANNEL_NAME,  "⚔️ Challenge others to Pokemon battles here! /pokemon battle", None),
-        (MUSIC_CHANNEL_NAME,    "🎵 Request music and use all music commands here! /play /skip /queue", music_category if music_category else None),
+        (GAMBLING_CHANNEL_NAME, "🎰 Use all casino commands here! /slots /blackjack /poker /crash and more", None, ["casino-floor", "casino"]),
+        (POKEMON_CHANNEL_NAME,  "⚔️ Challenge others to Pokemon battles here! /pokemon battle", None, ["pokemon-battle", "pokemon"]),
+        (MUSIC_CHANNEL_NAME,    "🎵 Request music and use all music commands here! /play /skip /queue", music_category if music_category else None, ["music-channel", "music"]),
     ]
-    for ch_name, topic, category in channels:
-        ch = discord.utils.get(guild.text_channels, name=ch_name)
+    for ch_name, topic, category, aliases in channels:
+        ch = _find_text_channel_ci(guild, ch_name, *aliases)
         if ch:
             # Update existing channel perms (and move to correct category if set)
             edit_kwargs = {"overwrites": restricted_ow}
@@ -540,7 +540,16 @@ async def _ensure_feature_channels(guild: discord.Guild) -> None:
             verify_ow[role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True
             )
-    verify_ch = discord.utils.get(guild.text_channels, name=VERIFY_CHANNEL_NAME)
+    verify_ch = _find_text_channel_ci(guild, VERIFY_CHANNEL_NAME, "verify", "✅-verify", "-verify")
+    if verify_ch is None:
+        # Last-resort fallback: reuse any prior verify-like channel by topic marker.
+        verify_ch = next(
+            (
+                c for c in guild.text_channels
+                if c.topic and "verify" in c.topic.lower() and "unlock" in c.topic.lower()
+            ),
+            None,
+        )
     if verify_ch:
         await verify_ch.edit(overwrites=verify_ow)
     else:
