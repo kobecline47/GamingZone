@@ -19,6 +19,7 @@ import random
 import asyncio
 import time
 import io
+import math
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -724,6 +725,102 @@ def _roulette_embed(
     return embed
 
 
+def _roulette_render_image_file(landed: int | None, spinning: bool = False) -> discord.File | None:
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return None
+
+    size = 768
+    img = Image.new("RGBA", (size, size), (85, 120, 52, 255))
+    draw = ImageDraw.Draw(img)
+
+    cx = size // 2
+    cy = 860  # push center off canvas to create curved wheel bands similar to reference
+    outer_r = 700
+    inner_r = 420
+    seg_deg = 360.0 / len(_WHEEL_ORDER)
+
+    target = landed if landed is not None else random.choice(_WHEEL_ORDER)
+    target_idx = _WHEEL_ORDER.index(target)
+
+    def seg_color(n: int) -> tuple[int, int, int]:
+        if n == 0:
+            return (19, 129, 86)
+        if n in _RED_NUMS:
+            return (204, 30, 36)
+        return (18, 18, 22)
+
+    # Center the landed segment near top-middle of the visible arc.
+    base = -90.0 - ((target_idx + 0.5) * seg_deg)
+
+    for i, n in enumerate(_WHEEL_ORDER):
+        a0 = base + i * seg_deg
+        a1 = a0 + seg_deg
+        draw.pieslice((cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r), a0, a1, fill=seg_color(n))
+
+    # Hollow center to form wheel band.
+    draw.ellipse((cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r), fill=(85, 120, 52, 255))
+
+    # White separators for each segment edge.
+    mid_r = (outer_r + inner_r) // 2
+    for i in range(len(_WHEEL_ORDER)):
+        a = math.radians(base + i * seg_deg)
+        x0 = int(cx + math.cos(a) * inner_r)
+        y0 = int(cy + math.sin(a) * inner_r)
+        x1 = int(cx + math.cos(a) * outer_r)
+        y1 = int(cy + math.sin(a) * outer_r)
+        draw.line((x0, y0, x1, y1), fill=(242, 242, 242, 245), width=3)
+
+    # Show nearby numbers only (cleaner look, like screenshot).
+    try:
+        num_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 22)
+    except Exception:
+        num_font = ImageFont.load_default()
+    for offset in range(-2, 3):
+        idx = (target_idx + offset) % len(_WHEEL_ORDER)
+        n = _WHEEL_ORDER[idx]
+        ang = math.radians(base + (idx + 0.5) * seg_deg)
+        tx = int(cx + math.cos(ang) * mid_r)
+        ty = int(cy + math.sin(ang) * mid_r)
+        t = str(n)
+        tw, th = draw.textbbox((0, 0), t, font=num_font)[2:4]
+        draw.text((tx - tw // 2, ty - th // 2), t, fill=(232, 232, 232, 255), font=num_font)
+
+    # Ball on landed segment (or randomized if spinning).
+    ball_num = random.choice(_WHEEL_ORDER) if spinning else target
+    ball_idx = _WHEEL_ORDER.index(ball_num)
+    ball_ang = math.radians(base + (ball_idx + 0.5) * seg_deg)
+    ball_r = inner_r + int((outer_r - inner_r) * 0.58)
+    bx = int(cx + math.cos(ball_ang) * ball_r)
+    by = int(cy + math.sin(ball_ang) * ball_r)
+    br = 60
+    draw.ellipse((bx - br, by - br, bx + br, by + br), fill=(200, 200, 200, 255), outline=(20, 20, 20, 255), width=3)
+    draw.ellipse((bx - br + 18, by - br + 18, bx - br + 34, by - br + 34), fill=(236, 236, 236, 190))
+
+    # Curved green rails above/below wheel for depth.
+    draw.arc((cx - 760, cy - 760, cx + 760, cy + 760), start=196, end=346, fill=(146, 186, 88, 255), width=26)
+    draw.arc((cx - 560, cy - 560, cx + 560, cy + 560), start=199, end=343, fill=(146, 186, 88, 255), width=24)
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="roulette_wheel.png")
+
+
+def _roulette_embed_with_image(
+    landed: int | None,
+    choice: str,
+    bet: int,
+    uid: int,
+    spinning: bool = False,
+    bonus: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = _roulette_embed(landed, choice, bet, uid, spinning=spinning, bonus=bonus)
+    img_file = _roulette_render_image_file(landed, spinning=spinning)
+    if img_file:
+        embed.set_image(url="attachment://roulette_wheel.png")
+    return embed, img_file
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 🎲  DICE DUEL
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1205,9 +1302,11 @@ def setup_gambling(bot: commands.Bot) -> None:
                     ephemeral=True,
                 )
                 return
-        await interaction.response.send_message(
-            embed=_roulette_embed(None, choice, bet, uid, spinning=True)
-        )
+        spin_embed, spin_img = _roulette_embed_with_image(None, choice, bet, uid, spinning=True)
+        if spin_img:
+            await interaction.response.send_message(embed=spin_embed, file=spin_img)
+        else:
+            await interaction.response.send_message(embed=spin_embed)
         await asyncio.sleep(2.5)
         landed = random.randint(0, 36)
         is_num = choice.lstrip("-").isdigit()
@@ -1223,8 +1322,10 @@ def setup_gambling(bot: commands.Bot) -> None:
         else:
             WALLETS[uid] = _wallet(uid) - bet
             _record_loss(uid, bet)
+        result_embed, result_img = _roulette_embed_with_image(landed, choice, bet, uid, bonus=bonus)
         await interaction.edit_original_response(
-            embed=_roulette_embed(landed, choice, bet, uid, bonus=bonus)
+            embed=result_embed,
+            attachments=[result_img] if result_img else [],
         )
 
     # ── /dice ─────────────────────────────────────────────────────────────────
