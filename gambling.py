@@ -1679,6 +1679,17 @@ def setup_gambling(bot: commands.Bot) -> None:
         embed.add_field(name="💼 New Balance", value=f"`{_wallet(member.id):,}` PokeCoins", inline=True)
         await interaction.response.send_message(embed=embed)
 
+        log_ch = discord.utils.get(interaction.guild.text_channels, name="mod-logs")
+        if log_ch:
+            log_embed = discord.Embed(title="💰 Admin Coin Grant", color=0xFFD700)
+            log_embed.add_field(name="Admin", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+            log_embed.add_field(name="Recipient", value=f"{member.mention} (`{member.id}`)", inline=True)
+            log_embed.add_field(name="Amount", value=f"`+{amount:,}` PokeCoins", inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            log_embed.add_field(name="New Balance", value=f"`{_wallet(member.id):,}` PokeCoins", inline=True)
+            log_embed.timestamp = discord.utils.utcnow()
+            await log_ch.send(embed=log_embed)
+
     # ── /slots ────────────────────────────────────────────────────────────────
     @bot.tree.command(name="slots", description="🎰 Spin the slot machine")
     @app_commands.describe(bet="PokeCoins to bet")
