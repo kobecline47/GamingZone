@@ -817,6 +817,8 @@ def _roulette_embed_with_image(
     embed = _roulette_embed(landed, choice, bet, uid, spinning=spinning, bonus=bonus)
     img_file = _roulette_render_image_file(landed, spinning=spinning)
     if img_file:
+        # Remove old text wheel so only the new rendered wheel is shown.
+        embed.description = None
         embed.set_image(url="attachment://roulette_wheel.png")
     return embed, img_file
 
