@@ -3002,6 +3002,15 @@ def _song_signature_tokens(title: str) -> list[str]:
     return tokens[:4]
 
 
+def _autoplay_query_seed(song: SongEntry) -> str:
+    """Build a cleaner autoplay search seed than raw YouTube titles."""
+    artist = _song_artist_key(song)
+    core = _song_core_key(song.title)
+    if artist and core:
+        return f"{artist} {core}"
+    return core or artist or song.title
+
+
 def _autoplay_title_tokens(title: str) -> set[str]:
     core = _song_core_key(title)
     if not core:
@@ -3328,6 +3337,8 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
             'quiet': True,
             'no_warnings': True,
             'default_search': 'ytsearch',
+            'extract_flat': 'in_playlist',
+            'ignoreerrors': True,
             'noplaylist': True,
             'http_headers': {'User-Agent': 'Mozilla/5.0'},
             'source_address': '0.0.0.0',
@@ -3630,9 +3641,10 @@ def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
             'no_warnings': True,
             'skip_download': True,
             'extract_flat': True,
+            'ignoreerrors': True,
             'noplaylist': True,
         }
-        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        cookiefile = _resolve_yt_cookiefile()
         if cookiefile and os.path.isfile(cookiefile):
             opts['cookiefile'] = cookiefile
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -3730,9 +3742,10 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
 async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEntry") -> dict | None:
     """Best-effort fallback when normal autoplay ranking cannot pick a track."""
     artist_key = _song_artist_key(current)
+    query_seed = _autoplay_query_seed(current)
     queries = [
-        f"songs like {current.title}",
-        f"music similar to {current.title}",
+        f"songs like {query_seed}",
+        f"music similar to {query_seed}",
     ]
     if artist_key:
         queries.extend([
@@ -3820,6 +3833,7 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
     """Build a ranked list of autoplay candidates so runtime and debug share the same logic."""
     loop = asyncio.get_running_loop()
     exclude = current.webpage_url or current.url
+    query_seed = _autoplay_query_seed(current)
     blocked_ids: set[str] = set(state.recent_track_ids)
     blocked_title_keys: set[str] = set(state.recent_title_keys)
     current_id = _song_identity(current)
@@ -3911,21 +3925,21 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
     # so a single slow yt-dlp call can't block the next song from starting.
     try:
         radio_queries = [
-            f"{current.title} radio",
-            f"mix similar to {current.title}",
+            f"{query_seed} radio",
+            f"mix similar to {query_seed}",
         ]
         # Only add the artist variant when the artist key isn't already embedded
         # inside the full title (prevents "songs like another brick Another Brick...").
-        if current_artist_key and current_artist_key not in current.title.lower():
-            radio_queries.append(f"songs like {current_artist_key} {current.title}")
+        if current_artist_key and current_artist_key not in query_seed.lower():
+            radio_queries.append(f"songs like {current_artist_key} {query_seed}")
 
         broad_queries = [
-            f"songs like {current.title}",
+            f"songs like {query_seed}",
         ]
-        if current_artist_key and current_artist_key not in current.title.lower():
+        if current_artist_key and current_artist_key not in query_seed.lower():
             broad_queries.append(f"artists similar to {current_artist_key} best songs")
         else:
-            broad_queries.append(f"music recommendations similar to {current.title}")
+            broad_queries.append(f"music recommendations similar to {query_seed}")
 
         # Artist-only fallbacks help when title-based queries return mostly
         # duplicates/lyric videos of the same track.
