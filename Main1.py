@@ -2642,6 +2642,8 @@ class GuildMusicState:
     def __init__(self):
         self.queue: collections.deque[SongEntry] = collections.deque()
         self.current: SongEntry | None = None
+        self.last_finished: SongEntry | None = None
+        self.recent_track_ids: collections.deque[str] = collections.deque(maxlen=20)
         self.voice_client: discord.VoiceClient | None = None
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
@@ -2653,6 +2655,42 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     if guild_id not in music_states:
         music_states[guild_id] = GuildMusicState()
     return music_states[guild_id]
+
+
+def _youtube_video_id(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if "youtu.be" in host:
+            return parsed.path.lstrip("/")
+        if "youtube.com" in host:
+            q = urllib.parse.parse_qs(parsed.query)
+            if q.get("v"):
+                return q["v"][0]
+    except Exception:
+        return ""
+    return ""
+
+
+def _song_identity(song: SongEntry | None) -> str:
+    if not song:
+        return ""
+    return _youtube_video_id(song.webpage_url) or _youtube_video_id(song.url)
+
+
+def _entry_identity(entry: dict) -> str:
+    return _youtube_video_id(entry.get("webpage_url", "")) or _youtube_video_id(entry.get("url", ""))
+
+
+def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> None:
+    if not song:
+        return
+    state.last_finished = song
+    sid = _song_identity(song)
+    if sid:
+        state.recent_track_ids.append(sid)
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
@@ -2995,22 +3033,38 @@ def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
         return []
 
 
-async def fetch_related_song(current: "SongEntry") -> dict | None:
+async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> dict | None:
     """Fetch a genuine related song for autoplay. Tries yt-dlp related videos first,
     then falls back to a 'mix similar to <title>' text search."""
     loop = asyncio.get_running_loop()
     exclude = current.webpage_url or current.url
+    blocked_ids: set[str] = set(state.recent_track_ids)
+    current_id = _song_identity(current)
+    if current_id:
+        blocked_ids.add(current_id)
+    for q_item in state.queue:
+        qid = _song_identity(q_item)
+        if qid:
+            blocked_ids.add(qid)
 
     # 1) Try pulling YouTube related videos via yt-dlp
     if exclude:
         related = await loop.run_in_executor(None, lambda: _fetch_related_yt_dlp(exclude, exclude))
-        if related:
-            return related[0]
+        for r in related:
+            rid = _entry_identity(r)
+            if rid and rid in blocked_ids:
+                continue
+            if r.get('title', '').lower() == current.title.lower():
+                continue
+            return r
 
     # 2) Fallback: search for "<title> mix" and skip exact title match
     try:
         results = await search_youtube(f"mix similar to {current.title}", max_results=5)
         for r in results:
+            rid = _entry_identity(r)
+            if rid and rid in blocked_ids:
+                continue
             if r.get('title', '').lower() != current.title.lower():
                 return r
     except Exception as e:
@@ -3111,6 +3165,8 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
                 if error:
                     print(f'[Music] Player error on "{state.current.title}": {error}')
                 finished_song = state.current
+                _remember_finished_song(state, finished_song)
+                state.current = None
                 _cleanup_song_file(finished_song)
                 asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
 
@@ -3124,26 +3180,29 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
                 f"PATH={os.getenv('PATH', '')}"
             )
             finished_song = state.current
+            _remember_finished_song(state, finished_song)
             _cleanup_song_file(finished_song)
             state.current = None
             asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
     else:
+        _remember_finished_song(state, state.current)
         _cleanup_song_file(state.current)
         state.current = None
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
+    seed_song = state.current or state.last_finished
     # If queue is empty and autoplay is on, fetch a genuinely related song
-    if not state.queue and state.autoplay and state.current:
+    if not state.queue and state.autoplay and seed_song:
         try:
-            r = await fetch_related_song(state.current)
+            r = await fetch_related_song(state, seed_song)
             if r:
                 state.queue.append(SongEntry(
                     title=r['title'],
                     url=r['url'],
                     webpage_url=r['webpage_url'],
                     duration=r.get('duration') or 0,
-                    requester=state.current.requester,
+                    requester=seed_song.requester,
                 ))
                 print(f"[Autoplay] Queued related: {r['title']}")
         except Exception as e:
