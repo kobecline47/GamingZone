@@ -2186,7 +2186,7 @@ def setup_gambling(bot: commands.Bot) -> None:
             bonus=bonus,
             revealed=[s1, s2, s3],
         )
-        replay_view = PlayAgainView(uid, f"slots bet:{bet}", replay_action=lambda i, b=bet: cmd_slots(i, b))
+        replay_view = PlayAgainView(uid, f"slots bet:{bet}", replay_action=lambda i, b=bet: cmd_slots.callback(i, b))
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
@@ -2220,15 +2220,15 @@ def setup_gambling(bot: commands.Bot) -> None:
                 await interaction.response.send_message(
                     embed=embed,
                     file=img_file,
-                    view=PlayAgainView(uid, f"blackjack bet:{bet}", replay_action=lambda i, b=bet: cmd_blackjack(i, b)),
+                    view=PlayAgainView(uid, f"blackjack bet:{bet}", replay_action=lambda i, b=bet: cmd_blackjack.callback(i, b)),
                 )
             else:
                 await interaction.response.send_message(
                     embed=embed,
-                    view=PlayAgainView(uid, f"blackjack bet:{bet}", replay_action=lambda i, b=bet: cmd_blackjack(i, b)),
+                    view=PlayAgainView(uid, f"blackjack bet:{bet}", replay_action=lambda i, b=bet: cmd_blackjack.callback(i, b)),
                 )
             return
-        view  = BlackjackView(uid, bet, player, dealer, deck, replay_action=lambda i, b=bet: cmd_blackjack(i, b))
+        view  = BlackjackView(uid, bet, player, dealer, deck, replay_action=lambda i, b=bet: cmd_blackjack.callback(i, b))
         embed, img_file = _bj_embed_with_image(player, dealer, bet, uid, "🎯 Your move!")
         if img_file:
             await interaction.response.send_message(embed=embed, view=view, file=img_file)
@@ -2267,7 +2267,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         replay_view = PlayAgainView(
             uid,
             f"coinflip bet:{bet} choice:{choice}",
-            replay_action=lambda i, b=bet, c=choice: cmd_coinflip(i, b, c),
+            replay_action=lambda i, b=bet, c=choice: cmd_coinflip.callback(i, b, c),
         )
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
@@ -2351,7 +2351,7 @@ def setup_gambling(bot: commands.Bot) -> None:
             view=PlayAgainView(
                 uid,
                 f"roulette bet:{bet} choice:{choice}",
-                replay_action=lambda i, b=bet, c=choice: cmd_roulette(i, b, c),
+                replay_action=lambda i, b=bet, c=choice: cmd_roulette.callback(i, b, c),
             ),
         )
 
@@ -2373,7 +2373,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         p_roll = random.randint(1, 6)
         b_roll = random.randint(1, 6)
         result_embed, result_img = _dice_embed_with_image(p_roll, b_roll, bet, uid)
-        replay_view = PlayAgainView(uid, f"dice bet:{bet}", replay_action=lambda i, b=bet: cmd_dice(i, b))
+        replay_view = PlayAgainView(uid, f"dice bet:{bet}", replay_action=lambda i, b=bet: cmd_dice.callback(i, b))
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
@@ -2434,7 +2434,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         replay_view = PlayAgainView(
             uid,
             f"highlow bet:{bet} guess:{guess}",
-            replay_action=lambda i, b=bet, g=guess: cmd_highlow(i, b, g),
+            replay_action=lambda i, b=bet, g=guess: cmd_highlow.callback(i, b, g),
         )
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
@@ -2517,12 +2517,12 @@ def setup_gambling(bot: commands.Bot) -> None:
             await interaction.edit_original_response(
                 embed=result_embed,
                 attachments=[result_img],
-                view=PlayAgainView(uid, f"plinko bet:{bet}", replay_action=lambda i, b=bet: cmd_plinko(i, b)),
+                view=PlayAgainView(uid, f"plinko bet:{bet}", replay_action=lambda i, b=bet: cmd_plinko.callback(i, b)),
             )
         else:
             await interaction.edit_original_response(
                 embed=result_embed,
-                view=PlayAgainView(uid, f"plinko bet:{bet}", replay_action=lambda i, b=bet: cmd_plinko(i, b)),
+                view=PlayAgainView(uid, f"plinko bet:{bet}", replay_action=lambda i, b=bet: cmd_plinko.callback(i, b)),
             )
 
     # ── /heist ────────────────────────────────────────────────────────────────
