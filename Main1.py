@@ -3556,7 +3556,7 @@ async def _post_music_panel(guild_id: int):
     guild = client.get_guild(guild_id)
     if not guild:
         return
-    music_ch = discord.utils.get(guild.text_channels, name=MUSIC_CHANNEL_NAME)
+    music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
     if not music_ch:
         return
     # Delete previous panel
@@ -3595,13 +3595,25 @@ async def _post_music_panel(guild_id: int):
 
 def _is_music_channel(interaction: discord.Interaction) -> bool:
     """Returns True if the interaction is in the designated music channel."""
-    ch = discord.utils.get(interaction.guild.text_channels, name=MUSIC_CHANNEL_NAME)
+    ch = _resolve_or_track_text_channel(
+        interaction.guild,
+        "music_channel",
+        MUSIC_CHANNEL_NAME,
+        "music-channel",
+        "music",
+    )
     return interaction.channel.id == (ch.id if ch else -1)
 
 async def _require_music_channel(interaction: discord.Interaction) -> bool:
     """Sends an error and returns False if not in music-channel."""
     if not _is_music_channel(interaction):
-        ch = discord.utils.get(interaction.guild.text_channels, name=MUSIC_CHANNEL_NAME)
+        ch = _resolve_or_track_text_channel(
+            interaction.guild,
+            "music_channel",
+            MUSIC_CHANNEL_NAME,
+            "music-channel",
+            "music",
+        )
         mention = ch.mention if ch else f"#{MUSIC_CHANNEL_NAME}"
         await interaction.response.send_message(
             f"Music commands can only be used in {mention}.", ephemeral=True
