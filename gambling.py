@@ -1893,6 +1893,14 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
 def setup_gambling(bot: commands.Bot) -> None:
     """Register all casino slash commands globally."""
 
+    # Remove any existing casino commands to prevent duplicates
+    casino_commands = [
+        "casinomenu", "setupcasino", "daily", "work", "givepokcoin",
+        "slots", "blackjack", "coinflip", "roulette", "dice", "highlow", "plinko", "heist"
+    ]
+    for cmd_name in casino_commands:
+        bot.tree.remove_command(cmd_name)
+
     # ── /casinomenu ───────────────────────────────────────────────────────────
     @bot.tree.command(
         name="casinomenu",
