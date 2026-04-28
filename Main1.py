@@ -2644,6 +2644,7 @@ class GuildMusicState:
         self.current: SongEntry | None = None
         self.last_finished: SongEntry | None = None
         self.recent_track_ids: collections.deque[str] = collections.deque(maxlen=20)
+        self.recent_title_keys: collections.deque[str] = collections.deque(maxlen=20)
         self.voice_client: discord.VoiceClient | None = None
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
@@ -2684,6 +2685,27 @@ def _entry_identity(entry: dict) -> str:
     return _youtube_video_id(entry.get("webpage_url", "")) or _youtube_video_id(entry.get("url", ""))
 
 
+def _normalized_title_key(title: str) -> str:
+    """Normalize song titles so variants like remaster/official-audio map together."""
+    t = (title or "").lower()
+    # Remove bracketed noise first.
+    t = re.sub(r"\([^)]*\)", " ", t)
+    t = re.sub(r"\[[^\]]*\]", " ", t)
+    # Remove common noisy descriptors.
+    noise = [
+        "official audio", "official video", "official music video", "music video",
+        "lyrics", "lyric video", "audio", "video", "remaster", "remastered",
+        "hq", "hd", "topic",
+    ]
+    for n in noise:
+        t = t.replace(n, " ")
+    # Remove years and separators.
+    t = re.sub(r"\b(?:19|20)\d{2}\b", " ", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> None:
     if not song:
         return
@@ -2691,6 +2713,9 @@ def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> N
     sid = _song_identity(song)
     if sid:
         state.recent_track_ids.append(sid)
+    tkey = _normalized_title_key(song.title)
+    if tkey:
+        state.recent_title_keys.append(tkey)
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
@@ -3039,13 +3064,20 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
     loop = asyncio.get_running_loop()
     exclude = current.webpage_url or current.url
     blocked_ids: set[str] = set(state.recent_track_ids)
+    blocked_title_keys: set[str] = set(state.recent_title_keys)
     current_id = _song_identity(current)
     if current_id:
         blocked_ids.add(current_id)
+    current_title_key = _normalized_title_key(current.title)
+    if current_title_key:
+        blocked_title_keys.add(current_title_key)
     for q_item in state.queue:
         qid = _song_identity(q_item)
         if qid:
             blocked_ids.add(qid)
+        qkey = _normalized_title_key(q_item.title)
+        if qkey:
+            blocked_title_keys.add(qkey)
 
     # 1) Try pulling YouTube related videos via yt-dlp
     if exclude:
@@ -3053,6 +3085,9 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         for r in related:
             rid = _entry_identity(r)
             if rid and rid in blocked_ids:
+                continue
+            rkey = _normalized_title_key(r.get('title', ''))
+            if rkey and rkey in blocked_title_keys:
                 continue
             if r.get('title', '').lower() == current.title.lower():
                 continue
@@ -3064,6 +3099,9 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         for r in results:
             rid = _entry_identity(r)
             if rid and rid in blocked_ids:
+                continue
+            rkey = _normalized_title_key(r.get('title', ''))
+            if rkey and rkey in blocked_title_keys:
                 continue
             if r.get('title', '').lower() != current.title.lower():
                 return r
