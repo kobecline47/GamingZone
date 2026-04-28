@@ -217,6 +217,30 @@ class Client(commands.Bot):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         gid, uid = member.guild.id, member.id
 
+        # ── Bot voice reconnect ───────────────────────────────────────────────
+        # If the BOT itself got disconnected while a song was playing, try to
+        # reconnect to the same channel and resume from where we left off.
+        if uid == self.user.id and before.channel is not None and after.channel is None:
+            state = get_music_state(gid)
+            song = state.current
+            if song:
+                print(f"[Voice] Bot was disconnected from voice during playback — attempting reconnect to #{before.channel.name}")
+                await asyncio.sleep(2)  # brief pause before reconnect
+                try:
+                    new_vc = await before.channel.connect(self_deaf=True)
+                    state.voice_client = new_vc
+                    # Re-queue the interrupted song at the front and restart
+                    state.queue.appendleft(song)
+                    state.current = None
+                    loop = asyncio.get_running_loop()
+                    await play_next(gid, loop)
+                    await _post_music_panel(gid, force_new=True)
+                    print(f"[Voice] Reconnected and resumed: {song.title}")
+                except Exception as e:
+                    print(f"[Voice] Reconnect failed: {e}")
+                    state.current = None
+            return
+
         # ── Personal Space logic ──────────────────────────────────────────────
         lobby_id = PERSONAL_SPACE_LOBBY.get(gid)
 
@@ -4401,7 +4425,7 @@ async def play(interaction: discord.Interaction, query: str):
         state = get_music_state(interaction.guild.id)
         vc = interaction.guild.voice_client
         if vc is None:
-            vc = await member.voice.channel.connect()
+            vc = await member.voice.channel.connect(self_deaf=True)
             state.voice_client = vc
         elif vc.channel != member.voice.channel:
             await vc.move_to(member.voice.channel)
@@ -4792,7 +4816,7 @@ async def playlist(interaction: discord.Interaction, action: str, name: str = ""
         await interaction.response.defer()
         vc = interaction.guild.voice_client
         if vc is None:
-            vc = await member.voice.channel.connect()
+            vc = await member.voice.channel.connect(self_deaf=True)
             state.voice_client = vc
         elif vc.channel != member.voice.channel:
             await vc.move_to(member.voice.channel)
