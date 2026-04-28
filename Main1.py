@@ -449,7 +449,6 @@ class Client(commands.Bot):
 
             # Do NOT auto-create channels on startup/restart.
             # Only validate and warn in the primary guild; admins can run setup commands explicitly.
-            global LOG_CHANNEL_ID
             marker_guild = primary_guild
             marker_ch = None
             role_ch = None
@@ -460,19 +459,14 @@ class Client(commands.Bot):
                     await _ensure_log_channels(marker_guild)
                 except Exception as e:
                     print(f"[Startup] Could not ensure log channels in {marker_guild.name} ({marker_guild.id}): {e}")
-                ch = marker_guild.get_channel(LOG_CHANNEL_ID)
+                ch = marker_guild.get_channel(BOT_LOG_CHANNEL_ID)
                 if isinstance(ch, discord.TextChannel):
                     marker_ch = ch
-                else:
-                    marker_ch = _resolve_mod_log_channel(marker_guild)
-                if marker_ch is None:
-                    # Retry one more lookup after reconciliation.
-                    marker_ch = _resolve_mod_log_channel(marker_guild)
                 role_ch = _resolve_or_track_text_channel(marker_guild, "role_log", ROLE_LOG_NAME, "role-logs")
                 ticket_ch = _resolve_ticket_log_channel(marker_guild)
 
                 if marker_ch:
-                    print(f"[Startup] Log route mod: #{marker_ch.name} ({marker_ch.id})")
+                    print(f"[Startup] Log route bot: #{marker_ch.name} ({marker_ch.id})")
                 if role_ch:
                     print(f"[Startup] Log route role: #{role_ch.name} ({role_ch.id})")
                 if ticket_ch:
@@ -481,10 +475,12 @@ class Client(commands.Bot):
             if marker_guild is None:
                 print("[Startup] ⚠️  No primary guild resolved; startup marker not sent.")
             elif marker_ch is None:
-                print(f"[Startup] ⚠️  No mod-logs channel found in primary guild {marker_guild.name} ({marker_guild.id}); startup marker not sent.")
+                print(
+                    f"[Startup] ⚠️  No bot-logs channel found with ID {BOT_LOG_CHANNEL_ID} "
+                    f"in primary guild {marker_guild.name} ({marker_guild.id}); startup marker not sent."
+                )
             else:
                 try:
-                    LOG_CHANNEL_ID = marker_ch.id
                     marker_embed = discord.Embed(title="🟢 Bot Startup Marker", color=0x2ECC71)
                     marker_embed.add_field(name="Marker", value=f"`{STARTUP_MARKER}`", inline=False)
                     marker_embed.add_field(name="PID", value=f"`{os.getpid()}`", inline=True)
@@ -496,6 +492,7 @@ class Client(commands.Bot):
                     print(f"[Startup] Error sending marker: {e}")
                     import traceback
                     traceback.print_exc()
+
             if primary_guild is not None:
                 try:
                     if _resolve_ticket_log_channel(primary_guild) is None:
@@ -571,6 +568,7 @@ client = Client(command_prefix="!", intents=intents)
 LOG_CHANNEL_ID = 1496672123551355062
 LOGS_CATEGORY_ID = 1496416640022220902
 TICKET_LOG_CHANNEL_ID = 1496371222223655103
+BOT_LOG_CHANNEL_ID = 1498287670005071884
 TICKET_LOG_CATEGORY_ID = LOGS_CATEGORY_ID
 TICKET_LOG_NAME = "🎫┃ticket-logs"
 SOCIAL_ALERTS_CHANNEL_NAME = "📣┃social-alerts"
@@ -2871,6 +2869,70 @@ async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
 
 
+def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
+    """Use yt-dlp to pull YouTube's recommended/related videos for a given watch URL.
+    Returns a list of dicts with title/url/webpage_url/duration, skipping exclude_url."""
+    try:
+        import yt_dlp
+        opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'extract_flat': True,
+            'noplaylist': True,
+        }
+        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        if cookiefile and os.path.isfile(cookiefile):
+            opts['cookiefile'] = cookiefile
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(webpage_url, download=False)
+        related = info.get('related_videos') or []
+        results = []
+        for v in related:
+            vid_id = v.get('id') or v.get('url', '')
+            if not vid_id:
+                continue
+            wurl = f"https://www.youtube.com/watch?v={vid_id}"
+            if wurl == exclude_url or exclude_url.endswith(vid_id):
+                continue
+            results.append({
+                'title': v.get('title') or v.get('id', 'Unknown'),
+                'url': wurl,
+                'webpage_url': wurl,
+                'duration': v.get('duration') or 0,
+            })
+            if len(results) >= 5:
+                break
+        return results
+    except Exception as e:
+        print(f"[Autoplay] yt-dlp related fetch failed: {e}")
+        return []
+
+
+async def fetch_related_song(current: "SongEntry") -> dict | None:
+    """Fetch a genuine related song for autoplay. Tries yt-dlp related videos first,
+    then falls back to a 'mix similar to <title>' text search."""
+    loop = asyncio.get_running_loop()
+    exclude = current.webpage_url or current.url
+
+    # 1) Try pulling YouTube related videos via yt-dlp
+    if exclude:
+        related = await loop.run_in_executor(None, lambda: _fetch_related_yt_dlp(exclude, exclude))
+        if related:
+            return related[0]
+
+    # 2) Fallback: search for "<title> mix" and skip exact title match
+    try:
+        results = await search_youtube(f"mix similar to {current.title}", max_results=5)
+        for r in results:
+            if r.get('title', '').lower() != current.title.lower():
+                return r
+    except Exception as e:
+        print(f"[Autoplay] Fallback search failed: {e}")
+
+    return None
+
+
 def _ffmpeg_candidate_paths() -> list[str]:
     candidates: list[str] = []
 
@@ -2985,23 +3047,21 @@ def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
-    # If queue is empty and autoplay is on, fetch a related song
+    # If queue is empty and autoplay is on, fetch a genuinely related song
     if not state.queue and state.autoplay and state.current:
         try:
-            related = await search_youtube(state.current.title, max_results=2)
-            # Skip the first result if it's the same title
-            for r in related:
-                if r['title'].lower() != state.current.title.lower():
-                    state.queue.append(SongEntry(
-                        title=r['title'],
-                        url=r['url'],
-                        webpage_url=r['webpage_url'],
-                        duration=r['duration'],
-                        requester=state.current.requester,
-                    ))
-                    break
-        except Exception:
-            pass
+            r = await fetch_related_song(state.current)
+            if r:
+                state.queue.append(SongEntry(
+                    title=r['title'],
+                    url=r['url'],
+                    webpage_url=r['webpage_url'],
+                    duration=r.get('duration') or 0,
+                    requester=state.current.requester,
+                ))
+                print(f"[Autoplay] Queued related: {r['title']}")
+        except Exception as e:
+            print(f"[Autoplay] Failed to queue related song: {e}")
     play_next(guild_id, loop)
     await _post_music_panel(guild_id)
 
