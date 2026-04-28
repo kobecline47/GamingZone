@@ -140,20 +140,24 @@ def _check_bet(uid: int, amount: int) -> str | None:
 
 
 class PlayAgainView(discord.ui.View):
-    def __init__(self, uid: int, command_hint: str):
+    def __init__(self, uid: int, command_hint: str, replay_action=None):
         super().__init__(timeout=300)
         self.uid = uid
         self.command_hint = command_hint
+        self.replay_action = replay_action
 
     @discord.ui.button(label="Play Again", emoji="🎮", style=discord.ButtonStyle.success)
     async def play_again(self, interaction: discord.Interaction, _: discord.ui.Button):
         if interaction.user.id != self.uid:
             await interaction.response.send_message("❌ This play-again button isn't for your game.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            f"Run `/{self.command_hint}` to play again.",
-            ephemeral=True,
-        )
+        if self.replay_action is not None:
+            try:
+                await self.replay_action(interaction)
+                return
+            except Exception as e:
+                print(f"[Casino] Play-again replay failed: {e}")
+        await interaction.response.send_message(f"Run `/{self.command_hint}` to play again.", ephemeral=True)
 
 
 def _bal_line(uid: int) -> str:
@@ -699,6 +703,7 @@ class BlackjackView(discord.ui.View):
     def __init__(
         self, uid: int, bet: int,
         player: list, dealer: list, deck: list,
+        replay_action=None,
     ):
         super().__init__(timeout=120)
         self.uid    = uid
@@ -706,6 +711,7 @@ class BlackjackView(discord.ui.View):
         self.player = player
         self.dealer = dealer
         self.deck   = deck
+        self.replay_action = replay_action
         self._refresh_split()
 
     def _refresh_split(self) -> None:
@@ -738,7 +744,7 @@ class BlackjackView(discord.ui.View):
             )
             await interaction.response.edit_message(
                 embed=embed,
-                view=self,
+                view=PlayAgainView(uid, f"blackjack bet:{self.bet}", replay_action=self.replay_action),
                 attachments=[img_file] if img_file else [],
             )
             return
@@ -771,7 +777,7 @@ class BlackjackView(discord.ui.View):
         )
         await interaction.response.edit_message(
             embed=embed,
-            view=self,
+            view=PlayAgainView(uid, f"blackjack bet:{self.bet}", replay_action=self.replay_action),
             attachments=[img_file] if img_file else [],
         )
 
@@ -851,16 +857,6 @@ class BlackjackView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         self._disable_all()
-
-    @discord.ui.button(label="Play Again", style=discord.ButtonStyle.success, emoji="🎮")
-    async def play_again(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id != self.uid:
-            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            f"Run `/blackjack bet:{self.bet}` to play again.",
-            ephemeral=True,
-        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2190,7 +2186,7 @@ def setup_gambling(bot: commands.Bot) -> None:
             bonus=bonus,
             revealed=[s1, s2, s3],
         )
-        replay_view = PlayAgainView(uid, f"slots bet:{bet}")
+        replay_view = PlayAgainView(uid, f"slots bet:{bet}", replay_action=lambda i, b=bet: cmd_slots(i, b))
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
@@ -2224,15 +2220,15 @@ def setup_gambling(bot: commands.Bot) -> None:
                 await interaction.response.send_message(
                     embed=embed,
                     file=img_file,
-                    view=PlayAgainView(uid, f"blackjack bet:{bet}"),
+                    view=PlayAgainView(uid, f"blackjack bet:{bet}", replay_action=lambda i, b=bet: cmd_blackjack(i, b)),
                 )
             else:
                 await interaction.response.send_message(
                     embed=embed,
-                    view=PlayAgainView(uid, f"blackjack bet:{bet}"),
+                    view=PlayAgainView(uid, f"blackjack bet:{bet}", replay_action=lambda i, b=bet: cmd_blackjack(i, b)),
                 )
             return
-        view  = BlackjackView(uid, bet, player, dealer, deck)
+        view  = BlackjackView(uid, bet, player, dealer, deck, replay_action=lambda i, b=bet: cmd_blackjack(i, b))
         embed, img_file = _bj_embed_with_image(player, dealer, bet, uid, "🎯 Your move!")
         if img_file:
             await interaction.response.send_message(embed=embed, view=view, file=img_file)
@@ -2268,7 +2264,11 @@ def setup_gambling(bot: commands.Bot) -> None:
             WALLETS[uid] = _wallet(uid) - bet
             _record_loss(uid, bet)
         result_embed, result_img = _coinflip_embed_with_image(result, choice, bet, uid, bonus=bonus)
-        replay_view = PlayAgainView(uid, f"coinflip bet:{bet} choice:{choice}")
+        replay_view = PlayAgainView(
+            uid,
+            f"coinflip bet:{bet} choice:{choice}",
+            replay_action=lambda i, b=bet, c=choice: cmd_coinflip(i, b, c),
+        )
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
@@ -2348,7 +2348,11 @@ def setup_gambling(bot: commands.Bot) -> None:
         await interaction.edit_original_response(
             embed=result_embed,
             attachments=[result_img] if result_img else [],
-            view=PlayAgainView(uid, f"roulette bet:{bet} choice:{choice}"),
+            view=PlayAgainView(
+                uid,
+                f"roulette bet:{bet} choice:{choice}",
+                replay_action=lambda i, b=bet, c=choice: cmd_roulette(i, b, c),
+            ),
         )
 
     # ── /dice ─────────────────────────────────────────────────────────────────
@@ -2369,7 +2373,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         p_roll = random.randint(1, 6)
         b_roll = random.randint(1, 6)
         result_embed, result_img = _dice_embed_with_image(p_roll, b_roll, bet, uid)
-        replay_view = PlayAgainView(uid, f"dice bet:{bet}")
+        replay_view = PlayAgainView(uid, f"dice bet:{bet}", replay_action=lambda i, b=bet: cmd_dice(i, b))
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
@@ -2427,7 +2431,11 @@ def setup_gambling(bot: commands.Bot) -> None:
             result=result,
             bonus=bonus,
         )
-        replay_view = PlayAgainView(uid, f"highlow bet:{bet} guess:{guess}")
+        replay_view = PlayAgainView(
+            uid,
+            f"highlow bet:{bet} guess:{guess}",
+            replay_action=lambda i, b=bet, g=guess: cmd_highlow(i, b, g),
+        )
         if result_img:
             await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
@@ -2509,12 +2517,12 @@ def setup_gambling(bot: commands.Bot) -> None:
             await interaction.edit_original_response(
                 embed=result_embed,
                 attachments=[result_img],
-                view=PlayAgainView(uid, f"plinko bet:{bet}"),
+                view=PlayAgainView(uid, f"plinko bet:{bet}", replay_action=lambda i, b=bet: cmd_plinko(i, b)),
             )
         else:
             await interaction.edit_original_response(
                 embed=result_embed,
-                view=PlayAgainView(uid, f"plinko bet:{bet}"),
+                view=PlayAgainView(uid, f"plinko bet:{bet}", replay_action=lambda i, b=bet: cmd_plinko(i, b)),
             )
 
     # ── /heist ────────────────────────────────────────────────────────────────
