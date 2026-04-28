@@ -4225,8 +4225,10 @@ class PaginatedHelpView(discord.ui.View):
             await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
 
 
-async def _post_music_panel(guild_id: int):
-    """Keep one persistent Now Playing panel and update it in place."""
+async def _post_music_panel(guild_id: int, force_new: bool = False):
+    """Keep one persistent Now Playing panel and update it in place.
+    Pass force_new=True when the user explicitly triggers /play so the panel
+    moves to the bottom of the channel instead of editing in place."""
     state = get_music_state(guild_id)
     guild = client.get_guild(guild_id)
     if not guild:
@@ -4273,6 +4275,15 @@ async def _post_music_panel(guild_id: int):
         if getattr(child, "custom_id", None) == "autoplay_mode_toggle":
             child.label = f"Mode: {_format_autoplay_mode(state.autoplay_mode)}"
             child.style = _autoplay_mode_button_style(state.autoplay_mode)
+
+    # When force_new is requested (e.g. user ran /play), delete the old panel
+    # so the fresh one lands at the bottom of the channel.
+    if force_new and state.now_playing_msg:
+        try:
+            await state.now_playing_msg.delete()
+        except Exception:
+            pass
+        state.now_playing_msg = None
 
     # Prefer editing the existing panel to avoid flicker/disappearance.
     if state.now_playing_msg:
@@ -4398,7 +4409,7 @@ async def play(interaction: discord.Interaction, query: str):
                 await interaction.followup.send(f"▶️ Starting **{entry.title}** — see the player below!", ephemeral=True)
             except Exception:
                 pass
-            await _post_music_panel(interaction.guild.id)
+            await _post_music_panel(interaction.guild.id, force_new=True)
         else:
             embed = discord.Embed(title="Added to Queue", description=f"[{entry.title}]({entry.webpage_url})", color=0x3498DB)
             embed.add_field(name="Position", value=len(state.queue))
@@ -4532,7 +4543,7 @@ async def nowplaying(interaction: discord.Interaction):
     embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
     embed.set_footer(text="GzVibe Live View • Neon Style")
     await interaction.response.send_message(embed=embed)
-    await _post_music_panel(interaction.guild.id)
+    await _post_music_panel(interaction.guild.id, force_new=True)
 
 @client.tree.command(name="volume", description="Set the playback volume (0-100)", guild=GUILD_ID)
 async def volume(interaction: discord.Interaction, level: int):
@@ -4759,7 +4770,7 @@ async def playlist(interaction: discord.Interaction, action: str, name: str = ""
 
         if vc and not vc.is_playing() and not vc.is_paused() and state.queue:
             await play_next(interaction.guild.id, asyncio.get_running_loop())
-            await _post_music_panel(interaction.guild.id)
+            await _post_music_panel(interaction.guild.id, force_new=True)
 
         await interaction.followup.send(
             f"Queued `{added}` songs from **{normalized_name}**.",
