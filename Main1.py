@@ -2805,6 +2805,25 @@ def _normalize_playlist_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip())[:40]
 
 
+def _playlist_has_track(tracks: list[dict], track: dict) -> bool:
+    track_url = (track.get("webpage_url") or "").strip()
+    track_title = (track.get("title") or "").strip().casefold()
+    for item in tracks:
+        item_url = (item.get("webpage_url") or "").strip()
+        item_title = (item.get("title") or "").strip().casefold()
+        if track_url and item_url and track_url == item_url:
+            return True
+        if track_title and item_title and track_title == item_title:
+            return True
+    return False
+
+
+def _gzvibe_playlist_embed(title: str, description: str, color: int = 0x1DB954) -> discord.Embed:
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_footer(text="GzVibe Playlist")
+    return embed
+
+
 _load_music_playlists()
 
 
@@ -3899,6 +3918,40 @@ class MusicControlView(discord.ui.View):
         button.style = _autoplay_mode_button_style(state.autoplay_mode)
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(embed=_autoplay_mode_embed(state.autoplay_mode), ephemeral=True)
+
+    @discord.ui.button(emoji="➕", label="Add To Playlist", style=discord.ButtonStyle.primary, row=2, custom_id="playlist_quick_add")
+    async def playlist_quick_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        song = state.current or (state.queue[0] if state.queue else None)
+        if not song:
+            await interaction.response.send_message("No song is available to add right now.", ephemeral=True)
+            return
+
+        playlist_name = "GzVibe Favorites"
+        user_playlists = _playlist_bucket(interaction.guild.id, interaction.user.id)
+        tracks = user_playlists.setdefault(playlist_name, [])
+        track = _playlist_track(song)
+
+        if _playlist_has_track(tracks, track):
+            embed = _gzvibe_playlist_embed(
+                "🎵 Already In Playlist",
+                f"[{song.title}]({song.webpage_url}) is already saved in **{playlist_name}**.",
+                color=0xF39C12,
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        tracks.append(track)
+        _save_music_playlists()
+
+        embed = _gzvibe_playlist_embed(
+            "✅ Added To Playlist",
+            (
+                f"Saved [{song.title}]({song.webpage_url}) to **{playlist_name}**.\n"
+                f"You now have `{len(tracks)}` songs in that playlist."
+            ),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class PaginatedHelpView(discord.ui.View):
