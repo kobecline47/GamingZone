@@ -2869,6 +2869,92 @@ async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
 
 
+def _looks_like_url(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t.startswith("http://") or t.startswith("https://")
+
+
+def _ytdlp_resolve_url(url: str) -> list[dict]:
+    """Resolve a direct video URL to a playable audio stream using yt-dlp."""
+    try:
+        import yt_dlp
+
+        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'http_headers': {'User-Agent': 'Mozilla/5.0'},
+            'source_address': '0.0.0.0',
+        }
+        if cookiefile and os.path.exists(cookiefile):
+            ydl_opts['cookiefile'] = cookiefile
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+            # Playlist-ish responses can still happen; use first entry if present.
+            if info and info.get('entries'):
+                info = next((e for e in info.get('entries', []) if e), None)
+            if not info:
+                return []
+
+            stream_url = info.get('url')
+            if not stream_url and info.get('webpage_url'):
+                resolved = ydl.extract_info(info.get('webpage_url'), download=False)
+                stream_url = resolved.get('url') if resolved else None
+            if not stream_url:
+                return []
+
+            return [{
+                'title': info.get('title', 'Unknown title'),
+                'url': stream_url,
+                'webpage_url': info.get('webpage_url') or url,
+                'duration': info.get('duration', 0) or 0,
+            }]
+    except Exception as e:
+        print(f"[yt-dlp] direct url resolve failed: {e}")
+        return []
+
+
+async def search_youtube_resilient(query: str, max_results: int = 1) -> list[dict]:
+    """Resilient lookup for /play: direct URL resolve first, then fallback query variants."""
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    loop = asyncio.get_running_loop()
+
+    if _looks_like_url(q):
+        # Normalize music.youtube/watch variants for better extractor compatibility.
+        normalized = q.replace("music.youtube.com", "www.youtube.com")
+        direct = await loop.run_in_executor(None, lambda: _ytdlp_resolve_url(normalized))
+        if direct:
+            return direct
+
+    # Try original query, then common useful variants.
+    attempts: list[str] = [q]
+    if not _looks_like_url(q):
+        attempts.extend([
+            f"{q} official audio",
+            f"{q} topic",
+            f"{q} lyrics",
+        ])
+
+    seen: set[str] = set()
+    for attempt in attempts:
+        key = attempt.lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        results = await search_youtube(attempt, max_results=max_results)
+        if results:
+            return results
+
+    return []
+
+
 def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
     """Use yt-dlp to pull YouTube's recommended/related videos for a given watch URL.
     Returns a list of dicts with title/url/webpage_url/duration, skipping exclude_url."""
@@ -3299,11 +3385,12 @@ async def play(interaction: discord.Interaction, query: str):
         else:
             state.voice_client = vc
 
-        results = await search_youtube(query, max_results=1)
+        results = await search_youtube_resilient(query, max_results=1)
         if not results:
             await interaction.followup.send(
-                "No playable results found right now. YouTube is likely rate-limiting bot traffic. "
-                "If this persists on Railway, set `YTDLP_COOKIES_PATH` to a valid cookies.txt file path and retry."
+                "No playable results found right now. Try a more specific title (song + artist), "
+                "or paste a direct YouTube URL. If this keeps happening on Railway, add "
+                "YTDLP_COOKIES_PATH to a valid cookies.txt file and retry."
             )
             return
         r = results[0]
