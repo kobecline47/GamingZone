@@ -3743,13 +3743,12 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
         if any(_titles_too_similar(seed_title, rtitle) for seed_title in recent_seed_titles if seed_title):
             return False
 
-        # Hard guard: if candidate still contains the seed song signature tokens,
-        # treat it as the same song family (remix/cover/edit) and skip.
+        # Guard against same-song remixes/covers while avoiding false negatives.
+        # Keep this strict only for richer signatures; short signatures like
+        # "rich spirit" can otherwise reject almost all related candidates.
         if seed_tokens:
             rtokens = set(t for t in _song_core_key(rtitle).split() if t)
-            if len(seed_tokens) >= 2 and all(t in rtokens for t in seed_tokens[:2]):
-                return False
-            if len(seed_tokens) >= 3 and sum(1 for t in seed_tokens[:3] if t in rtokens) >= 2:
+            if len(seed_tokens) >= 4 and sum(1 for t in seed_tokens[:4] if t in rtokens) >= 3:
                 return False
 
         if rtitle.lower() == current.title.lower():
@@ -3809,15 +3808,25 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
         else:
             broad_queries.append(f"music recommendations similar to {current.title}")
 
+        # Artist-only fallbacks help when title-based queries return mostly
+        # duplicates/lyric videos of the same track.
+        artist_queries: list[str] = []
+        if current_artist_key:
+            artist_queries.extend([
+                f"{current_artist_key} best songs",
+                f"{current_artist_key} radio",
+            ])
+
         async def _safe_search(q: str, max_r: int) -> list[dict]:
             try:
                 return await asyncio.wait_for(search_youtube(_normalize_search_query(q), max_results=max_r), timeout=8.0)
             except Exception:
                 return []
 
-        radio_results, broad_results = await asyncio.gather(
+        radio_results, broad_results, artist_results = await asyncio.gather(
             asyncio.gather(*[_safe_search(q, 12) for q in radio_queries]),
             asyncio.gather(*[_safe_search(q, 12) for q in broad_queries]),
+            asyncio.gather(*[_safe_search(q, 12) for q in artist_queries]) if artist_queries else asyncio.gather(),
         )
 
         for q, results in zip(radio_queries, radio_results):
@@ -3830,6 +3839,12 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
             _consider_candidates(
                 picks,
                 source_bias=14 if state.autoplay_mode == "gzvibe" else 10,
+                source_name=q,
+            )
+        for q, picks in zip(artist_queries, artist_results):
+            _consider_candidates(
+                picks,
+                source_bias=11 if state.autoplay_mode == "gzvibe" else 8,
                 source_name=q,
             )
     except Exception as e:
