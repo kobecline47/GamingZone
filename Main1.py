@@ -3714,6 +3714,7 @@ def _extract_stream_url(song: SongEntry) -> str | None:
     """Resolve a fresh playable audio URL right before playback."""
     target = song.webpage_url or song.url
     if not target:
+        print(f"[Music] No target URL for {song.title}")
         return None
     try:
         import yt_dlp
@@ -3721,11 +3722,23 @@ def _extract_stream_url(song: SongEntry) -> str | None:
         with yt_dlp.YoutubeDL(YTDL_STREAM_OPTS) as ydl:
             info = ydl.extract_info(target, download=False)
             if info and info.get('url'):
-                return info['url']
+                url = info['url']
+                # Verify URL is not empty and looks valid
+                if isinstance(url, str) and url.strip() and url.startswith('http'):
+                    print(f"[Music] Stream URL resolved for {song.title}: {url[:80]}...")
+                    return url
+                else:
+                    print(f"[Music] Invalid stream URL format for {song.title}: {url}")
     except Exception as e:
         print(f"[Music] yt-dlp stream resolve failed for {song.title}: {e}")
 
-    return song.url or None
+    # Fallback to original URL if it looks valid
+    if song.url and isinstance(song.url, str) and song.url.startswith('http'):
+        print(f"[Music] Using fallback URL for {song.title}")
+        return song.url
+    
+    print(f"[Music] No valid stream URL available for {song.title}")
+    return None
 
 async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
@@ -3738,11 +3751,19 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state.current = state.queue.popleft()
     song = state.current
     try:
-        # Resolve stream URL in a thread so we never block the event loop
-        stream_url = await loop.run_in_executor(None, lambda: _extract_stream_url(song))
+        # Resolve stream URL in a thread with timeout so we never block the event loop
+        try:
+            stream_url = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: _extract_stream_url(song)),
+                timeout=20.0
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("Stream URL resolution timed out")
+        
         if not stream_url:
             raise RuntimeError("No playable stream URL could be resolved")
 
+        print(f"[Music] Stream URL ready, creating audio source...")
         audio = None
         last_error: Exception | None = None
         for ffmpeg_exe in _ffmpeg_candidate_paths():
@@ -3768,22 +3789,27 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
         source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
 
         def after_play(error):
-            if error:
-                print(f'[Music] Player error on "{state.current.title if state.current else song.title}": {error}')
-            finished_song = state.current
-            _remember_finished_song(state, finished_song)
-            state.current = None
-            _cleanup_song_file(finished_song)
-            asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+            try:
+                if error:
+                    print(f'[Music] Player error on "{state.current.title if state.current else song.title}": {error}')
+                else:
+                    print(f'[Music] Track finished: {state.current.title if state.current else song.title}')
+                finished_song = state.current
+                _remember_finished_song(state, finished_song)
+                state.current = None
+                _cleanup_song_file(finished_song)
+                asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+            except Exception as e:
+                print(f'[Music] Error in after_play callback: {e}')
 
         print(f'[Music] Now playing: {song.title}')
         state.voice_client.play(source, after=after_play)
+        print(f'[Music] Playback started successfully for: {song.title}')
     except Exception as e:
         print(
             f"[Music] Failed to create audio source for {song.title}: {e} | "
             f"FFMPEG_EXE={FFMPEG_EXE} | "
-            f"Candidates={_ffmpeg_candidate_paths()} | "
-            f"PATH={os.getenv('PATH', '')}"
+            f"Candidates={_ffmpeg_candidate_paths()}"
         )
         finished_song = state.current
         _remember_finished_song(state, finished_song)
@@ -3818,8 +3844,14 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
         print(f"[Autoplay] Queue not empty ({len(state.queue)} songs), will play next from queue")
     _loop = asyncio.get_running_loop()
     await play_next(guild_id, _loop)
-    await _post_music_panel(guild_id)
-    await _post_next_song_embed(guild_id)
+    try:
+        await _post_music_panel(guild_id)
+    except Exception as e:
+        print(f"[Music] Failed to update panel after starting playback: {e}")
+    try:
+        await _post_next_song_embed(guild_id)
+    except Exception as e:
+        print(f"[Music] Failed to post next song embed: {e}")
 
 
 async def _post_next_song_embed(guild_id: int) -> None:
