@@ -4003,6 +4003,23 @@ async def _post_music_panel(guild_id: int):
     music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
     if not music_ch:
         return
+    # On restart the in-memory message reference is lost, so clean up any
+    # recent stale bot "Now Playing" panels before posting a new one.
+    try:
+        async for msg in music_ch.history(limit=30):
+            if msg.author.id != client.user.id:
+                continue
+            if not msg.embeds:
+                continue
+            first_embed = msg.embeds[0]
+            if (first_embed.title or "").strip() == "🎵 Now Playing":
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                break
+    except Exception:
+        pass
     # Delete previous panel
     if state.now_playing_msg:
         try:
