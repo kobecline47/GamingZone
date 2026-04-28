@@ -2740,6 +2740,36 @@ def _same_song_key(a: str, b: str) -> bool:
     return shorter >= 6 and (a in b or b in a)
 
 
+def _titles_too_similar(seed_title: str, candidate_title: str) -> bool:
+    """Heuristic guard against same-song variants with slightly different titles."""
+    a = _song_core_key(seed_title)
+    b = _song_core_key(candidate_title)
+    if not a or not b:
+        return False
+    if _same_song_key(a, b):
+        return True
+
+    ta = [t for t in a.split() if t]
+    tb = [t for t in b.split() if t]
+    if not ta or not tb:
+        return False
+
+    overlap = len(set(ta).intersection(tb))
+    min_len = max(1, min(len(ta), len(tb)))
+    overlap_ratio = overlap / min_len
+    # High token overlap usually means remaster/intro/live variants of the same song.
+    if overlap >= 2 and overlap_ratio >= 0.75:
+        return True
+
+    # Same leading phrase often indicates the same song with variant suffixes.
+    lead_a = " ".join(ta[:2])
+    lead_b = " ".join(tb[:2])
+    if len(lead_a) >= 6 and lead_a == lead_b:
+        return True
+
+    return False
+
+
 def _artist_key_from_title(title: str) -> str:
     """Best-effort artist extraction from common title formats."""
     raw = (title or "").lower()
@@ -3155,39 +3185,39 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         if qartist:
             blocked_artist_keys.add(qartist)
 
+    def _candidate_allowed(entry: dict) -> bool:
+        rid = _entry_identity(entry)
+        if rid and rid in blocked_ids:
+            return False
+
+        rtitle = entry.get('title', '')
+        rkey = _song_core_key(rtitle)
+        if rkey and any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
+            return False
+        if _titles_too_similar(current.title, rtitle):
+            return False
+
+        rartist = _entry_artist_key(entry)
+        if rartist and rartist in blocked_artist_keys:
+            return False
+
+        if rtitle.lower() == current.title.lower():
+            return False
+
+        return True
+
     # 1) Try pulling YouTube related videos via yt-dlp
     if exclude:
         related = await loop.run_in_executor(None, lambda: _fetch_related_yt_dlp(exclude, exclude))
         for r in related:
-            rid = _entry_identity(r)
-            if rid and rid in blocked_ids:
-                continue
-            rkey = _song_core_key(r.get('title', ''))
-            if rkey:
-                if any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
-                    continue
-            rartist = _entry_artist_key(r)
-            if rartist and rartist in blocked_artist_keys:
-                continue
-            if r.get('title', '').lower() == current.title.lower():
-                continue
-            return r
+            if _candidate_allowed(r):
+                return r
 
     # 2) Fallback: search for "<title> mix" and skip exact title match
     try:
-        results = await search_youtube(f"mix similar to {current.title}", max_results=5)
+        results = await search_youtube(f"mix similar to {current.title}", max_results=10)
         for r in results:
-            rid = _entry_identity(r)
-            if rid and rid in blocked_ids:
-                continue
-            rkey = _song_core_key(r.get('title', ''))
-            if rkey:
-                if any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
-                    continue
-            rartist = _entry_artist_key(r)
-            if rartist and rartist in blocked_artist_keys:
-                continue
-            if r.get('title', '').lower() != current.title.lower():
+            if _candidate_allowed(r):
                 return r
     except Exception as e:
         print(f"[Autoplay] Fallback search failed: {e}")
