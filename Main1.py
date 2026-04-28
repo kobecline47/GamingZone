@@ -3161,30 +3161,8 @@ def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> N
         state.recent_artist_keys.append(akey)
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
-    """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
-    try:
-        results = Search(query)
-    except Exception as e:
-        print(f'[Search Error] pytubefix failed: {e}. Trying yt-dlp...')
-        return _ytdlp_search(query, max_results)
-
-    entries = []
-    for yt in results.videos[:max_results]:
-        try:
-            stream = yt.streams.filter(only_audio=True).order_by('abr').last()
-            if stream:
-                entries.append({
-                    'title': yt.title,
-                    'url': stream.url,
-                    'webpage_url': yt.watch_url,
-                    'duration': yt.length or 0,
-                })
-        except Exception as e:
-            print(f'[Search] pytubefix item failed: {e}')
-            continue
-
-    if entries:
-        return entries
+    """Pytubefix is unreliable due to YouTube bot detection; go straight to yt-dlp."""
+    print(f'[Search] Skipping pytubefix (bot-detected), using yt-dlp for: {query!r}')
     return _ytdlp_search(query, max_results)
 
 
@@ -3372,14 +3350,7 @@ def _yt_suggestions(query: str) -> list[str]:
 
 async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results)),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        print(f'[Search] pytubefix timed out for query: {query!r}')
-        return []
+    return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
 
 
 def _looks_like_url(text: str) -> bool:
@@ -4211,18 +4182,29 @@ async def play(interaction: discord.Interaction, query: str):
             state.voice_client = vc
 
         try:
-            results = await asyncio.wait_for(search_youtube_resilient(query, max_results=1), timeout=40.0)
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                "Search timed out — YouTube may be rate-limiting. Try a direct YouTube URL or a more specific query."
+            results = await asyncio.wait_for(search_youtube_resilient(query, max_results=1), timeout=45.0)
+        except (asyncio.TimeoutError, Exception) as _search_err:
+            _is_timeout = isinstance(_search_err, asyncio.TimeoutError)
+            _msg = (
+                "Search timed out \u2014 YouTube may be rate-limiting. Try a direct YouTube URL."
+                if _is_timeout else
+                f"Search failed: {type(_search_err).__name__}: {_search_err}"
             )
+            print(f'[Play] search error: {_search_err}')
+            try:
+                await interaction.followup.send(_msg)
+            except Exception:
+                pass
             return
         if not results:
-            await interaction.followup.send(
-                "No playable results found right now. Try a more specific title (song + artist), "
-                "or paste a direct YouTube URL. If this keeps happening on Railway, add "
-                "YTDLP_COOKIES_PATH to a valid cookies.txt file and retry."
-            )
+            try:
+                await interaction.followup.send(
+                    "No playable results found right now. Try a more specific title (song + artist), "
+                    "or paste a direct YouTube URL. If this keeps happening on Railway, add "
+                    "YTDLP_COOKIES_PATH to a valid cookies.txt file and retry."
+                )
+            except Exception:
+                pass
             return
         r = results[0]
         entry = SongEntry(
@@ -4237,17 +4219,26 @@ async def play(interaction: discord.Interaction, query: str):
         if not vc.is_playing() and not vc.is_paused():
             _loop = asyncio.get_running_loop()
             _loop.run_in_executor(None, lambda: play_next(interaction.guild.id, _loop))
-            await interaction.followup.send(f"▶️ Starting **{entry.title}** — see the player below!", ephemeral=True)
+            try:
+                await interaction.followup.send(f"▶️ Starting **{entry.title}** — see the player below!", ephemeral=True)
+            except Exception:
+                pass
             await _post_music_panel(interaction.guild.id)
         else:
             embed = discord.Embed(title="Added to Queue", description=f"[{entry.title}]({entry.webpage_url})", color=0x3498DB)
             embed.add_field(name="Position", value=len(state.queue))
             embed.add_field(name="Duration", value=entry.format_duration())
-            await interaction.followup.send(embed=embed)
+            try:
+                await interaction.followup.send(embed=embed)
+            except Exception:
+                pass
     except Exception as e:
         tb = traceback.format_exc()
         print(f'[Play Error] {tb}')
-        await interaction.followup.send(f"Error: {type(e).__name__}: {e}")
+        try:
+            await interaction.followup.send(f"Error: {type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 @client.tree.command(name="skip", description="Skip the current song", guild=GUILD_ID)
 async def skip(interaction: discord.Interaction):
