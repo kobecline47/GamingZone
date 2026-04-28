@@ -3533,7 +3533,9 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             )
             return entry
 
-        print("[Autoplay] Ranked candidates were all repeat-like; no autoplay pick made.")
+        print(f"[Autoplay] Ranked {len(ranked)} candidates but all were repeat-like; no pick made.")
+    else:
+        print(f"[Autoplay] No ranked candidates available for: {current.title}")
     return None
 
 
@@ -3794,6 +3796,7 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
     seed_song = state.current or state.last_finished
     # If queue is empty and autoplay is on, fetch a genuinely related song
     if not state.queue and state.autoplay and seed_song:
+        print(f"[Autoplay] Attempting to queue related song for: {seed_song.title}")
         try:
             r = await fetch_related_song(state, seed_song)
             if r:
@@ -3804,9 +3807,15 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
                     duration=r.get('duration') or 0,
                     requester=seed_song.requester,
                 ))
-                print(f"[Autoplay] Queued related: {r['title']} (mode={state.autoplay_mode})")
+                print(f"[Autoplay] Successfully queued: {r['title']} (mode={state.autoplay_mode})")
+            else:
+                print(f"[Autoplay] fetch_related_song returned None for: {seed_song.title}")
         except Exception as e:
             print(f"[Autoplay] Failed to queue related song: {e}")
+    elif not state.queue and not state.autoplay and seed_song:
+        print(f"[Autoplay] Queue empty and autoplay is disabled; no next song queued.")
+    elif state.queue:
+        print(f"[Autoplay] Queue not empty ({len(state.queue)} songs), will play next from queue")
     _loop = asyncio.get_running_loop()
     await play_next(guild_id, _loop)
     await _post_music_panel(guild_id)
