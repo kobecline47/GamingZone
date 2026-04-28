@@ -4,6 +4,8 @@ Adds a /pokemon command group with: battle, accept, decline, attack, forfeit, mo
 """
 
 import random
+import json
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -51,6 +53,44 @@ DAILY_COINS     = 200    # coins from /pokemon daily
 WIN_COINS       = 150    # coins awarded for winning a battle
 LOSE_COINS      = 30     # coins consolation for losing
 STARTER_POKEMON = "Eevee"  # free pokemon every new player gets
+POKEMON_CHANNEL_NAME = "pokemon-battle"
+_MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+
+
+def _tracked_channel_id(guild_id: int, key: str) -> int | None:
+    try:
+        with open(_MANAGED_CHANNELS_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    mapping = data.get(str(guild_id), {}) if isinstance(data, dict) else {}
+    value = mapping.get(key)
+    return int(value) if value else None
+
+
+def _resolve_text_channel(guild: discord.Guild, key: str, *names: str) -> discord.TextChannel | None:
+    tracked_id = _tracked_channel_id(guild.id, key)
+    if tracked_id:
+        tracked = guild.get_channel(tracked_id)
+        if isinstance(tracked, discord.TextChannel):
+            return tracked
+    wanted = {name.casefold() for name in names if name}
+    for channel in guild.text_channels:
+        if channel.name.casefold() in wanted:
+            return channel
+    return None
+
+
+async def _require_pokemon_channel(interaction: discord.Interaction) -> bool:
+    channel = _resolve_text_channel(interaction.guild, "pokemon_channel", POKEMON_CHANNEL_NAME, "pokemon")
+    if interaction.channel_id == (channel.id if channel else -1):
+        return True
+    mention = channel.mention if channel else f"#{POKEMON_CHANNEL_NAME}"
+    await interaction.response.send_message(
+        f"Pokemon commands can only be used in {mention}.",
+        ephemeral=True,
+    )
+    return False
 
 
 def _wallet(user_id: int) -> int:
@@ -737,6 +777,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
     @pokemon_group.command(name="battle", description="Challenge another member to a Pokemon battle!")
     @app_commands.describe(opponent="The member you want to challenge")
     async def cmd_battle(interaction: discord.Interaction, opponent: discord.Member):
+        if not await _require_pokemon_channel(interaction):
+            return
         if opponent.bot:
             await interaction.response.send_message("❌ You can't challenge a bot!", ephemeral=True)
             return
@@ -766,6 +808,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
     # ── /pokemon accept ───────────────────────────────────────────────────────
     @pokemon_group.command(name="accept", description="Accept a Pokemon battle challenge directed at you")
     async def cmd_accept(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         user_id    = interaction.user.id
         channel_id = interaction.channel_id
 
@@ -828,6 +872,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
     # ── /pokemon decline ──────────────────────────────────────────────────────
     @pokemon_group.command(name="decline", description="Decline a Pokemon battle challenge")
     async def cmd_decline(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         user_id    = interaction.user.id
         channel_id = interaction.channel_id
 
@@ -851,6 +897,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
     @pokemon_group.command(name="attack", description="Use a move during your Pokemon battle turn")
     @app_commands.describe(move="The move to use")
     async def cmd_attack(interaction: discord.Interaction, move: str):
+        if not await _require_pokemon_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id not in BATTLES:
             await interaction.response.send_message("❌ No active battle in this channel!", ephemeral=True)
@@ -1021,6 +1069,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
     # ── /pokemon forfeit ──────────────────────────────────────────────────────
     @pokemon_group.command(name="forfeit", description="Forfeit your current Pokemon battle")
     async def cmd_forfeit(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id not in BATTLES:
             await interaction.response.send_message("❌ No active battle in this channel!", ephemeral=True)
@@ -1045,6 +1095,8 @@ def setup_pokemon(bot: commands.Bot) -> None:
     # ── /pokemon moves ────────────────────────────────────────────────────────
     @pokemon_group.command(name="moves", description="View move details for the current battle")
     async def cmd_moves(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         channel_id = interaction.channel_id
         if channel_id not in BATTLES:
             await interaction.response.send_message("❌ No active battle in this channel!", ephemeral=True)
@@ -1193,6 +1245,9 @@ def setup_pokemon(bot: commands.Bot) -> None:
         import time
         global RAID_ID_COUNTER
 
+        if not await _require_pokemon_channel(interaction):
+            return
+
         _ensure_player(interaction.user.id)
         channel_id = interaction.channel_id
 
@@ -1245,6 +1300,8 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
     # ── /pokewallet ───────────────────────────────────────────────────────────
     @bot.tree.command(name="pokewallet", description="Check your PokeCoin balance and active Pokemon")
     async def cmd_pokewallet(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         balance = _wallet(uid)
@@ -1267,6 +1324,8 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
     # ── /pokdaily ─────────────────────────────────────────────────────────────
     @bot.tree.command(name="pokdaily", description="Claim your daily PokeCoin reward")
     async def cmd_pokdaily(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         now  = _time.time()
@@ -1293,6 +1352,8 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
     # ── /pokeshop ─────────────────────────────────────────────────────────────
     @bot.tree.command(name="pokeshop", description="Browse all Pokemon available for purchase")
     async def cmd_pokeshop(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         owned = OWNED_POKEMON.get(uid, [])
@@ -1323,6 +1384,8 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
     @bot.tree.command(name="pokebuy", description="Buy a Pokemon from the shop")
     @app_commands.describe(pokemon="The Pokemon you want to buy")
     async def cmd_pokebuy(interaction: discord.Interaction, pokemon: str):
+        if not await _require_pokemon_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         pdata = POKEMON_BY_NAME.get(pokemon.lower())
@@ -1370,6 +1433,8 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
     @bot.tree.command(name="pokepick", description="Switch your active Pokemon to one you own")
     @app_commands.describe(pokemon="The Pokemon to set as active")
     async def cmd_pokepick(interaction: discord.Interaction, pokemon: str):
+        if not await _require_pokemon_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         pdata = POKEMON_BY_NAME.get(pokemon.lower())
@@ -1405,6 +1470,8 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
     # ── /pokedex ──────────────────────────────────────────────────────────────
     @bot.tree.command(name="pokedex", description="View all Pokemon you own")
     async def cmd_pokedex(interaction: discord.Interaction):
+        if not await _require_pokemon_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         owned  = OWNED_POKEMON.get(uid, [])

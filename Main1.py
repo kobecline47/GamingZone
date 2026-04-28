@@ -70,6 +70,31 @@ class Client(commands.Bot):
             except Exception as e:
                 print(f"[BotLog] Failed runtime event send in {guild.name} ({guild.id}): {e}")
 
+    async def _find_recent_delete_actor(
+        self,
+        guild: discord.Guild,
+        *,
+        channel_id: int,
+        target_id: int | None = None,
+    ) -> tuple[discord.abc.User | discord.Member | None, int | None]:
+        try:
+            now = discord.utils.utcnow()
+            async for entry in guild.audit_logs(limit=8, action=discord.AuditLogAction.message_delete):
+                age_seconds = (now - entry.created_at).total_seconds()
+                if age_seconds > 15:
+                    break
+                extra = getattr(entry, "extra", None)
+                extra_channel = getattr(extra, "channel", None)
+                if extra_channel and getattr(extra_channel, "id", None) != channel_id:
+                    continue
+                target = getattr(entry, "target", None)
+                if target_id is not None and getattr(target, "id", None) not in {target_id, None}:
+                    continue
+                return entry.user, getattr(extra, "count", None)
+        except Exception as e:
+            print(f"[Audit] Could not resolve delete actor in {guild.name} ({guild.id}): {e}")
+        return None, None
+
     async def _announce_recovered_if_needed(self, source: str) -> None:
         if not self._disconnect_started_at:
             return
@@ -265,10 +290,20 @@ class Client(commands.Bot):
             return
         log_ch = _resolve_mod_log_channel(message.guild)
         if log_ch:
+            actor, deleted_count = await self._find_recent_delete_actor(
+                message.guild,
+                channel_id=message.channel.id,
+                target_id=message.author.id,
+            )
             embed = discord.Embed(title="🗑️ Message Deleted", color=0xE74C3C)
             embed.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
             embed.add_field(name="Channel", value=message.channel.mention, inline=False)
             embed.add_field(name="Content", value=message.content[:1024] or "*empty*", inline=False)
+            if actor:
+                actor_value = f"{actor.mention} (`{actor.id}`)"
+                if deleted_count:
+                    actor_value += f"\nAudit count: `{deleted_count}`"
+                embed.add_field(name="Deleted By", value=actor_value, inline=False)
             embed.timestamp = discord.utils.utcnow()
             await log_ch.send(embed=embed)
 
@@ -288,6 +323,18 @@ class Client(commands.Bot):
         if cached is not None and cached.author and cached.author.bot:
             return
 
+        if cached is not None and cached.author is not None:
+            actor, deleted_count = await self._find_recent_delete_actor(
+                guild,
+                channel_id=payload.channel_id,
+                target_id=cached.author.id,
+            )
+        else:
+            actor, deleted_count = await self._find_recent_delete_actor(
+                guild,
+                channel_id=payload.channel_id,
+            )
+
         embed = discord.Embed(title="🗑️ Message Deleted", color=0xE74C3C)
         embed.add_field(name="Channel", value=channel_mention, inline=False)
         embed.add_field(name="Message ID", value=f"`{payload.message_id}`", inline=True)
@@ -296,6 +343,11 @@ class Client(commands.Bot):
             embed.add_field(name="Content", value=cached.content[:1024] or "*empty*", inline=False)
         else:
             embed.add_field(name="Content", value="*Unavailable (message not cached)*", inline=False)
+        if actor:
+            actor_value = f"{actor.mention} (`{actor.id}`)"
+            if deleted_count:
+                actor_value += f"\nAudit count: `{deleted_count}`"
+            embed.add_field(name="Deleted By", value=actor_value, inline=False)
         embed.timestamp = discord.utils.utcnow()
         await log_ch.send(embed=embed)
 
@@ -313,11 +365,20 @@ class Client(commands.Bot):
         ids = sorted(payload.message_ids)
         sample = ", ".join(f"`{mid}`" for mid in ids[:20])
         extra = "" if len(ids) <= 20 else f"\n...and {len(ids) - 20} more"
+        actor, deleted_count = await self._find_recent_delete_actor(
+            guild,
+            channel_id=payload.channel_id,
+        )
 
         embed = discord.Embed(title="🧹 Bulk Messages Deleted", color=0xE67E22)
         embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=False)
         embed.add_field(name="Count", value=str(len(ids)), inline=True)
         embed.add_field(name="Message IDs", value=(sample + extra) if sample else "*Unavailable*", inline=False)
+        if actor:
+            actor_value = f"{actor.mention} (`{actor.id}`)"
+            if deleted_count:
+                actor_value += f"\nAudit count: `{deleted_count}`"
+            embed.add_field(name="Deleted By", value=actor_value, inline=False)
         embed.timestamp = discord.utils.utcnow()
         await log_ch.send(embed=embed)
 

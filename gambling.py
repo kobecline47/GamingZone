@@ -20,6 +20,8 @@ import asyncio
 import time
 import io
 import math
+import json
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -34,6 +36,44 @@ except Exception:
 from pokemon_game import _wallet, _ensure_player, WALLETS
 
 BOT_LOG_NAME = "🤖┃bot-logs"
+CASINO_CHANNEL_NAME = "casino-floor"
+_MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+
+
+def _tracked_channel_id(guild_id: int, key: str) -> int | None:
+    try:
+        with open(_MANAGED_CHANNELS_SAVE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    mapping = data.get(str(guild_id), {}) if isinstance(data, dict) else {}
+    value = mapping.get(key)
+    return int(value) if value else None
+
+
+def _resolve_text_channel(guild: discord.Guild, key: str, *names: str) -> discord.TextChannel | None:
+    tracked_id = _tracked_channel_id(guild.id, key)
+    if tracked_id:
+        tracked = guild.get_channel(tracked_id)
+        if isinstance(tracked, discord.TextChannel):
+            return tracked
+    wanted = {name.casefold() for name in names if name}
+    for channel in guild.text_channels:
+        if channel.name.casefold() in wanted:
+            return channel
+    return None
+
+
+async def _require_casino_channel(interaction: discord.Interaction) -> bool:
+    channel = _resolve_text_channel(interaction.guild, "casino_channel", CASINO_CHANNEL_NAME, "🎰-casino-floor", "casino")
+    if interaction.channel_id == (channel.id if channel else -1):
+        return True
+    mention = channel.mention if channel else f"#{CASINO_CHANNEL_NAME}"
+    await interaction.response.send_message(
+        f"Casino commands can only be used in {mention}.",
+        ephemeral=True,
+    )
+    return False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MIN_BET      = 10
@@ -1903,6 +1943,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         description="🎰 View all casino games, rules, and your stats",
     )
     async def cmd_casinomenu(interaction: discord.Interaction):
+        if not await _require_casino_channel(interaction):
+            return
         _ensure_player(interaction.user.id)
         await interaction.response.send_message(
             embed=_casino_menu_embed(interaction.user.id)
@@ -1913,6 +1955,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         name="setupcasino",
         description="🎰 Create a dedicated casino channel with pinned games menu (Admin only)",
     )
+    @app_commands.default_permissions(administrator=True)
     async def cmd_setupcasino(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
@@ -1985,6 +2028,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         description="📅 Claim your free daily PokeCoins (24 h cooldown)",
     )
     async def cmd_daily(interaction: discord.Interaction):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         now  = time.time()
@@ -2016,6 +2061,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         description="💼 Do a random game-themed job to earn PokeCoins (1h cooldown)",
     )
     async def cmd_work(interaction: discord.Interaction):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         _ensure_player(uid)
         now = time.time()
@@ -2102,6 +2149,8 @@ def setup_gambling(bot: commands.Bot) -> None:
     @bot.tree.command(name="slots", description="🎰 Spin the slot machine")
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_slots(interaction: discord.Interaction, bet: int):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2200,6 +2249,8 @@ def setup_gambling(bot: commands.Bot) -> None:
     @bot.tree.command(name="blackjack", description="🃏 Play Blackjack against the dealer")
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_blackjack(interaction: discord.Interaction, bet: int):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2247,6 +2298,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         app_commands.Choice(name="Tails 🦅", value="tails"),
     ])
     async def cmd_coinflip(interaction: discord.Interaction, bet: int, choice: str):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2285,6 +2338,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         choice="red / black / green  OR  a number 0–36",
     )
     async def cmd_roulette(interaction: discord.Interaction, bet: int, choice: str):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2363,6 +2418,8 @@ def setup_gambling(bot: commands.Bot) -> None:
     @bot.tree.command(name="dice", description="🎲 Roll dice against the bot — highest wins!")
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_dice(interaction: discord.Interaction, bet: int):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2394,6 +2451,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         app_commands.Choice(name="Lower ⬇️",  value="lower"),
     ])
     async def cmd_highlow(interaction: discord.Interaction, bet: int, guess: str):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2452,6 +2511,8 @@ def setup_gambling(bot: commands.Bot) -> None:
     )
     @app_commands.describe(bet="PokeCoins to bet")
     async def cmd_plinko(interaction: discord.Interaction, bet: int):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
@@ -2542,6 +2603,8 @@ def setup_gambling(bot: commands.Bot) -> None:
         app_commands.Choice(name="🚀 Federal Reserve (Extreme risk · 15× reward)",   value="fed"),
     ])
     async def cmd_heist(interaction: discord.Interaction, bet: int, target: str):
+        if not await _require_casino_channel(interaction):
+            return
         uid = interaction.user.id
         err = _check_bet(uid, bet)
         if err:
