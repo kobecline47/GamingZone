@@ -2770,6 +2770,17 @@ def _titles_too_similar(seed_title: str, candidate_title: str) -> bool:
     return False
 
 
+def _song_signature_tokens(title: str) -> list[str]:
+    """Core tokens used to prevent same-song remixes/covers from slipping in."""
+    core = _song_core_key(title)
+    if not core:
+        return []
+    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with"}
+    tokens = [t for t in core.split() if len(t) >= 3 and t not in stop]
+    # keep first few meaningful tokens as the song signature
+    return tokens[:4]
+
+
 def _artist_key_from_title(title: str) -> str:
     """Best-effort artist extraction from common title formats."""
     raw = (title or "").lower()
@@ -3172,6 +3183,7 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
     if current_title_key:
         blocked_title_keys.add(current_title_key)
     current_artist_key = _song_artist_key(current)
+    seed_tokens = _song_signature_tokens(current.title)
     if current_artist_key:
         blocked_artist_keys.add(current_artist_key)
     for q_item in state.queue:
@@ -3197,6 +3209,15 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         if _titles_too_similar(current.title, rtitle):
             return False
 
+        # Hard guard: if candidate still contains the seed song signature tokens,
+        # treat it as the same song family (remix/cover/edit) and skip.
+        if seed_tokens:
+            rtokens = set(t for t in _song_core_key(rtitle).split() if t)
+            if len(seed_tokens) >= 2 and all(t in rtokens for t in seed_tokens[:2]):
+                return False
+            if len(seed_tokens) >= 3 and sum(1 for t in seed_tokens[:3] if t in rtokens) >= 2:
+                return False
+
         rartist = _entry_artist_key(entry)
         if rartist and rartist in blocked_artist_keys:
             return False
@@ -3219,6 +3240,20 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         for r in results:
             if _candidate_allowed(r):
                 return r
+
+        # 3) Broader diversification search when related/mix results are still too similar.
+        broad_queries = [
+            f"songs like {current.title}",
+            f"music recommendations similar to {current.title}",
+        ]
+        if current_artist_key:
+            broad_queries.append(f"artists similar to {current_artist_key} best songs")
+
+        for q in broad_queries:
+            picks = await search_youtube(q, max_results=12)
+            for r in picks:
+                if _candidate_allowed(r):
+                    return r
     except Exception as e:
         print(f"[Autoplay] Fallback search failed: {e}")
 
