@@ -2734,6 +2734,8 @@ class GuildMusicState:
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
         self.autoplay: bool = False
+        self.autoplay_mode: str = "gzvibe"
+        self.last_autoplay_debug: list[dict] = []
 
 music_states: dict[int, GuildMusicState] = {}
 
@@ -2863,6 +2865,118 @@ def _song_signature_tokens(title: str) -> list[str]:
     tokens = [t for t in core.split() if len(t) >= 3 and t not in stop]
     # keep first few meaningful tokens as the song signature
     return tokens[:4]
+
+
+def _autoplay_title_tokens(title: str) -> set[str]:
+    core = _song_core_key(title)
+    if not core:
+        return set()
+    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with"}
+    return {t for t in core.split() if len(t) >= 3 and t not in stop}
+
+
+def _autoplay_noise_penalty(title: str) -> int:
+    lowered = (title or "").lower()
+    penalty = 0
+    noisy_terms = {
+        "slowed": -5,
+        "reverb": -4,
+        "sped up": -5,
+        "nightcore": -6,
+        "8d": -6,
+        "bass boosted": -4,
+        "full album": -8,
+        "playlist": -8,
+        "karaoke": -7,
+        "reaction": -7,
+        "compilation": -6,
+    }
+    for term, points in noisy_terms.items():
+        if term in lowered:
+            penalty += points
+    return penalty
+
+
+def _autoplay_candidate_score(
+    entry: dict,
+    *,
+    current: "SongEntry",
+    recent_title_keys: collections.deque[str],
+    recent_artist_keys: collections.deque[str],
+    queue_artist_keys: set[str],
+    current_artist_key: str,
+    autoplay_mode: str,
+    source_bias: int,
+) -> int:
+    score = source_bias
+    title = entry.get("title", "")
+    candidate_tokens = _autoplay_title_tokens(title)
+    current_tokens = set(_song_signature_tokens(current.title))
+    maki_mode = autoplay_mode == "gzvibe"
+
+    if current_tokens and candidate_tokens:
+        token_matches = len(candidate_tokens.intersection(current_tokens))
+        token_weight = 5 if maki_mode else 4
+        score += min(15 if maki_mode else 12, token_matches * token_weight)
+        if maki_mode and token_matches == 0:
+            score -= 6
+
+    for recent_key in list(recent_title_keys)[-3:]:
+        recent_tokens = {token for token in recent_key.split() if len(token) >= 3}
+        if recent_tokens:
+            overlap = len(candidate_tokens.intersection(recent_tokens))
+            score += min(4 if maki_mode else 3, overlap)
+
+    candidate_artist = _entry_artist_key(entry)
+    if candidate_artist:
+        if current_artist_key and candidate_artist == current_artist_key:
+            score += 15 if maki_mode else 9
+        elif candidate_artist in queue_artist_keys:
+            score += 8 if maki_mode else 4
+        repeat_count = sum(1 for artist in recent_artist_keys if artist == candidate_artist)
+        if repeat_count == 1:
+            score += 2
+        elif repeat_count >= 2:
+            score -= min(6, repeat_count * 2)
+        if maki_mode and candidate_artist not in queue_artist_keys and candidate_artist != current_artist_key:
+            score -= 4
+    else:
+        score -= 4 if maki_mode else 2
+
+    candidate_duration = int(entry.get("duration") or 0)
+    current_duration = int(current.duration or 0)
+    if candidate_duration and current_duration:
+        longer = max(candidate_duration, current_duration)
+        shorter = max(1, min(candidate_duration, current_duration))
+        ratio = longer / shorter
+        if ratio <= 1.35:
+            score += 4
+        elif ratio <= 2.0:
+            score += 2
+        elif ratio >= 4.0:
+            score -= 6 if maki_mode else 4
+
+    score += _autoplay_noise_penalty(title)
+    if maki_mode and source_bias < 20:
+        score -= 3
+    return score
+
+
+def _format_autoplay_mode(mode: str) -> str:
+    return "GzVibe" if mode == "gzvibe" else "Balanced"
+
+
+def _summarize_autoplay_debug(entry: dict) -> dict:
+    duration = int(entry.get("duration") or 0)
+    m, s = divmod(duration, 60)
+    h, m = divmod(m, 60)
+    return {
+        "title": entry.get("title", "Unknown title"),
+        "source": entry.get("source", "unknown"),
+        "score": entry.get("score", 0),
+        "artist": entry.get("artist", "Unknown"),
+        "duration": f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}",
+    }
 
 
 def _artist_key_from_title(title: str) -> str:
@@ -3244,7 +3358,7 @@ def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
                 'webpage_url': wurl,
                 'duration': v.get('duration') or 0,
             })
-            if len(results) >= 5:
+            if len(results) >= 12:
                 break
         return results
     except Exception as e:
@@ -3253,13 +3367,33 @@ def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
 
 
 async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> dict | None:
-    """Fetch a genuine related song for autoplay. Tries yt-dlp related videos first,
-    then falls back to a 'mix similar to <title>' text search."""
+    """Fetch a genuine related song for autoplay using the current ranking mode."""
+    ranked = await _rank_autoplay_candidates(state, current)
+    state.last_autoplay_debug = [
+        _summarize_autoplay_debug({
+            **entry,
+            "source": source_name,
+            "score": score,
+            "artist": _entry_artist_key(entry) or "Unknown",
+        })
+        for score, entry, source_name in ranked[:5]
+    ]
+    if ranked:
+        best_score, best_entry, best_source = ranked[0]
+        print(
+            f"[Autoplay] Picked {best_source} candidate "
+            f"({best_score}, mode={state.autoplay_mode}): {best_entry.get('title', 'Unknown')}"
+        )
+        return best_entry
+    return None
+
+
+async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntry") -> list[tuple[int, dict, str]]:
+    """Build a ranked list of autoplay candidates so runtime and debug share the same logic."""
     loop = asyncio.get_running_loop()
     exclude = current.webpage_url or current.url
     blocked_ids: set[str] = set(state.recent_track_ids)
     blocked_title_keys: set[str] = set(state.recent_title_keys)
-    blocked_artist_keys: set[str] = set(state.recent_artist_keys)
     current_id = _song_identity(current)
     if current_id:
         blocked_ids.add(current_id)
@@ -3268,8 +3402,7 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         blocked_title_keys.add(current_title_key)
     current_artist_key = _song_artist_key(current)
     seed_tokens = _song_signature_tokens(current.title)
-    if current_artist_key:
-        blocked_artist_keys.add(current_artist_key)
+    queue_artist_keys: set[str] = set()
     for q_item in state.queue:
         qid = _song_identity(q_item)
         if qid:
@@ -3279,7 +3412,7 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             blocked_title_keys.add(qkey)
         qartist = _song_artist_key(q_item)
         if qartist:
-            blocked_artist_keys.add(qartist)
+            queue_artist_keys.add(qartist)
 
     def _candidate_allowed(entry: dict) -> bool:
         rid = _entry_identity(entry)
@@ -3302,28 +3435,59 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             if len(seed_tokens) >= 3 and sum(1 for t in seed_tokens[:3] if t in rtokens) >= 2:
                 return False
 
-        rartist = _entry_artist_key(entry)
-        if rartist and rartist in blocked_artist_keys:
-            return False
-
         if rtitle.lower() == current.title.lower():
             return False
 
         return True
 
+    seen_candidates: set[str] = set()
+    scored_candidates: list[tuple[int, dict, str]] = []
+
+    def _consider_candidates(entries: list[dict], *, source_bias: int, source_name: str) -> None:
+        for entry in entries:
+            if not _candidate_allowed(entry):
+                continue
+            candidate_key = _entry_identity(entry) or entry.get("webpage_url") or entry.get("title", "").lower()
+            if not candidate_key or candidate_key in seen_candidates:
+                continue
+            seen_candidates.add(candidate_key)
+            score = _autoplay_candidate_score(
+                entry,
+                current=current,
+                recent_title_keys=state.recent_title_keys,
+                recent_artist_keys=state.recent_artist_keys,
+                queue_artist_keys=queue_artist_keys,
+                current_artist_key=current_artist_key,
+                autoplay_mode=state.autoplay_mode,
+                source_bias=source_bias,
+            )
+            scored_candidates.append((score, entry, source_name))
+
     # 1) Try pulling YouTube related videos via yt-dlp
     if exclude:
         related = await loop.run_in_executor(None, lambda: _fetch_related_yt_dlp(exclude, exclude))
-        for r in related:
-            if _candidate_allowed(r):
-                return r
+        _consider_candidates(
+            related,
+            source_bias=38 if state.autoplay_mode == "gzvibe" else 30,
+            source_name="related",
+        )
 
-    # 2) Fallback: search for "<title> mix" and skip exact title match
+    # 2) Fallback search pool that still prefers current-song adjacency.
     try:
-        results = await search_youtube(f"mix similar to {current.title}", max_results=10)
-        for r in results:
-            if _candidate_allowed(r):
-                return r
+        radio_queries = [
+            f"{current.title} radio",
+            f"mix similar to {current.title}",
+        ]
+        if current_artist_key:
+            radio_queries.append(f"songs like {current_artist_key} {current.title}")
+
+        for query in radio_queries:
+            results = await search_youtube(query, max_results=12)
+            _consider_candidates(
+                results,
+                source_bias=18 if state.autoplay_mode == "gzvibe" else 20,
+                source_name=query,
+            )
 
         # 3) Broader diversification search when related/mix results are still too similar.
         broad_queries = [
@@ -3335,13 +3499,18 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
 
         for q in broad_queries:
             picks = await search_youtube(q, max_results=12)
-            for r in picks:
-                if _candidate_allowed(r):
-                    return r
+            _consider_candidates(
+                picks,
+                source_bias=6 if state.autoplay_mode == "gzvibe" else 10,
+                source_name=q,
+            )
     except Exception as e:
         print(f"[Autoplay] Fallback search failed: {e}")
 
-    return None
+    if scored_candidates:
+        return sorted(scored_candidates, key=lambda item: item[0], reverse=True)
+
+    return []
 
 
 def _ffmpeg_candidate_paths() -> list[str]:
@@ -3475,7 +3644,7 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
                     duration=r.get('duration') or 0,
                     requester=seed_song.requester,
                 ))
-                print(f"[Autoplay] Queued related: {r['title']}")
+                print(f"[Autoplay] Queued related: {r['title']} (mode={state.autoplay_mode})")
         except Exception as e:
             print(f"[Autoplay] Failed to queue related song: {e}")
     play_next(guild_id, loop)
@@ -3587,7 +3756,10 @@ class MusicControlView(discord.ui.View):
         button.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
         button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
-        autoplay_note = "I'll queue related songs automatically!" if state.autoplay else ""
+        autoplay_note = (
+            f"I'll queue related songs automatically in **{_format_autoplay_mode(state.autoplay_mode)}** mode!"
+            if state.autoplay else ""
+        )
         await interaction.followup.send(
             f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {autoplay_note}",
             ephemeral=True
@@ -3665,7 +3837,7 @@ async def _post_music_panel(guild_id: int):
     if q:
         footer_parts.append(f"{q} song{'s' if q != 1 else ''} in queue")
     if state.autoplay:
-        footer_parts.append("🔁 Autoplay ON")
+        footer_parts.append(f"🔁 Autoplay ON • {_format_autoplay_mode(state.autoplay_mode)}")
     if footer_parts:
         embed.set_footer(text="  •  ".join(footer_parts))
     view = MusicControlView(guild_id)
@@ -3865,6 +4037,67 @@ async def volume(interaction: discord.Interaction, level: int):
     state = get_music_state(interaction.guild.id)
     state.volume = level / 100
     await interaction.response.send_message(f"Volume set to {level}% (applies immediately to next track).")
+
+
+@client.tree.command(name="autoplaymode", description="Set how strict autoplay should be", guild=GUILD_ID)
+@discord.app_commands.choices(mode=[
+    discord.app_commands.Choice(name="GzVibe", value="gzvibe"),
+    discord.app_commands.Choice(name="Balanced", value="balanced"),
+])
+async def autoplaymode(interaction: discord.Interaction, mode: str):
+    if not await _require_music_channel(interaction):
+        return
+    state = get_music_state(interaction.guild.id)
+    state.autoplay_mode = mode if mode in {"gzvibe", "balanced"} else "gzvibe"
+    await interaction.response.send_message(
+        f"Autoplay mode set to **{_format_autoplay_mode(state.autoplay_mode)}**.",
+        ephemeral=True,
+    )
+    await _post_music_panel(interaction.guild.id)
+
+
+@client.tree.command(name="autoplaydebug", description="Preview the top autoplay candidates", guild=GUILD_ID)
+async def autoplaydebug(interaction: discord.Interaction):
+    if not await _require_music_channel(interaction):
+        return
+    state = get_music_state(interaction.guild.id)
+    seed_song = state.current or state.last_finished
+    if not seed_song:
+        await interaction.response.send_message("Play a song first so autoplay has a seed track.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    ranked = await _rank_autoplay_candidates(state, seed_song)
+    state.last_autoplay_debug = [
+        _summarize_autoplay_debug({
+            **entry,
+            "source": source_name,
+            "score": score,
+            "artist": _entry_artist_key(entry) or "Unknown",
+        })
+        for score, entry, source_name in ranked[:5]
+    ]
+
+    if not state.last_autoplay_debug:
+        await interaction.followup.send("I couldn't find any autoplay candidates right now.", ephemeral=True)
+        return
+
+    lines = []
+    for idx, item in enumerate(state.last_autoplay_debug, 1):
+        lines.append(
+            f"`{idx}.` **{item['score']}** • {item['title']}\n"
+            f"Artist: {item['artist']} • Duration: {item['duration']} • Source: {item['source']}"
+        )
+
+    embed = discord.Embed(
+        title="Autoplay Debug",
+        description="\n\n".join(lines),
+        color=0x1DB954,
+    )
+    embed.add_field(name="Seed Song", value=f"[{seed_song.title}]({seed_song.webpage_url})", inline=False)
+    embed.add_field(name="Mode", value=_format_autoplay_mode(state.autoplay_mode), inline=True)
+    embed.add_field(name="Autoplay", value="ON" if state.autoplay else "OFF", inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @client.tree.command(name="announce", description="Send an announcement to a specific channel", guild=GUILD_ID)
 @app_commands.default_permissions(manage_messages=True)
