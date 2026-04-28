@@ -3064,16 +3064,19 @@ def _autoplay_candidate_score(
 
     if current_tokens and candidate_tokens:
         token_matches = len(candidate_tokens.intersection(current_tokens))
-        token_weight = 5 if maki_mode else 4
-        score += min(15 if maki_mode else 12, token_matches * token_weight)
-        if maki_mode and token_matches == 0:
-            score -= 6
+        # Small overlap can be useful for vibe continuity, but heavy overlap
+        # usually means the same song family instead of a genuinely new track.
+        if token_matches == 1:
+            score += 2 if maki_mode else 1
+        elif token_matches >= 2:
+            score -= min(10 if maki_mode else 8, token_matches * (4 if maki_mode else 3))
 
     for recent_key in list(recent_title_keys)[-3:]:
         recent_tokens = {token for token in recent_key.split() if len(token) >= 3}
         if recent_tokens:
             overlap = len(candidate_tokens.intersection(recent_tokens))
-            score += min(4 if maki_mode else 3, overlap)
+            if overlap:
+                score -= min(6 if maki_mode else 4, overlap * (2 if maki_mode else 1))
 
     candidate_artist = _entry_artist_key(entry)
     if candidate_artist:
