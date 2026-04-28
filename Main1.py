@@ -4031,8 +4031,9 @@ async def _post_music_panel(guild_id: int):
     # On restart the in-memory message reference is lost, so clean up recent
     # stale bot panel variants before posting a new one.
     try:
-        stale_titles = {"🎵 Now Playing", "Now Playing", "🎵 GzVibe Now Playing"}
-        async for msg in music_ch.history(limit=200):
+        stale_titles = {"🎵 Now Playing", "Now Playing", "🎵 GzVibe Now Playing", "✦ GzVibe Control Deck ✦"}
+        deleted_panels = 0
+        async for msg in music_ch.history(limit=50):
             if msg.author.id != client.user.id:
                 continue
             if not msg.embeds:
@@ -4042,6 +4043,9 @@ async def _post_music_panel(guild_id: int):
             if title in stale_titles:
                 try:
                     await msg.delete()
+                    deleted_panels += 1
+                    if deleted_panels >= 3:
+                        break
                 except Exception:
                     pass
     except Exception:
@@ -4072,6 +4076,7 @@ async def _post_music_panel(guild_id: int):
     embed.add_field(name="🎧 Requested By", value=state.current.requester.mention, inline=True)
     embed.add_field(name="🔊 Volume", value=f"`{int(state.volume * 100)}%`", inline=True)
     embed.add_field(name="📦 Queue Depth", value=f"`{len(state.queue)}` tracks waiting", inline=False)
+    embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
     q = len(state.queue)
     footer_parts = []
     if q:
@@ -4290,6 +4295,7 @@ async def nowplaying(interaction: discord.Interaction):
         value=f"`{'ON' if state.autoplay else 'OFF'}` in `{_format_autoplay_mode(state.autoplay_mode)}`",
         inline=False,
     )
+    embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
     embed.set_footer(text="GzVibe Live View • Neon Style")
     await interaction.response.send_message(embed=embed)
     await _post_music_panel(interaction.guild.id)
@@ -5416,6 +5422,7 @@ async def serverhealth(interaction: discord.Interaction):
     )
     embed.add_field(name="🔁 Background Tasks", value="\n".join(task_lines), inline=False)
     embed.add_field(name="📦 Data", value=f"Managed channel IDs: **{len(MANAGED_CHANNEL_IDS.get(str(guild.id), {}))}**\nPosted free-game IDs: **{len(POSTED_FREE_GAMES)}**", inline=False)
+    embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
     embed.set_footer(text="Gz Dyno Card • High Visual Telemetry")
     embed.timestamp = now
     await interaction.response.send_message(embed=embed, ephemeral=True)
