@@ -3725,66 +3725,69 @@ def _extract_stream_url(song: SongEntry) -> str | None:
 
     return song.url or None
 
-def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
+async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
-    if state.queue and state.voice_client and state.voice_client.is_connected():
-        state.current = state.queue.popleft()
-        try:
-            stream_url = _extract_stream_url(state.current)
-            if not stream_url:
-                raise RuntimeError("No playable stream URL could be resolved")
-
-            audio = None
-            last_error: Exception | None = None
-            for ffmpeg_exe in _ffmpeg_candidate_paths():
-                if ffmpeg_exe != "ffmpeg" and not os.path.exists(ffmpeg_exe):
-                    continue
-                try:
-                    audio = discord.FFmpegPCMAudio(
-                        stream_url,
-                        executable=ffmpeg_exe,
-                        before_options=FFMPEG_OPTS['before_options'],
-                        options=FFMPEG_OPTS['options'],
-                    )
-                    print(f"[Music] Using FFmpeg candidate: {ffmpeg_exe}")
-                    break
-                except Exception as e:
-                    last_error = e
-                    print(f"[Music] FFmpeg candidate failed ({ffmpeg_exe}): {e}")
-
-            if audio is None:
-                raise RuntimeError(f"No working ffmpeg executable found. Last error: {last_error}")
-
-            volume_factor = max(0.1, min(2.0, state.volume))
-            source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
-
-            def after_play(error):
-                if error:
-                    print(f'[Music] Player error on "{state.current.title}": {error}')
-                finished_song = state.current
-                _remember_finished_song(state, finished_song)
-                state.current = None
-                _cleanup_song_file(finished_song)
-                asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
-
-            print(f'[Music] Now playing: {state.current.title}')
-            state.voice_client.play(source, after=after_play)
-        except Exception as e:
-            print(
-                f"[Music] Failed to create audio source for {state.current.title}: {e} | "
-                f"FFMPEG_EXE={FFMPEG_EXE} | "
-                f"Candidates={_ffmpeg_candidate_paths()} | "
-                f"PATH={os.getenv('PATH', '')}"
-            )
-            finished_song = state.current
-            _remember_finished_song(state, finished_song)
-            _cleanup_song_file(finished_song)
-            state.current = None
-            asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
-    else:
+    if not (state.queue and state.voice_client and state.voice_client.is_connected()):
         _remember_finished_song(state, state.current)
         _cleanup_song_file(state.current)
         state.current = None
+        return
+
+    state.current = state.queue.popleft()
+    song = state.current
+    try:
+        # Resolve stream URL in a thread so we never block the event loop
+        stream_url = await loop.run_in_executor(None, lambda: _extract_stream_url(song))
+        if not stream_url:
+            raise RuntimeError("No playable stream URL could be resolved")
+
+        audio = None
+        last_error: Exception | None = None
+        for ffmpeg_exe in _ffmpeg_candidate_paths():
+            if ffmpeg_exe != "ffmpeg" and not os.path.exists(ffmpeg_exe):
+                continue
+            try:
+                audio = discord.FFmpegPCMAudio(
+                    stream_url,
+                    executable=ffmpeg_exe,
+                    before_options=FFMPEG_OPTS['before_options'],
+                    options=FFMPEG_OPTS['options'],
+                )
+                print(f"[Music] Using FFmpeg candidate: {ffmpeg_exe}")
+                break
+            except Exception as e:
+                last_error = e
+                print(f"[Music] FFmpeg candidate failed ({ffmpeg_exe}): {e}")
+
+        if audio is None:
+            raise RuntimeError(f"No working ffmpeg executable found. Last error: {last_error}")
+
+        volume_factor = max(0.1, min(2.0, state.volume))
+        source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
+
+        def after_play(error):
+            if error:
+                print(f'[Music] Player error on "{state.current.title if state.current else song.title}": {error}')
+            finished_song = state.current
+            _remember_finished_song(state, finished_song)
+            state.current = None
+            _cleanup_song_file(finished_song)
+            asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+
+        print(f'[Music] Now playing: {song.title}')
+        state.voice_client.play(source, after=after_play)
+    except Exception as e:
+        print(
+            f"[Music] Failed to create audio source for {song.title}: {e} | "
+            f"FFMPEG_EXE={FFMPEG_EXE} | "
+            f"Candidates={_ffmpeg_candidate_paths()} | "
+            f"PATH={os.getenv('PATH', '')}"
+        )
+        finished_song = state.current
+        _remember_finished_song(state, finished_song)
+        _cleanup_song_file(finished_song)
+        state.current = None
+        asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
 
 async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
     state = get_music_state(guild_id)
@@ -3805,7 +3808,7 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
         except Exception as e:
             print(f"[Autoplay] Failed to queue related song: {e}")
     _loop = asyncio.get_running_loop()
-    await _loop.run_in_executor(None, lambda: play_next(guild_id, _loop))
+    await play_next(guild_id, _loop)
     await _post_music_panel(guild_id)
     await _post_next_song_embed(guild_id)
 
@@ -4218,7 +4221,7 @@ async def play(interaction: discord.Interaction, query: str):
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
             _loop = asyncio.get_running_loop()
-            _loop.run_in_executor(None, lambda: play_next(interaction.guild.id, _loop))
+            await play_next(interaction.guild.id, _loop)
             try:
                 await interaction.followup.send(f"▶️ Starting **{entry.title}** — see the player below!", ephemeral=True)
             except Exception:
@@ -4583,7 +4586,7 @@ async def playlist(interaction: discord.Interaction, action: str, name: str = ""
             return
 
         if vc and not vc.is_playing() and not vc.is_paused() and state.queue:
-            play_next(interaction.guild.id, asyncio.get_running_loop())
+            await play_next(interaction.guild.id, asyncio.get_running_loop())
             await _post_music_panel(interaction.guild.id)
 
         await interaction.followup.send(
