@@ -3080,17 +3080,36 @@ def _autoplay_candidate_score(
 
     candidate_artist = _entry_artist_key(entry)
     if candidate_artist:
-        if current_artist_key and candidate_artist == current_artist_key:
-            score += 15 if maki_mode else 9
-        elif candidate_artist in queue_artist_keys:
-            score += 8 if maki_mode else 4
         repeat_count = sum(1 for artist in recent_artist_keys if artist == candidate_artist)
-        if repeat_count == 1:
-            score += 2
-        elif repeat_count >= 2:
-            score -= min(6, repeat_count * 2)
-        if maki_mode and candidate_artist not in queue_artist_keys and candidate_artist != current_artist_key:
-            score -= 4
+        if current_artist_key and candidate_artist == current_artist_key:
+            if maki_mode:
+                # GzVibe: heavily reward same artist — that's the whole point
+                score += 20
+            else:
+                # Balanced: small same-artist boost, but penalise if they're already recurring
+                score += 6 if repeat_count == 0 else max(0, 6 - repeat_count * 3)
+        elif candidate_artist in queue_artist_keys:
+            score += 8 if maki_mode else 5
+        if maki_mode:
+            # GzVibe: penalise artists that aren't current and aren't queued
+            if candidate_artist not in queue_artist_keys and candidate_artist != current_artist_key:
+                score -= 5
+            # Mild repeat penalty even for same-artist (avoid literal looping)
+            if repeat_count >= 3:
+                score -= min(8, repeat_count * 2)
+            elif repeat_count == 1:
+                score += 1
+        else:
+            # Balanced: reward fresh/new artists to encourage discovery
+            if repeat_count == 0:
+                score += 5
+            elif repeat_count == 1:
+                score += 2
+            elif repeat_count >= 2:
+                score -= min(10, repeat_count * 3)
+            # Extra bonus if this is a brand-new artist not seen in queue either
+            if candidate_artist not in queue_artist_keys and candidate_artist != current_artist_key and repeat_count == 0:
+                score += 4
     else:
         score -= 4 if maki_mode else 2
 
@@ -3927,31 +3946,46 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
     # 2) Fallback search pool — run all queries in parallel with a per-search cap
     # so a single slow yt-dlp call can't block the next song from starting.
     try:
-        radio_queries = [
-            f"{query_seed} radio",
-            f"mix similar to {query_seed}",
-        ]
-        # Only add the artist variant when the artist key isn't already embedded
-        # inside the full title (prevents "songs like another brick Another Brick...").
-        if current_artist_key and current_artist_key not in query_seed.lower():
-            radio_queries.append(f"songs like {current_artist_key} {query_seed}")
+        if state.autoplay_mode == "gzvibe":
+            # GzVibe: same artist first, then similar artists, then song-based
+            radio_queries = [
+                f"{current_artist_key} radio" if current_artist_key else f"{query_seed} radio",
+                f"{current_artist_key} best songs" if current_artist_key else f"{query_seed} radio",
+            ]
+            if current_artist_key and current_artist_key not in query_seed.lower():
+                radio_queries.append(f"{current_artist_key} {query_seed}")
 
-        broad_queries = [
-            f"songs like {query_seed}",
-        ]
-        if current_artist_key and current_artist_key not in query_seed.lower():
-            broad_queries.append(f"artists similar to {current_artist_key} best songs")
+            broad_queries = [
+                f"artists similar to {current_artist_key} best songs" if current_artist_key else f"songs like {query_seed}",
+                f"mix similar to {query_seed}",
+            ]
+
+            artist_queries: list[str] = []
+            if current_artist_key:
+                artist_queries.extend([
+                    f"artists like {current_artist_key}",
+                    f"{current_artist_key} greatest hits",
+                ])
         else:
-            broad_queries.append(f"music recommendations similar to {query_seed}")
+            # Balanced: song-similarity and variety first, same artist is secondary
+            radio_queries = [
+                f"mix similar to {query_seed}",
+                f"songs like {query_seed}",
+            ]
+            if current_artist_key and current_artist_key not in query_seed.lower():
+                radio_queries.append(f"songs like {current_artist_key} {query_seed}")
 
-        # Artist-only fallbacks help when title-based queries return mostly
-        # duplicates/lyric videos of the same track.
-        artist_queries: list[str] = []
-        if current_artist_key:
-            artist_queries.extend([
-                f"{current_artist_key} best songs",
-                f"{current_artist_key} radio",
-            ])
+            broad_queries = [
+                f"{query_seed} radio",
+                f"music recommendations similar to {query_seed}",
+            ]
+            if current_artist_key:
+                broad_queries.append(f"artists similar to {current_artist_key} best songs")
+
+            artist_queries = [
+                f"{current_artist_key} best songs" if current_artist_key else "",
+            ]
+            artist_queries = [q for q in artist_queries if q]
 
         async def _safe_search(q: str, max_r: int) -> list[dict]:
             try:
@@ -3965,22 +3999,24 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
             asyncio.gather(*[_safe_search(q, 12) for q in artist_queries]) if artist_queries else asyncio.gather(),
         )
 
+        # GzVibe: radio (artist-focused) is high bias; Balanced: radio (song-focused) is high bias
         for q, results in zip(radio_queries, radio_results):
             _consider_candidates(
                 results,
-                source_bias=25 if state.autoplay_mode == "gzvibe" else 20,
+                source_bias=28 if state.autoplay_mode == "gzvibe" else 22,
                 source_name=q,
             )
         for q, picks in zip(broad_queries, broad_results):
             _consider_candidates(
                 picks,
-                source_bias=14 if state.autoplay_mode == "gzvibe" else 10,
+                source_bias=16 if state.autoplay_mode == "gzvibe" else 14,
                 source_name=q,
             )
         for q, picks in zip(artist_queries, artist_results):
             _consider_candidates(
                 picks,
-                source_bias=11 if state.autoplay_mode == "gzvibe" else 8,
+                # GzVibe: artist fallbacks are secondary; Balanced: penalise slightly to push variety
+                source_bias=13 if state.autoplay_mode == "gzvibe" else 7,
                 source_name=q,
             )
     except Exception as e:
