@@ -2645,6 +2645,7 @@ class GuildMusicState:
         self.last_finished: SongEntry | None = None
         self.recent_track_ids: collections.deque[str] = collections.deque(maxlen=20)
         self.recent_title_keys: collections.deque[str] = collections.deque(maxlen=20)
+        self.recent_artist_keys: collections.deque[str] = collections.deque(maxlen=12)
         self.voice_client: discord.VoiceClient | None = None
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
@@ -2739,6 +2740,38 @@ def _same_song_key(a: str, b: str) -> bool:
     return shorter >= 6 and (a in b or b in a)
 
 
+def _artist_key_from_title(title: str) -> str:
+    """Best-effort artist extraction from common title formats."""
+    raw = (title or "").lower()
+    raw = re.sub(r"\([^)]*\)", " ", raw)
+    raw = re.sub(r"\[[^\]]*\]", " ", raw)
+
+    artist_part = ""
+    # Common style: "Artist - Song"
+    if " - " in raw:
+        artist_part = raw.split(" - ", 1)[0].strip()
+    # Common style: "Song by Artist"
+    elif " by " in raw:
+        artist_part = raw.split(" by ", 1)[1].strip()
+
+    # Keep only a clean leading artist token block.
+    artist_part = artist_part.split("|")[0].split("/")[0].split(",")[0].strip()
+    artist_part = re.sub(r"\b(feat|ft|featuring|official|topic|vevo)\b.*$", "", artist_part).strip()
+    artist_part = re.sub(r"[^a-z0-9]+", " ", artist_part)
+    artist_part = re.sub(r"\s+", " ", artist_part).strip()
+    return artist_part
+
+
+def _song_artist_key(song: SongEntry | None) -> str:
+    if not song:
+        return ""
+    return _artist_key_from_title(song.title)
+
+
+def _entry_artist_key(entry: dict) -> str:
+    return _artist_key_from_title(entry.get("title", ""))
+
+
 def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> None:
     if not song:
         return
@@ -2749,6 +2782,9 @@ def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> N
     tkey = _song_core_key(song.title)
     if tkey:
         state.recent_title_keys.append(tkey)
+    akey = _song_artist_key(song)
+    if akey:
+        state.recent_artist_keys.append(akey)
 
 def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     """Try pytubefix first; fall back to yt-dlp and Invidious if blocked."""
@@ -3098,12 +3134,16 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
     exclude = current.webpage_url or current.url
     blocked_ids: set[str] = set(state.recent_track_ids)
     blocked_title_keys: set[str] = set(state.recent_title_keys)
+    blocked_artist_keys: set[str] = set(state.recent_artist_keys)
     current_id = _song_identity(current)
     if current_id:
         blocked_ids.add(current_id)
     current_title_key = _song_core_key(current.title)
     if current_title_key:
         blocked_title_keys.add(current_title_key)
+    current_artist_key = _song_artist_key(current)
+    if current_artist_key:
+        blocked_artist_keys.add(current_artist_key)
     for q_item in state.queue:
         qid = _song_identity(q_item)
         if qid:
@@ -3111,6 +3151,9 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         qkey = _song_core_key(q_item.title)
         if qkey:
             blocked_title_keys.add(qkey)
+        qartist = _song_artist_key(q_item)
+        if qartist:
+            blocked_artist_keys.add(qartist)
 
     # 1) Try pulling YouTube related videos via yt-dlp
     if exclude:
@@ -3123,6 +3166,9 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             if rkey:
                 if any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
                     continue
+            rartist = _entry_artist_key(r)
+            if rartist and rartist in blocked_artist_keys:
+                continue
             if r.get('title', '').lower() == current.title.lower():
                 continue
             return r
@@ -3138,6 +3184,9 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             if rkey:
                 if any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
                     continue
+            rartist = _entry_artist_key(r)
+            if rartist and rartist in blocked_artist_keys:
+                continue
             if r.get('title', '').lower() != current.title.lower():
                 return r
     except Exception as e:
