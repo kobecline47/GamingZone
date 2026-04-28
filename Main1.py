@@ -15,6 +15,7 @@ import re
 import urllib.request
 import urllib.parse
 import json
+import base64
 import traceback
 import time
 import ctypes.util
@@ -3168,12 +3169,121 @@ def _pytubefix_search(query: str, max_results: int) -> list[dict]:
     return _ytdlp_search(query, max_results)
 
 
+def _normalize_search_query(query: str) -> str:
+    """Deduplicate repeated words to avoid noisy queries like 'lyrics lyrics audio'."""
+    parts = re.split(r"\s+", (query or "").strip())
+    if not parts:
+        return ""
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in parts:
+        key = token.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return " ".join(out)
+
+
+def _resolve_yt_cookiefile() -> str | None:
+    """Resolve yt-dlp cookie file from path env or base64 env payload."""
+    cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+    if cookiefile and os.path.exists(cookiefile):
+        return cookiefile
+
+    b64_blob = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    if not b64_blob:
+        return None
+
+    try:
+        data = base64.b64decode(b64_blob)
+        if not data:
+            return None
+        target = os.path.join(_music_data_dir(), "yt_cookies.txt")
+        with open(target, "wb") as f:
+            f.write(data)
+        if os.path.exists(target):
+            print(f"[yt-dlp] Loaded cookies from YTDLP_COOKIES_B64 into {target}")
+            return target
+    except Exception as e:
+        print(f"[yt-dlp] Failed to decode YTDLP_COOKIES_B64: {e}")
+    return None
+
+
+def _piped_search(query: str, max_results: int) -> list[dict]:
+    """Fallback using public Piped API instances."""
+    instances = [
+        'https://piped.video',
+        'https://piped.adminforge.de',
+        'https://piped.projectsegfau.lt',
+    ]
+
+    for base in instances:
+        try:
+            search_url = f"{base}/api/v1/search?q={urllib.parse.quote(query)}&filter=videos"
+            req = urllib.request.Request(
+                search_url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode(errors='ignore'))
+
+            results = []
+            for item in data[: max_results * 4]:
+                vid = item.get('url') or item.get('id') or ''
+                if not vid:
+                    continue
+                vid = vid.replace('/watch?v=', '').replace('https://www.youtube.com/watch?v=', '').strip('/ ')
+                if not vid:
+                    continue
+                streams_url = f"{base}/api/v1/streams/{vid}"
+                req2 = urllib.request.Request(
+                    streams_url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Accept': 'application/json',
+                    },
+                )
+                with urllib.request.urlopen(req2, timeout=6) as resp2:
+                    details = json.loads(resp2.read().decode(errors='ignore'))
+
+                audio_streams = details.get('audioStreams', [])
+                if not audio_streams:
+                    continue
+                best = max(audio_streams, key=lambda s: int(s.get('bitrate') or 0))
+                stream_url = best.get('url')
+                if not stream_url:
+                    continue
+
+                results.append({
+                    'title': item.get('title', 'Unknown title'),
+                    'url': stream_url,
+                    'webpage_url': f"https://www.youtube.com/watch?v={vid}",
+                    'duration': int(item.get('duration') or 0),
+                })
+                if len(results) >= max_results:
+                    break
+
+            if results:
+                print(f"[Piped] Resolved {len(results)} result(s) via {base}")
+                return results
+        except Exception as e:
+            print(f"[Piped] instance failed {base}: {e}")
+            continue
+
+    return []
+
+
 def _ytdlp_search(query: str, max_results: int) -> list[dict]:
     """Fallback: use yt-dlp search and resolve a playable audio URL."""
     try:
         import yt_dlp
 
-        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        query = _normalize_search_query(query)
+        cookiefile = _resolve_yt_cookiefile()
         base_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -3245,9 +3355,15 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                 print(f'[yt-dlp] attempt failed: {e}')
                 continue
 
+        piped = _piped_search(query, max_results)
+        if piped:
+            return piped
         return _invidious_search(query, max_results)
     except Exception as e:
         print(f'[yt-dlp] failed: {e}')
+        piped = _piped_search(query, max_results)
+        if piped:
+            return piped
         return _invidious_search(query, max_results)
 
 
@@ -3365,7 +3481,7 @@ def _ytdlp_resolve_url(url: str) -> list[dict]:
     try:
         import yt_dlp
 
-        cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+        cookiefile = _resolve_yt_cookiefile()
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -3422,19 +3538,21 @@ async def search_youtube_resilient(query: str, max_results: int = 1) -> list[dic
     # Try original query, then common useful variants.
     attempts: list[str] = [q]
     if not _looks_like_url(q):
+        lowered = q.lower()
         attempts.extend([
-            f"{q} official audio",
-            f"{q} topic",
-            f"{q} lyrics",
+            f"{q} official audio" if "official audio" not in lowered else q,
+            f"{q} topic" if "topic" not in lowered else q,
+            f"{q} lyrics" if "lyrics" not in lowered else q,
         ])
 
     seen: set[str] = set()
     for attempt in attempts:
-        key = attempt.lower().strip()
+        normalized_attempt = _normalize_search_query(attempt)
+        key = normalized_attempt.lower().strip()
         if not key or key in seen:
             continue
         seen.add(key)
-        results = await search_youtube(attempt, max_results=max_results)
+        results = await search_youtube(normalized_attempt, max_results=max_results)
         if results:
             return results
 
