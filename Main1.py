@@ -3372,7 +3372,14 @@ def _yt_suggestions(query: str) -> list[str]:
 
 async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results)),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        print(f'[Search] pytubefix timed out for query: {query!r}')
+        return []
 
 
 def _looks_like_url(text: str) -> bool:
@@ -4202,7 +4209,13 @@ async def play(interaction: discord.Interaction, query: str):
         else:
             state.voice_client = vc
 
-        results = await search_youtube_resilient(query, max_results=1)
+        try:
+            results = await asyncio.wait_for(search_youtube_resilient(query, max_results=1), timeout=40.0)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "Search timed out — YouTube may be rate-limiting. Try a direct YouTube URL or a more specific query."
+            )
+            return
         if not results:
             await interaction.followup.send(
                 "No playable results found right now. Try a more specific title (song + artist), "
