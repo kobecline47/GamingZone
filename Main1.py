@@ -2729,7 +2729,9 @@ if FFMPEG_EXE == "ffmpeg" and not _shutil.which("ffmpeg"):
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
     'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 10 -rw_timeout 15000000',
-    'options': '-vn -q:a 5 -ac 2 -ar 48000 -bufsize 256k',
+    # discord.py already sets PCM output flags (-f s16le -ar 48000 -ac 2).
+    # Avoid duplicating them here to prevent FFmpeg option conflicts.
+    'options': '-vn -sn -dn -bufsize 256k',
 }
 
 YTDL_STREAM_OPTS = {
