@@ -1333,8 +1333,10 @@ class TicketCloseButton(discord.ui.Button):
                     for m in msgs if not m.author.bot or m.content
                 )
                 embed = discord.Embed(title=f"📋 Ticket Closed — #{ch.name}", color=0xE74C3C)
-                embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+                embed.add_field(name="👤 Closed by", value=interaction.user.mention, inline=True)
+                embed.add_field(name="📦 Messages", value=str(len(msgs)), inline=True)
                 embed.description = f"```\n{transcript[:3900]}\n```" if transcript else "*No messages.*"
+                embed.set_footer(text="Ticket Transcript • Gaming Zone")
                 embed.timestamp = discord.utils.utcnow()
                 await log_ch.send(embed=embed)
             except Exception as e:
@@ -1575,11 +1577,16 @@ class OpenTicketButton(discord.ui.Button):
             OPEN_TICKETS[member.id] = ch.id
             TICKET_SLA_LAST_REMINDER.pop(ch.id, None)
             embed = discord.Embed(
-                title="🎫 Support Ticket",
-                description=f"Hello {member.mention}! Describe your issue and a staff member will assist you.\n\nClick **Close Ticket** when resolved.",
+                title="🎫 Gaming Zone Support",
+                description=(
+                    f"Hey {member.mention}, your private support channel is ready.\n\n"
+                    "Share what happened, screenshots, and any error text so staff can help faster."
+                ),
                 color=0x5865F2,
             )
-            embed.set_footer(text="Do not share personal information.")
+            embed.add_field(name="⚡ Fastest Path", value="Include your steps + what you expected to happen.", inline=False)
+            embed.add_field(name="🔒 Privacy", value="Only you and staff can see this channel.", inline=False)
+            embed.set_footer(text="Use the Close Ticket button when resolved.")
             await ch.send(embed=embed, view=TicketView())
             await interaction.followup.send(f"🎫 Ticket created: {ch.mention}", ephemeral=True)
 
@@ -2820,7 +2827,7 @@ def _playlist_has_track(tracks: list[dict], track: dict) -> bool:
 
 def _gzvibe_playlist_embed(title: str, description: str, color: int = 0x1DB954) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(text="GzVibe Playlist")
+    embed.set_footer(text="GzVibe Playlist • Gaming Zone")
     return embed
 
 
@@ -2842,6 +2849,13 @@ def _youtube_video_id(url: str) -> str:
     except Exception:
         return ""
     return ""
+
+
+def _youtube_thumbnail(url: str) -> str:
+    video_id = _youtube_video_id(url)
+    if not video_id:
+        return ""
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 def _song_identity(song: SongEntry | None) -> str:
@@ -3065,6 +3079,16 @@ def _autoplay_mode_embed(mode: str) -> discord.Embed:
     )
     embed.add_field(name="Current", value=f"**{_format_autoplay_mode(mode)}**", inline=True)
     embed.add_field(name="Switch", value="Use `/autoplaymode` or the mode button on the music panel.", inline=True)
+    embed.add_field(
+        name="Visual Preset",
+        value=(
+            "`High Cohesion` for GzVibe"
+            if is_gzvibe
+            else "`Discovery Mix` for Balanced"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="GzVibe Engine • Music UX")
     return embed
 
 
@@ -3821,7 +3845,7 @@ class MusicControlView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild_id = guild_id
 
-    @discord.ui.button(emoji="⏸️", label="Pause/Resume", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="⏯️", label="Pause / Resume", style=discord.ButtonStyle.primary, row=0)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if not vc:
@@ -3836,7 +3860,7 @@ class MusicControlView(discord.ui.View):
         else:
             await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏭️", label="Skip", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏭️", label="Skip Track", style=discord.ButtonStyle.secondary, row=0)
     async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if not vc or (not vc.is_playing() and not vc.is_paused()):
@@ -3845,7 +3869,7 @@ class MusicControlView(discord.ui.View):
         vc.stop()
         await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏹️", label="Stop", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏹️", label="Stop Session", style=discord.ButtonStyle.danger, row=0)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
         vc = interaction.guild.voice_client
@@ -3857,7 +3881,7 @@ class MusicControlView(discord.ui.View):
         vc.stop()
         await interaction.response.send_message("⏹️ Stopped and queue cleared.", ephemeral=True)
 
-    @discord.ui.button(emoji="📋", label="Queue", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="📋", label="Queue Snapshot", style=discord.ButtonStyle.secondary, row=1)
     async def queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
         if not state.current and not state.queue:
@@ -3873,7 +3897,8 @@ class MusicControlView(discord.ui.View):
                 if remaining:
                     desc += f"*...and {remaining} more*"
                 break
-        embed = discord.Embed(title="📋 Music Queue", description=desc, color=0x9B59B6)
+        embed = discord.Embed(title="📋 Queue Snapshot", description=desc, color=0x9B59B6)
+        embed.set_footer(text="GzVibe Panel • Live Queue")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(emoji="🔉", label="Vol -10%", style=discord.ButtonStyle.secondary, row=1)
@@ -3919,7 +3944,7 @@ class MusicControlView(discord.ui.View):
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(embed=_autoplay_mode_embed(state.autoplay_mode), ephemeral=True)
 
-    @discord.ui.button(emoji="➕", label="Add To Playlist", style=discord.ButtonStyle.primary, row=2, custom_id="playlist_quick_add")
+    @discord.ui.button(emoji="✨", label="Save To Playlist", style=discord.ButtonStyle.primary, row=2, custom_id="playlist_quick_add")
     async def playlist_quick_add(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
         song = state.current or (state.queue[0] if state.queue else None)
@@ -4030,13 +4055,16 @@ async def _post_music_panel(guild_id: int):
     if not state.current:
         return
     embed = discord.Embed(
-        title="🎵 Now Playing",
+        title="🎵 GzVibe Now Playing",
         description=f"[{state.current.title}]({state.current.webpage_url})",
         color=0x1DB954,
     )
-    embed.add_field(name="Duration", value=state.current.format_duration())
-    embed.add_field(name="Requested by", value=state.current.requester.mention)
-    embed.add_field(name="Volume", value=f"{int(state.volume * 100)}%")
+    thumb = _youtube_thumbnail(state.current.webpage_url or state.current.url)
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    embed.add_field(name="⏱️ Duration", value=state.current.format_duration(), inline=True)
+    embed.add_field(name="🎧 Requested by", value=state.current.requester.mention, inline=True)
+    embed.add_field(name="🔊 Volume", value=f"{int(state.volume * 100)}%", inline=True)
     q = len(state.queue)
     footer_parts = []
     if q:
@@ -4045,6 +4073,8 @@ async def _post_music_panel(guild_id: int):
         footer_parts.append(f"🔁 Autoplay ON • {_format_autoplay_mode(state.autoplay_mode)}")
     if footer_parts:
         embed.set_footer(text="  •  ".join(footer_parts))
+    else:
+        embed.set_footer(text="GzVibe Panel • Controls Ready")
     view = MusicControlView(guild_id)
     # Reflect autoplay state on the button
     for child in view.children:
@@ -4218,7 +4248,12 @@ async def queue_cmd(interaction: discord.Interaction):
             if remaining > 0:
                 desc += f"*...and {remaining} more*"
             break
-    embed = discord.Embed(title="Music Queue", description=desc, color=0x9B59B6)
+    embed = discord.Embed(title="📋 GzVibe Queue", description=desc, color=0x9B59B6)
+    if state.current:
+        thumb = _youtube_thumbnail(state.current.webpage_url or state.current.url)
+        if thumb:
+            embed.set_thumbnail(url=thumb)
+    embed.set_footer(text="Queue Snapshot • GzVibe")
     await interaction.response.send_message(embed=embed)
 
 @client.tree.command(name="nowplaying", description="Show what's currently playing", guild=GUILD_ID)
@@ -4229,10 +4264,14 @@ async def nowplaying(interaction: discord.Interaction):
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
-    embed = discord.Embed(title="Now Playing", description=f"[{state.current.title}]({state.current.webpage_url})", color=0x1DB954)
-    embed.add_field(name="Duration", value=state.current.format_duration())
-    embed.add_field(name="Requested by", value=state.current.requester.mention)
-    embed.add_field(name="Volume", value=f"{int(state.volume * 100)}%")
+    embed = discord.Embed(title="🎵 GzVibe Now Playing", description=f"[{state.current.title}]({state.current.webpage_url})", color=0x1DB954)
+    thumb = _youtube_thumbnail(state.current.webpage_url or state.current.url)
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    embed.add_field(name="⏱️ Duration", value=state.current.format_duration(), inline=True)
+    embed.add_field(name="🎧 Requested by", value=state.current.requester.mention, inline=True)
+    embed.add_field(name="🔊 Volume", value=f"{int(state.volume * 100)}%", inline=True)
+    embed.set_footer(text="Music Live View • GzVibe")
     await interaction.response.send_message(embed=embed)
 
 @client.tree.command(name="volume", description="Set the playback volume (0-100)", guild=GUILD_ID)
@@ -4996,11 +5035,16 @@ async def setupticketchannel(interaction: discord.Interaction, channel: discord.
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
         return
     embed = discord.Embed(
-        title="🎫 Support Tickets",
-        description="Need help? Click the button below to open a private support ticket.\nA staff member will assist you as soon as possible.",
+        title="🎫 Gaming Zone Support Desk",
+        description=(
+            "Need help with bot commands, roles, or server issues?\n"
+            "Press the button below to open your private support ticket."
+        ),
         color=0x5865F2,
     )
-    embed.set_footer(text="One ticket per member at a time.")
+    embed.add_field(name="What to include", value="Issue summary, screenshots, and what you already tried.", inline=False)
+    embed.add_field(name="Response flow", value="Staff reviews in order and replies in your ticket channel.", inline=False)
+    embed.set_footer(text="One open ticket per member • Gaming Zone")
     await channel.send(embed=embed, view=OpenTicketView())
     await interaction.response.send_message(f"Ticket panel posted in {channel.mention}.", ephemeral=True)
     await _log_admin_cmd(interaction, "setupticketchannel", f"Panel posted in {channel.mention}")
@@ -5303,10 +5347,11 @@ async def serverhealth(interaction: discord.Interaction):
         f"ticket_sla_check: {'✅' if ticket_sla_check.is_running() else '❌'}",
     ]
 
-    embed = discord.Embed(title="🩺 Server Health", color=0x2ECC71)
-    embed.add_field(name="Bot Runtime", value=f"Uptime: **{uptime}**\nMarker: `{STARTUP_MARKER}`\nPID: `{os.getpid()}`", inline=False)
+    embed = discord.Embed(title="🩺 Gz Dyno Health Card", color=0x2ECC71)
+    embed.description = "Live diagnostics for runtime, wiring, and background automation."
+    embed.add_field(name="⚙️ Runtime", value=f"Uptime: **{uptime}**\nMarker: `{STARTUP_MARKER}`\nPID: `{os.getpid()}`", inline=False)
     embed.add_field(
-        name="Channel Wiring",
+        name="🧭 Channel Wiring",
         value=(
             f"mod-log: {'✅' if mod_log else '❌'}\n"
             f"ticket-log: {'✅' if ticket_log else '❌'}\n"
@@ -5319,7 +5364,7 @@ async def serverhealth(interaction: discord.Interaction):
         inline=True,
     )
     embed.add_field(
-        name="Tickets",
+        name="🎫 Tickets",
         value=(
             f"Tracked open: **{len(tracked_ticket_channels)}**\n"
             f"SLA threshold: **{TICKET_SLA_HOURS}h**\n"
@@ -5327,8 +5372,9 @@ async def serverhealth(interaction: discord.Interaction):
         ),
         inline=True,
     )
-    embed.add_field(name="Background Tasks", value="\n".join(task_lines), inline=False)
-    embed.add_field(name="Data", value=f"Managed channel IDs: **{len(MANAGED_CHANNEL_IDS.get(str(guild.id), {}))}**\nPosted free-game IDs: **{len(POSTED_FREE_GAMES)}**", inline=False)
+    embed.add_field(name="🔁 Background Tasks", value="\n".join(task_lines), inline=False)
+    embed.add_field(name="📦 Data", value=f"Managed channel IDs: **{len(MANAGED_CHANNEL_IDS.get(str(guild.id), {}))}**\nPosted free-game IDs: **{len(POSTED_FREE_GAMES)}**", inline=False)
+    embed.set_footer(text="Gz Dyno Card • /serverhealth")
     embed.timestamp = now
     await interaction.response.send_message(embed=embed, ephemeral=True)
 

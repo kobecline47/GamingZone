@@ -185,7 +185,7 @@ def logout():
 def dashboard():
     if not _logged_in():
         return redirect(url_for("login"))
-    return render_template("dashboard.html", username=_current_user())
+    return render_template("dashboard_v4.html", username=_current_user())
 
 
 # API: STATS / OVERVIEW
