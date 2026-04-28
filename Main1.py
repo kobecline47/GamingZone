@@ -2745,6 +2745,69 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return music_states[guild_id]
 
 
+def _music_data_dir() -> str:
+    explicit = os.getenv("MUSIC_DATA_DIR", "").strip()
+    if explicit:
+        os.makedirs(explicit, exist_ok=True)
+        return explicit
+    railway_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if railway_mount:
+        os.makedirs(railway_mount, exist_ok=True)
+        return railway_mount
+    if os.path.isdir("/data"):
+        return "/data"
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+_PLAYLISTS_PATH = os.path.join(_music_data_dir(), "music_playlists.json")
+MUSIC_PLAYLISTS: dict[str, dict] = {"guilds": {}}
+
+
+def _load_music_playlists() -> None:
+    global MUSIC_PLAYLISTS
+    if not os.path.exists(_PLAYLISTS_PATH):
+        return
+    try:
+        with open(_PLAYLISTS_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict) and isinstance(loaded.get("guilds", {}), dict):
+            MUSIC_PLAYLISTS = loaded
+    except Exception as e:
+        print(f"[Playlist] Failed to load playlists: {e}")
+
+
+def _save_music_playlists() -> None:
+    try:
+        os.makedirs(os.path.dirname(_PLAYLISTS_PATH), exist_ok=True)
+        tmp_path = _PLAYLISTS_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(MUSIC_PLAYLISTS, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _PLAYLISTS_PATH)
+    except Exception as e:
+        print(f"[Playlist] Failed to save playlists: {e}")
+
+
+def _playlist_bucket(guild_id: int, user_id: int) -> dict[str, list[dict]]:
+    guilds = MUSIC_PLAYLISTS.setdefault("guilds", {})
+    g = guilds.setdefault(str(guild_id), {})
+    return g.setdefault(str(user_id), {})
+
+
+def _playlist_track(song: SongEntry) -> dict:
+    return {
+        "title": song.title,
+        "webpage_url": song.webpage_url or "",
+        "duration": int(song.duration or 0),
+    }
+
+
+def _normalize_playlist_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip())[:40]
+
+
+_load_music_playlists()
+
+
 def _youtube_video_id(url: str) -> str:
     if not url:
         return ""
@@ -4098,6 +4161,172 @@ async def autoplaydebug(interaction: discord.Interaction):
     embed.add_field(name="Mode", value=_format_autoplay_mode(state.autoplay_mode), inline=True)
     embed.add_field(name="Autoplay", value="ON" if state.autoplay else "OFF", inline=True)
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="nextsong", description="Show what the bot will play next", guild=GUILD_ID)
+async def nextsong(interaction: discord.Interaction):
+    if not await _require_music_channel(interaction):
+        return
+
+    state = get_music_state(interaction.guild.id)
+    if state.queue:
+        upcoming = state.queue[0]
+        embed = discord.Embed(title="⏭️ Next Song", color=0x3498DB)
+        embed.description = f"[{upcoming.title}]({upcoming.webpage_url})"
+        embed.add_field(name="Duration", value=upcoming.format_duration(), inline=True)
+        embed.add_field(name="From", value="Queue", inline=True)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    seed_song = state.current or state.last_finished
+    if not state.autoplay or not seed_song:
+        await interaction.response.send_message(
+            "Nothing queued right now. Turn on autoplay or add songs with `/play`.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    ranked = await _rank_autoplay_candidates(state, seed_song)
+    if not ranked:
+        await interaction.followup.send("I couldn't predict a next autoplay song right now.", ephemeral=True)
+        return
+
+    score, entry, source = ranked[0]
+    duration = int(entry.get("duration") or 0)
+    m, s = divmod(duration, 60)
+    h, m = divmod(m, 60)
+    duration_text = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    embed = discord.Embed(title="🔮 Predicted Next Song", color=0x1DB954)
+    embed.description = f"[{entry.get('title', 'Unknown title')}]({entry.get('webpage_url', '')})"
+    embed.add_field(name="Duration", value=duration_text, inline=True)
+    embed.add_field(name="Source", value=source, inline=True)
+    embed.add_field(name="Score", value=str(score), inline=True)
+    embed.set_footer(text=f"Autoplay mode: {_format_autoplay_mode(state.autoplay_mode)}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="playlist", description="Manage your saved music playlists", guild=GUILD_ID)
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name="Save current queue", value="save"),
+    discord.app_commands.Choice(name="List playlists", value="list"),
+    discord.app_commands.Choice(name="Play a playlist", value="play"),
+    discord.app_commands.Choice(name="Delete a playlist", value="delete"),
+])
+@discord.app_commands.describe(
+    action="What to do",
+    name="Playlist name (required for save/play/delete)",
+)
+async def playlist(interaction: discord.Interaction, action: str, name: str = ""):
+    if not await _require_music_channel(interaction):
+        return
+
+    state = get_music_state(interaction.guild.id)
+    user_playlists = _playlist_bucket(interaction.guild.id, interaction.user.id)
+    normalized_name = _normalize_playlist_name(name)
+
+    if action == "list":
+        if not user_playlists:
+            await interaction.response.send_message("You don't have any saved playlists yet.", ephemeral=True)
+            return
+        lines = []
+        for pname, tracks in sorted(user_playlists.items()):
+            lines.append(f"• **{pname}** — `{len(tracks)}` songs")
+        embed = discord.Embed(title="🎶 Your Playlists", description="\n".join(lines), color=0x5865F2)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if not normalized_name:
+        await interaction.response.send_message("Please provide a playlist name.", ephemeral=True)
+        return
+
+    if action == "save":
+        tracks: list[dict] = []
+        if state.current:
+            tracks.append(_playlist_track(state.current))
+        tracks.extend(_playlist_track(song) for song in list(state.queue))
+        if not tracks:
+            await interaction.response.send_message("Nothing is playing or queued to save.", ephemeral=True)
+            return
+        if len(tracks) > 50:
+            tracks = tracks[:50]
+        user_playlists[normalized_name] = tracks
+        _save_music_playlists()
+        await interaction.response.send_message(
+            f"Saved **{normalized_name}** with `{len(tracks)}` songs.",
+            ephemeral=True,
+        )
+        return
+
+    if action == "delete":
+        if normalized_name not in user_playlists:
+            await interaction.response.send_message("That playlist doesn't exist.", ephemeral=True)
+            return
+        del user_playlists[normalized_name]
+        _save_music_playlists()
+        await interaction.response.send_message(f"Deleted playlist **{normalized_name}**.", ephemeral=True)
+        return
+
+    if action == "play":
+        tracks = user_playlists.get(normalized_name)
+        if not tracks:
+            await interaction.response.send_message("That playlist doesn't exist or is empty.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(interaction.user.id)
+        if not member or not member.voice or not member.voice.channel:
+            await interaction.response.send_message("Join a voice channel first.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        vc = interaction.guild.voice_client
+        if vc is None:
+            vc = await member.voice.channel.connect()
+            state.voice_client = vc
+        elif vc.channel != member.voice.channel:
+            await vc.move_to(member.voice.channel)
+            state.voice_client = vc
+        else:
+            state.voice_client = vc
+
+        added = 0
+        for track in tracks[:50]:
+            lookup = track.get("webpage_url") or track.get("title")
+            if not lookup:
+                continue
+            try:
+                results = await search_youtube_resilient(lookup, max_results=1)
+                if not results:
+                    continue
+                r = results[0]
+                state.queue.append(SongEntry(
+                    title=r.get("title", track.get("title", "Unknown")),
+                    url=r["url"],
+                    webpage_url=r.get("webpage_url", track.get("webpage_url", "")),
+                    duration=r.get("duration", track.get("duration", 0)),
+                    requester=interaction.user,
+                    local_path=r.get("local_path"),
+                ))
+                added += 1
+            except Exception as e:
+                print(f"[Playlist] Could not queue track from {normalized_name}: {e}")
+
+        if added == 0:
+            await interaction.followup.send("Could not queue any songs from that playlist right now.", ephemeral=True)
+            return
+
+        if vc and not vc.is_playing() and not vc.is_paused() and state.queue:
+            play_next(interaction.guild.id, asyncio.get_running_loop())
+            await _post_music_panel(interaction.guild.id)
+
+        await interaction.followup.send(
+            f"Queued `{added}` songs from **{normalized_name}**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message("Unknown playlist action.", ephemeral=True)
 
 @client.tree.command(name="announce", description="Send an announcement to a specific channel", guild=GUILD_ID)
 @app_commands.default_permissions(manage_messages=True)
