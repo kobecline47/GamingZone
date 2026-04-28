@@ -459,9 +459,7 @@ class Client(commands.Bot):
                     await _ensure_log_channels(marker_guild)
                 except Exception as e:
                     print(f"[Startup] Could not ensure log channels in {marker_guild.name} ({marker_guild.id}): {e}")
-                ch = marker_guild.get_channel(BOT_LOG_CHANNEL_ID)
-                if isinstance(ch, discord.TextChannel):
-                    marker_ch = ch
+                marker_ch = _resolve_or_track_text_channel(marker_guild, "bot_log", BOT_LOG_NAME, "bot-logs")
                 role_ch = _resolve_or_track_text_channel(marker_guild, "role_log", ROLE_LOG_NAME, "role-logs")
                 ticket_ch = _resolve_ticket_log_channel(marker_guild)
 
@@ -476,8 +474,8 @@ class Client(commands.Bot):
                 print("[Startup] ⚠️  No primary guild resolved; startup marker not sent.")
             elif marker_ch is None:
                 print(
-                    f"[Startup] ⚠️  No bot-logs channel found with ID {BOT_LOG_CHANNEL_ID} "
-                    f"in primary guild {marker_guild.name} ({marker_guild.id}); startup marker not sent."
+                    f"[Startup] ⚠️  No bot-logs channel found in primary guild "
+                    f"{marker_guild.name} ({marker_guild.id}); startup marker not sent."
                 )
             else:
                 try:
@@ -505,9 +503,10 @@ class Client(commands.Bot):
                 if primary_guild is None:
                     print("[Sync] Skipped guild sync because no primary guild was resolved.")
                 else:
-                    # Make global commands available immediately in the primary guild.
-                    self.tree.copy_global_to(guild=discord.Object(id=primary_guild.id))
-                    synced_guild = await self.tree.sync(guild=discord.Object(id=primary_guild.id))
+                    guild_obj = discord.Object(id=primary_guild.id)
+                    # Clear stale guild-scoped copies of global commands before syncing.
+                    self.tree.clear_commands(guild=guild_obj)
+                    synced_guild = await self.tree.sync(guild=guild_obj)
                     print(f"Synced {len(synced_guild)} slash commands to primary guild {primary_guild.id}")
                     try:
                         synced_names = ", ".join(sorted(cmd.name for cmd in synced_guild))
