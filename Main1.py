@@ -3029,6 +3029,26 @@ def _format_autoplay_mode(mode: str) -> str:
     return "GzVibe" if mode == "gzvibe" else "Balanced"
 
 
+def _autoplay_mode_button_style(mode: str) -> discord.ButtonStyle:
+    return discord.ButtonStyle.success if mode == "gzvibe" else discord.ButtonStyle.secondary
+
+
+def _autoplay_mode_embed(mode: str) -> discord.Embed:
+    is_gzvibe = mode == "gzvibe"
+    embed = discord.Embed(
+        title="🎚️ Autoplay Mode",
+        color=0xF1C40F if is_gzvibe else 0x5865F2,
+        description=(
+            "**GzVibe** keeps the queue in the same lane with tighter artist/style continuity."
+            if is_gzvibe
+            else "**Balanced** explores broader recommendations while still avoiding repeats."
+        ),
+    )
+    embed.add_field(name="Current", value=f"**{_format_autoplay_mode(mode)}**", inline=True)
+    embed.add_field(name="Switch", value="Use `/autoplaymode` or the mode button on the music panel.", inline=True)
+    return embed
+
+
 def _summarize_autoplay_debug(entry: dict) -> dict:
     duration = int(entry.get("duration") or 0)
     m, s = divmod(duration, 60)
@@ -3712,6 +3732,49 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
             print(f"[Autoplay] Failed to queue related song: {e}")
     play_next(guild_id, loop)
     await _post_music_panel(guild_id)
+    await _post_next_song_embed(guild_id)
+
+
+async def _post_next_song_embed(guild_id: int) -> None:
+    """Post an automatic next-up embed in the music channel when playback advances."""
+    state = get_music_state(guild_id)
+    guild = client.get_guild(guild_id)
+    if not guild or not state.current:
+        return
+
+    music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
+    if not music_ch:
+        return
+
+    if state.queue:
+        next_song = state.queue[0]
+        embed = discord.Embed(title="⏭️ Up Next", color=0x3498DB)
+        embed.description = f"[{next_song.title}]({next_song.webpage_url})"
+        embed.add_field(name="Duration", value=next_song.format_duration(), inline=True)
+        embed.add_field(name="Source", value="Queue", inline=True)
+        await music_ch.send(embed=embed)
+        return
+
+    if not state.autoplay:
+        return
+
+    ranked = await _rank_autoplay_candidates(state, state.current)
+    if not ranked:
+        return
+
+    score, entry, source = ranked[0]
+    duration = int(entry.get("duration") or 0)
+    m, s = divmod(duration, 60)
+    h, m = divmod(m, 60)
+    duration_text = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    embed = discord.Embed(title="🔮 GzVibe Next", color=0x1DB954)
+    embed.description = f"[{entry.get('title', 'Unknown title')}]({entry.get('webpage_url', '')})"
+    embed.add_field(name="Duration", value=duration_text, inline=True)
+    embed.add_field(name="Mode", value=_format_autoplay_mode(state.autoplay_mode), inline=True)
+    embed.add_field(name="Rank Score", value=str(score), inline=True)
+    embed.set_footer(text=f"Predicted from: {source}")
+    await music_ch.send(embed=embed)
 
 async def search_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
     if not current or len(current) < 2:
@@ -3828,6 +3891,15 @@ class MusicControlView(discord.ui.View):
             ephemeral=True
         )
 
+    @discord.ui.button(emoji="🎚️", label="Mode: GzVibe", style=discord.ButtonStyle.success, row=2, custom_id="autoplay_mode_toggle")
+    async def autoplay_mode_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        state.autoplay_mode = "balanced" if state.autoplay_mode == "gzvibe" else "gzvibe"
+        button.label = f"Mode: {_format_autoplay_mode(state.autoplay_mode)}"
+        button.style = _autoplay_mode_button_style(state.autoplay_mode)
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(embed=_autoplay_mode_embed(state.autoplay_mode), ephemeral=True)
+
 
 class PaginatedHelpView(discord.ui.View):
     """Paginated help embeds with arrow buttons."""
@@ -3909,6 +3981,9 @@ async def _post_music_panel(guild_id: int):
         if getattr(child, "custom_id", None) == "autoplay_toggle":
             child.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
             child.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
+        if getattr(child, "custom_id", None) == "autoplay_mode_toggle":
+            child.label = f"Mode: {_format_autoplay_mode(state.autoplay_mode)}"
+            child.style = _autoplay_mode_button_style(state.autoplay_mode)
     state.now_playing_msg = await music_ch.send(embed=embed, view=view)
 
 
@@ -4112,10 +4187,7 @@ async def autoplaymode(interaction: discord.Interaction, mode: str):
         return
     state = get_music_state(interaction.guild.id)
     state.autoplay_mode = mode if mode in {"gzvibe", "balanced"} else "gzvibe"
-    await interaction.response.send_message(
-        f"Autoplay mode set to **{_format_autoplay_mode(state.autoplay_mode)}**.",
-        ephemeral=True,
-    )
+    await interaction.response.send_message(embed=_autoplay_mode_embed(state.autoplay_mode), ephemeral=True)
     await _post_music_panel(interaction.guild.id)
 
 
