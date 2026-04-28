@@ -3186,11 +3186,23 @@ def _normalize_search_query(query: str) -> str:
     return " ".join(out)
 
 
+_resolved_cookiefile_cache: str | None = None
+_resolved_cookiefile_checked: bool = False
+
 def _resolve_yt_cookiefile() -> str | None:
-    """Resolve yt-dlp cookie file from path env or base64 env payload."""
+    """Resolve yt-dlp cookie file from path env or base64 env payload.
+    Result is cached after the first successful resolution so we never
+    re-decode the base64 blob or re-write the file on subsequent calls."""
+    global _resolved_cookiefile_cache, _resolved_cookiefile_checked
+    if _resolved_cookiefile_checked:
+        return _resolved_cookiefile_cache
+
+    _resolved_cookiefile_checked = True
+
     cookiefile = os.getenv("YTDLP_COOKIES_PATH", "").strip()
     if cookiefile and os.path.exists(cookiefile):
-        return cookiefile
+        _resolved_cookiefile_cache = cookiefile
+        return _resolved_cookiefile_cache
 
     b64_blob = os.getenv("YTDLP_COOKIES_B64", "").strip()
     if not b64_blob:
@@ -3205,7 +3217,8 @@ def _resolve_yt_cookiefile() -> str | None:
             f.write(data)
         if os.path.exists(target):
             print(f"[yt-dlp] Loaded cookies from YTDLP_COOKIES_B64 into {target}")
-            return target
+            _resolved_cookiefile_cache = target
+            return _resolved_cookiefile_cache
     except Exception as e:
         print(f"[yt-dlp] Failed to decode YTDLP_COOKIES_B64: {e}")
     return None
@@ -3752,33 +3765,44 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
             source_name="related",
         )
 
-    # 2) Fallback search pool that still prefers current-song adjacency.
+    # 2) Fallback search pool — run all queries in parallel with a per-search cap
+    # so a single slow yt-dlp call can't block the next song from starting.
     try:
         radio_queries = [
             f"{current.title} radio",
             f"mix similar to {current.title}",
         ]
-        if current_artist_key:
+        # Only add the artist variant when the artist key isn't already embedded
+        # inside the full title (prevents "songs like another brick Another Brick...").
+        if current_artist_key and current_artist_key not in current.title.lower():
             radio_queries.append(f"songs like {current_artist_key} {current.title}")
 
-        for query in radio_queries:
-            results = await search_youtube(query, max_results=12)
+        broad_queries = [
+            f"songs like {current.title}",
+        ]
+        if current_artist_key and current_artist_key not in current.title.lower():
+            broad_queries.append(f"artists similar to {current_artist_key} best songs")
+        else:
+            broad_queries.append(f"music recommendations similar to {current.title}")
+
+        async def _safe_search(q: str, max_r: int) -> list[dict]:
+            try:
+                return await asyncio.wait_for(search_youtube(_normalize_search_query(q), max_results=max_r), timeout=8.0)
+            except Exception:
+                return []
+
+        radio_results, broad_results = await asyncio.gather(
+            asyncio.gather(*[_safe_search(q, 12) for q in radio_queries]),
+            asyncio.gather(*[_safe_search(q, 12) for q in broad_queries]),
+        )
+
+        for q, results in zip(radio_queries, radio_results):
             _consider_candidates(
                 results,
                 source_bias=25 if state.autoplay_mode == "gzvibe" else 20,
-                source_name=query,
+                source_name=q,
             )
-
-        # 3) Broader diversification search when related/mix results are still too similar.
-        broad_queries = [
-            f"songs like {current.title}",
-            f"music recommendations similar to {current.title}",
-        ]
-        if current_artist_key:
-            broad_queries.append(f"artists similar to {current_artist_key} best songs")
-
-        for q in broad_queries:
-            picks = await search_youtube(q, max_results=12)
+        for q, picks in zip(broad_queries, broad_results):
             _consider_candidates(
                 picks,
                 source_bias=14 if state.autoplay_mode == "gzvibe" else 10,
