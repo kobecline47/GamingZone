@@ -6,6 +6,7 @@ Adds a /pokemon command group with: battle, accept, decline, attack, forfeit, mo
 import random
 import json
 import os
+import threading
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -55,6 +56,139 @@ LOSE_COINS      = 30     # coins consolation for losing
 STARTER_POKEMON = "Eevee"  # free pokemon every new player gets
 POKEMON_CHANNEL_NAME = "pokemon-battle"
 _MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+
+
+def _economy_data_dir() -> str:
+    """Pick a durable directory for pokemon economy state."""
+    explicit = os.getenv("POKEMON_DATA_DIR", "").strip()
+    if explicit:
+        os.makedirs(explicit, exist_ok=True)
+        return explicit
+
+    railway_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if railway_mount:
+        os.makedirs(railway_mount, exist_ok=True)
+        return railway_mount
+
+    if os.path.isdir("/data"):
+        return "/data"
+
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+_POKEMON_ECONOMY_SAVE = os.path.join(_economy_data_dir(), "pokemon_economy_state.json")
+_ECONOMY_SAVE_LOCK = threading.RLock()
+_ECONOMY_LOADING = False
+
+
+def _serialize_int_dict(data: dict[int, int]) -> dict[str, int]:
+    return {str(k): int(v) for k, v in data.items()}
+
+
+def _serialize_float_dict(data: dict[int, float]) -> dict[str, float]:
+    return {str(k): float(v) for k, v in data.items()}
+
+
+def _save_economy_state() -> None:
+    if _ECONOMY_LOADING:
+        return
+    payload = {
+        "wallets": _serialize_int_dict(WALLETS),
+        "owned_pokemon": {str(k): list(v) for k, v in OWNED_POKEMON.items()},
+        "active_pokemon": {str(k): str(v) for k, v in ACTIVE_POKEMON.items()},
+        "daily_claimed": _serialize_float_dict(DAILY_CLAIMED),
+    }
+    try:
+        os.makedirs(os.path.dirname(_POKEMON_ECONOMY_SAVE), exist_ok=True)
+        tmp_path = _POKEMON_ECONOMY_SAVE + ".tmp"
+        with _ECONOMY_SAVE_LOCK:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, _POKEMON_ECONOMY_SAVE)
+    except Exception as e:
+        print(f"[PokemonEconomy] Save failed: {e}")
+
+
+def _load_economy_state() -> None:
+    global _ECONOMY_LOADING
+    if not os.path.exists(_POKEMON_ECONOMY_SAVE):
+        return
+    try:
+        with _ECONOMY_SAVE_LOCK:
+            with open(_POKEMON_ECONOMY_SAVE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+        _ECONOMY_LOADING = True
+
+        WALLETS.clear()
+        for k, v in (payload.get("wallets", {}) or {}).items():
+            WALLETS[int(k)] = int(v)
+
+        OWNED_POKEMON.clear()
+        for k, v in (payload.get("owned_pokemon", {}) or {}).items():
+            OWNED_POKEMON[int(k)] = [str(name) for name in (v or [])]
+
+        ACTIVE_POKEMON.clear()
+        for k, v in (payload.get("active_pokemon", {}) or {}).items():
+            ACTIVE_POKEMON[int(k)] = str(v)
+
+        DAILY_CLAIMED.clear()
+        for k, v in (payload.get("daily_claimed", {}) or {}).items():
+            DAILY_CLAIMED[int(k)] = float(v)
+    except Exception as e:
+        print(f"[PokemonEconomy] Load failed: {e}")
+    finally:
+        _ECONOMY_LOADING = False
+
+
+class _AutoSaveDict(dict):
+    def __init__(self, *args, on_change=None, **kwargs):
+        self._on_change = on_change
+        super().__init__(*args, **kwargs)
+
+    def _changed(self) -> None:
+        if self._on_change:
+            self._on_change()
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._changed()
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._changed()
+
+    def clear(self):
+        super().clear()
+        self._changed()
+
+    def pop(self, key, default=None):
+        value = super().pop(key, default)
+        self._changed()
+        return value
+
+    def popitem(self):
+        item = super().popitem()
+        self._changed()
+        return item
+
+    def setdefault(self, key, default=None):
+        if key in self:
+            return super().setdefault(key, default)
+        value = super().setdefault(key, default)
+        self._changed()
+        return value
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._changed()
+
+
+WALLETS = _AutoSaveDict(WALLETS, on_change=_save_economy_state)
+DAILY_CLAIMED = _AutoSaveDict(DAILY_CLAIMED, on_change=_save_economy_state)
+ACTIVE_POKEMON = _AutoSaveDict(ACTIVE_POKEMON, on_change=_save_economy_state)
+_load_economy_state()
+print(f"[PokemonEconomy] Using save file: {_POKEMON_ECONOMY_SAVE}")
 
 
 def _tracked_channel_id(guild_id: int, key: str) -> int | None:
@@ -110,6 +244,7 @@ def _ensure_player(user_id: int) -> None:
         if STARTER_POKEMON not in OWNED_POKEMON[user_id]:
             OWNED_POKEMON[user_id].append(STARTER_POKEMON)
         ACTIVE_POKEMON[user_id] = STARTER_POKEMON
+        _save_economy_state()
 
 
 def _get_active(user_id: int) -> dict:
@@ -1415,6 +1550,7 @@ def setup_pokemon_economy(bot: commands.Bot) -> None:
             return
         WALLETS[uid] -= price
         owned.append(pdata["name"])
+        _save_economy_state()
         embed = discord.Embed(
             title="🎉 Pokemon Purchased!",
             description=(
