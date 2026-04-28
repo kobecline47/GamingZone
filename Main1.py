@@ -2841,11 +2841,20 @@ def _youtube_video_id(url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         host = (parsed.netloc or "").lower()
         if "youtu.be" in host:
-            return parsed.path.lstrip("/")
-        if "youtube.com" in host:
+            return (parsed.path or "").lstrip("/").split("/")[0]
+        if "youtube.com" in host or "youtube-nocookie.com" in host:
             q = urllib.parse.parse_qs(parsed.query)
             if q.get("v"):
                 return q["v"][0]
+            if q.get("id"):
+                return q["id"][0]
+            path_parts = [p for p in (parsed.path or "").split("/") if p]
+            if len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live", "v"}:
+                return path_parts[1]
+        if "googlevideo.com" in host:
+            q = urllib.parse.parse_qs(parsed.query)
+            if q.get("id"):
+                return q["id"][0]
     except Exception:
         return ""
     return ""
@@ -3528,6 +3537,12 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
         blocked_title_keys.add(current_title_key)
     current_artist_key = _song_artist_key(current)
     seed_tokens = _song_signature_tokens(current.title)
+    recent_seed_titles: list[str] = [current.title]
+    if state.last_finished and state.last_finished.title:
+        recent_seed_titles.append(state.last_finished.title)
+    for q_item in list(state.queue)[:2]:
+        if q_item and q_item.title:
+            recent_seed_titles.append(q_item.title)
     queue_artist_keys: set[str] = set()
     for q_item in state.queue:
         qid = _song_identity(q_item)
@@ -3550,6 +3565,8 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
         if rkey and any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
             return False
         if _titles_too_similar(current.title, rtitle):
+            return False
+        if any(_titles_too_similar(seed_title, rtitle) for seed_title in recent_seed_titles if seed_title):
             return False
 
         # Hard guard: if candidate still contains the seed song signature tokens,
