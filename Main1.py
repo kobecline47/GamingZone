@@ -2711,7 +2711,8 @@ YTDL_STREAM_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'noplaylist': True,
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+    'source_address': '0.0.0.0',
     'extractor_args': {'youtube': {'player_client': ['android', 'web', 'tv_embedded']}},
 }
 
@@ -4107,7 +4108,7 @@ class PaginatedHelpView(discord.ui.View):
 
 
 async def _post_music_panel(guild_id: int):
-    """Delete the old Now Playing panel and post a fresh one with control buttons."""
+    """Keep one persistent Now Playing panel and update it in place."""
     state = get_music_state(guild_id)
     guild = client.get_guild(guild_id)
     if not guild:
@@ -4115,35 +4116,6 @@ async def _post_music_panel(guild_id: int):
     music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
     if not music_ch:
         return
-    # On restart the in-memory message reference is lost, so clean up recent
-    # stale bot panel variants before posting a new one.
-    try:
-        stale_titles = {"🎵 Now Playing", "Now Playing", "🎵 GzVibe Now Playing", "✦ GzVibe Control Deck ✦"}
-        deleted_panels = 0
-        async for msg in music_ch.history(limit=50):
-            if msg.author.id != client.user.id:
-                continue
-            if not msg.embeds:
-                continue
-            first_embed = msg.embeds[0]
-            title = (first_embed.title or "").strip()
-            if title in stale_titles:
-                try:
-                    await msg.delete()
-                    deleted_panels += 1
-                    if deleted_panels >= 3:
-                        break
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    # Delete previous panel
-    if state.now_playing_msg:
-        try:
-            await state.now_playing_msg.delete()
-        except Exception:
-            pass
-        state.now_playing_msg = None
     if not state.current:
         return
     embed = discord.Embed(
@@ -4183,6 +4155,36 @@ async def _post_music_panel(guild_id: int):
         if getattr(child, "custom_id", None) == "autoplay_mode_toggle":
             child.label = f"Mode: {_format_autoplay_mode(state.autoplay_mode)}"
             child.style = _autoplay_mode_button_style(state.autoplay_mode)
+
+    # Prefer editing the existing panel to avoid flicker/disappearance.
+    if state.now_playing_msg:
+        try:
+            await state.now_playing_msg.edit(embed=embed, view=view)
+            return
+        except Exception as e:
+            print(f"[Music] Could not edit existing music panel, sending a new one: {e}")
+            state.now_playing_msg = None
+
+    # Recover after restart: try to reuse the most recent bot panel message.
+    if state.now_playing_msg is None:
+        try:
+            async for msg in music_ch.history(limit=20):
+                if msg.author.id != client.user.id or not msg.embeds:
+                    continue
+                if (msg.embeds[0].title or "").strip() == "✦ GzVibe Control Deck ✦":
+                    state.now_playing_msg = msg
+                    break
+        except Exception:
+            pass
+
+    if state.now_playing_msg:
+        try:
+            await state.now_playing_msg.edit(embed=embed, view=view)
+            return
+        except Exception as e:
+            print(f"[Music] Existing panel is not editable, posting a fresh panel: {e}")
+            state.now_playing_msg = None
+
     state.now_playing_msg = await music_ch.send(embed=embed, view=view)
 
 
