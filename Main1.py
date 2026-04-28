@@ -2742,6 +2742,7 @@ class GuildMusicState:
         self.voice_client: discord.VoiceClient | None = None
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
+        self.source_transformer: discord.PCMVolumeTransformer | None = None
         self.autoplay: bool = False
         self.autoplay_mode: str = "gzvibe"
         self.last_autoplay_debug: list[dict] = []
@@ -3839,7 +3840,11 @@ def _extract_stream_url(song: SongEntry) -> str | None:
     try:
         import yt_dlp
 
-        with yt_dlp.YoutubeDL(YTDL_STREAM_OPTS) as ydl:
+        opts = dict(YTDL_STREAM_OPTS)
+        cookiefile = _resolve_yt_cookiefile()
+        if cookiefile:
+            opts['cookiefile'] = cookiefile
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(target, download=False)
             if info and info.get('url'):
                 url = info['url']
@@ -3908,9 +3913,11 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
 
         volume_factor = max(0.1, min(2.0, state.volume))
         source = discord.PCMVolumeTransformer(audio, volume=volume_factor)
+        state.source_transformer = source
 
         def after_play(error):
             try:
+                state.source_transformer = None
                 if error:
                     print(f'[Music] Player error on "{state.current.title if state.current else song.title}": {error}')
                     attempts = state.retry_attempts.get(retry_key, 0)
@@ -4085,6 +4092,13 @@ class MusicControlView(discord.ui.View):
         state.queue.clear()
         state.current = None
         vc.stop()
+        # Dismiss the deck since nothing is playing
+        if state.now_playing_msg:
+            try:
+                await state.now_playing_msg.delete()
+            except Exception:
+                pass
+            state.now_playing_msg = None
         await interaction.response.send_message("⏹️ Stopped and queue cleared.", ephemeral=True)
 
     @discord.ui.button(emoji="📋", label="Queue Snapshot", style=discord.ButtonStyle.secondary, row=1)
@@ -4110,18 +4124,22 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(emoji="🔉", label="Vol -10%", style=discord.ButtonStyle.secondary, row=1)
     async def vol_down(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
-        state.volume = max(0.0, state.volume - 0.1)
+        state.volume = max(0.0, round(state.volume - 0.1, 2))
+        if state.source_transformer:
+            state.source_transformer.volume = state.volume
         await interaction.response.send_message(
-            f"🔉 Volume: {int(state.volume * 100)}% (applies immediately to next track)",
+            f"🔉 Volume: {int(state.volume * 100)}%",
             ephemeral=True,
         )
 
     @discord.ui.button(emoji="🔊", label="Vol +10%", style=discord.ButtonStyle.secondary, row=1)
     async def vol_up(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_music_state(self.guild_id)
-        state.volume = min(1.0, state.volume + 0.1)
+        state.volume = min(1.0, round(state.volume + 0.1, 2))
+        if state.source_transformer:
+            state.source_transformer.volume = state.volume
         await interaction.response.send_message(
-            f"🔊 Volume: {int(state.volume * 100)}% (applies immediately to next track)",
+            f"🔊 Volume: {int(state.volume * 100)}%",
             ephemeral=True,
         )
 
@@ -4418,6 +4436,8 @@ async def play(interaction: discord.Interaction, query: str):
                 await interaction.followup.send(embed=embed)
             except Exception:
                 pass
+            # Refresh deck in-place so Queue Depth updates without moving the panel
+            await _post_music_panel(interaction.guild.id)
     except Exception as e:
         tb = traceback.format_exc()
         print(f'[Play Error] {tb}')
@@ -4471,6 +4491,13 @@ async def stop(interaction: discord.Interaction):
     state.queue.clear()
     state.current = None
     vc.stop()
+    # Remove the control deck so it doesn't show stale song info
+    if state.now_playing_msg:
+        try:
+            await state.now_playing_msg.delete()
+        except Exception:
+            pass
+        state.now_playing_msg = None
     await interaction.response.send_message("Stopped and queue cleared.")
 
 @client.tree.command(name="leave", description="Disconnect the bot from the voice channel", guild=GUILD_ID)
@@ -4485,6 +4512,13 @@ async def leave(interaction: discord.Interaction):
     state.queue.clear()
     state.current = None
     await vc.disconnect()
+    # Remove the control deck on disconnect
+    if state.now_playing_msg:
+        try:
+            await state.now_playing_msg.delete()
+        except Exception:
+            pass
+        state.now_playing_msg = None
     await interaction.response.send_message("Disconnected.")
 
 @client.tree.command(name="queue", description="Show the current music queue", guild=GUILD_ID)
