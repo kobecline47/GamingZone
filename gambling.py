@@ -1893,22 +1893,9 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
 def setup_gambling(bot: commands.Bot) -> None:
     """Register all casino slash commands globally."""
 
-    # Remove any existing casino commands to prevent duplicates (global + guild scopes)
-    casino_commands = [
-        "casinomenu", "setupcasino", "daily", "work", "givepokcoin",
-        "slots", "blackjack", "coinflip", "roulette", "dice", "highlow", "plinko", "heist"
-    ]
-    for cmd_name in casino_commands:
-        try:
-            bot.tree.remove_command(cmd_name)
-        except Exception:
-            pass
-        # Also clear from guild-scoped commands if they exist
-        try:
-            for guild_commands in bot.tree._guild_commands.values():
-                guild_commands.pop(cmd_name, None)
-        except Exception:
-            pass
+    # Skip if already registered (check first command as marker)
+    if bot.tree.get_command("casinomenu") is not None:
+        return
 
     # ── /casinomenu ───────────────────────────────────────────────────────────
     @bot.tree.command(
