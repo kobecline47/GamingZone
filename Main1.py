@@ -2703,8 +2703,8 @@ if FFMPEG_EXE == "ffmpeg" and not _shutil.which("ffmpeg"):
 
 FFMPEG_OPTS = {
     'executable': FFMPEG_EXE,
-    'before_options': '-nostdin -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -q:a 5 -ac 2 -ar 48000',
+    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 10 -rw_timeout 15000000',
+    'options': '-vn -q:a 5 -ac 2 -ar 48000 -bufsize 256k',
 }
 
 YTDL_STREAM_OPTS = {
@@ -2743,6 +2743,7 @@ class GuildMusicState:
         self.autoplay: bool = False
         self.autoplay_mode: str = "gzvibe"
         self.last_autoplay_debug: list[dict] = []
+        self.retry_attempts: dict[str, int] = {}
 
 music_states: dict[int, GuildMusicState] = {}
 
@@ -3750,6 +3751,7 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
 
     state.current = state.queue.popleft()
     song = state.current
+    retry_key = _song_identity(song) or (song.webpage_url or song.url or song.title).strip().lower()
     try:
         # Resolve stream URL in a thread with timeout so we never block the event loop
         try:
@@ -3792,8 +3794,17 @@ async def play_next(guild_id: int, loop: asyncio.AbstractEventLoop):
             try:
                 if error:
                     print(f'[Music] Player error on "{state.current.title if state.current else song.title}": {error}')
+                    attempts = state.retry_attempts.get(retry_key, 0)
+                    if attempts < 1:
+                        state.retry_attempts[retry_key] = attempts + 1
+                        print(f'[Music] Retrying track once after player error: {song.title}')
+                        state.queue.appendleft(song)
+                        state.current = None
+                        asyncio.run_coroutine_threadsafe(play_next_async(guild_id, loop), loop)
+                        return
                 else:
                     print(f'[Music] Track finished: {state.current.title if state.current else song.title}')
+                    state.retry_attempts.pop(retry_key, None)
                 finished_song = state.current
                 _remember_finished_song(state, finished_song)
                 state.current = None
