@@ -3039,7 +3039,7 @@ def _autoplay_candidate_score(
             score -= 6 if maki_mode else 4
 
     score += _autoplay_noise_penalty(title)
-    if maki_mode and source_bias < 20:
+    if maki_mode and source_bias < 12:
         score -= 3
     return score
 
@@ -3587,7 +3587,7 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
             results = await search_youtube(query, max_results=12)
             _consider_candidates(
                 results,
-                source_bias=18 if state.autoplay_mode == "gzvibe" else 20,
+                source_bias=25 if state.autoplay_mode == "gzvibe" else 20,
                 source_name=query,
             )
 
@@ -3603,7 +3603,7 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
             picks = await search_youtube(q, max_results=12)
             _consider_candidates(
                 picks,
-                source_bias=6 if state.autoplay_mode == "gzvibe" else 10,
+                source_bias=14 if state.autoplay_mode == "gzvibe" else 10,
                 source_name=q,
             )
     except Exception as e:
