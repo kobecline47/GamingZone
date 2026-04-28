@@ -3694,7 +3694,88 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         print(f"[Autoplay] Ranked {len(ranked)} candidates but all were repeat-like; no pick made.")
     else:
         print(f"[Autoplay] No ranked candidates available for: {current.title}")
+
+    # Last resort: keep playback alive by selecting a best-effort candidate
+    # from broad artist/title searches with relaxed filtering.
+    fallback = await _autoplay_last_chance_pick(state, current)
+    if fallback:
+        print(f"[Autoplay] Last-chance fallback pick: {fallback.get('title', 'Unknown title')}")
+        return fallback
     return None
+
+
+async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEntry") -> dict | None:
+    """Best-effort fallback when normal autoplay ranking cannot pick a track."""
+    artist_key = _song_artist_key(current)
+    queries = [
+        f"songs like {current.title}",
+        f"music similar to {current.title}",
+    ]
+    if artist_key:
+        queries.extend([
+            f"{artist_key} best songs",
+            f"{artist_key} radio",
+        ])
+
+    recent_ids = set(state.recent_track_ids)
+    current_id = _song_identity(current)
+    if current_id:
+        recent_ids.add(current_id)
+
+    recent_title_keys = set(state.recent_title_keys)
+    current_key = _song_core_key(current.title)
+    if current_key:
+        recent_title_keys.add(current_key)
+
+    async def _safe_search(query: str) -> list[dict]:
+        try:
+            normalized = _normalize_search_query(query)
+            return await asyncio.wait_for(search_youtube(normalized, max_results=10), timeout=8.0)
+        except Exception:
+            return []
+
+    result_sets = await asyncio.gather(*[_safe_search(q) for q in queries])
+
+    best: tuple[int, dict] | None = None
+    for query, results in zip(queries, result_sets):
+        for entry in results:
+            title = entry.get("title", "")
+            if not title:
+                continue
+
+            candidate_id = _entry_identity(entry)
+            if candidate_id and candidate_id in recent_ids:
+                continue
+
+            candidate_key = _song_core_key(title)
+            if candidate_key and any(_same_song_key(candidate_key, key) for key in recent_title_keys):
+                continue
+
+            if _titles_too_similar(current.title, title):
+                continue
+
+            candidate_url = entry.get("webpage_url") or ""
+            if candidate_url and current.webpage_url and candidate_url == current.webpage_url:
+                continue
+
+            score = _autoplay_candidate_score(
+                entry,
+                current=current,
+                recent_title_keys=state.recent_title_keys,
+                recent_artist_keys=state.recent_artist_keys,
+                queue_artist_keys=set(),
+                current_artist_key=artist_key,
+                autoplay_mode=state.autoplay_mode,
+                source_bias=9,
+            )
+
+            if "radio" in query.lower() or "best songs" in query.lower():
+                score += 2
+
+            if best is None or score > best[0]:
+                best = (score, entry)
+
+    return best[1] if best else None
 
 
 async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntry") -> list[tuple[int, dict, str]]:
