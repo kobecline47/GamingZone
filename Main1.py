@@ -2748,12 +2748,16 @@ class SongEntry:
         self.title = title
         self.url = url
         self.webpage_url = webpage_url
-        self.duration = duration
+        try:
+            self.duration = int(float(duration or 0))
+        except (TypeError, ValueError):
+            self.duration = 0
         self.requester = requester
         self.local_path = local_path
 
     def format_duration(self) -> str:
-        m, s = divmod(self.duration, 60)
+        duration = int(self.duration or 0)
+        m, s = divmod(duration, 60)
         h, m = divmod(m, 60)
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
