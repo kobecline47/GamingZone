@@ -2734,6 +2734,8 @@ class GuildMusicState:
         self.volume: float = 0.5
         self.now_playing_msg: discord.Message | None = None
         self.autoplay: bool = False
+        self.autoplay_mode: str = "gzvibe"
+        self.last_autoplay_debug: list[dict] = []
 
 music_states: dict[int, GuildMusicState] = {}
 
@@ -2741,6 +2743,88 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     if guild_id not in music_states:
         music_states[guild_id] = GuildMusicState()
     return music_states[guild_id]
+
+
+def _music_data_dir() -> str:
+    explicit = os.getenv("MUSIC_DATA_DIR", "").strip()
+    if explicit:
+        os.makedirs(explicit, exist_ok=True)
+        return explicit
+    railway_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if railway_mount:
+        os.makedirs(railway_mount, exist_ok=True)
+        return railway_mount
+    if os.path.isdir("/data"):
+        return "/data"
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+_PLAYLISTS_PATH = os.path.join(_music_data_dir(), "music_playlists.json")
+MUSIC_PLAYLISTS: dict[str, dict] = {"guilds": {}}
+
+
+def _load_music_playlists() -> None:
+    global MUSIC_PLAYLISTS
+    if not os.path.exists(_PLAYLISTS_PATH):
+        return
+    try:
+        with open(_PLAYLISTS_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict) and isinstance(loaded.get("guilds", {}), dict):
+            MUSIC_PLAYLISTS = loaded
+    except Exception as e:
+        print(f"[Playlist] Failed to load playlists: {e}")
+
+
+def _save_music_playlists() -> None:
+    try:
+        os.makedirs(os.path.dirname(_PLAYLISTS_PATH), exist_ok=True)
+        tmp_path = _PLAYLISTS_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(MUSIC_PLAYLISTS, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _PLAYLISTS_PATH)
+    except Exception as e:
+        print(f"[Playlist] Failed to save playlists: {e}")
+
+
+def _playlist_bucket(guild_id: int, user_id: int) -> dict[str, list[dict]]:
+    guilds = MUSIC_PLAYLISTS.setdefault("guilds", {})
+    g = guilds.setdefault(str(guild_id), {})
+    return g.setdefault(str(user_id), {})
+
+
+def _playlist_track(song: SongEntry) -> dict:
+    return {
+        "title": song.title,
+        "webpage_url": song.webpage_url or "",
+        "duration": int(song.duration or 0),
+    }
+
+
+def _normalize_playlist_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip())[:40]
+
+
+def _playlist_has_track(tracks: list[dict], track: dict) -> bool:
+    track_url = (track.get("webpage_url") or "").strip()
+    track_title = (track.get("title") or "").strip().casefold()
+    for item in tracks:
+        item_url = (item.get("webpage_url") or "").strip()
+        item_title = (item.get("title") or "").strip().casefold()
+        if track_url and item_url and track_url == item_url:
+            return True
+        if track_title and item_title and track_title == item_title:
+            return True
+    return False
+
+
+def _gzvibe_playlist_embed(title: str, description: str, color: int = 0x1DB954) -> discord.Embed:
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_footer(text="GzVibe Playlist")
+    return embed
+
+
+_load_music_playlists()
 
 
 def _youtube_video_id(url: str) -> str:
@@ -2863,6 +2947,138 @@ def _song_signature_tokens(title: str) -> list[str]:
     tokens = [t for t in core.split() if len(t) >= 3 and t not in stop]
     # keep first few meaningful tokens as the song signature
     return tokens[:4]
+
+
+def _autoplay_title_tokens(title: str) -> set[str]:
+    core = _song_core_key(title)
+    if not core:
+        return set()
+    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with"}
+    return {t for t in core.split() if len(t) >= 3 and t not in stop}
+
+
+def _autoplay_noise_penalty(title: str) -> int:
+    lowered = (title or "").lower()
+    penalty = 0
+    noisy_terms = {
+        "slowed": -5,
+        "reverb": -4,
+        "sped up": -5,
+        "nightcore": -6,
+        "8d": -6,
+        "bass boosted": -4,
+        "full album": -8,
+        "playlist": -8,
+        "karaoke": -7,
+        "reaction": -7,
+        "compilation": -6,
+    }
+    for term, points in noisy_terms.items():
+        if term in lowered:
+            penalty += points
+    return penalty
+
+
+def _autoplay_candidate_score(
+    entry: dict,
+    *,
+    current: "SongEntry",
+    recent_title_keys: collections.deque[str],
+    recent_artist_keys: collections.deque[str],
+    queue_artist_keys: set[str],
+    current_artist_key: str,
+    autoplay_mode: str,
+    source_bias: int,
+) -> int:
+    score = source_bias
+    title = entry.get("title", "")
+    candidate_tokens = _autoplay_title_tokens(title)
+    current_tokens = set(_song_signature_tokens(current.title))
+    maki_mode = autoplay_mode == "gzvibe"
+
+    if current_tokens and candidate_tokens:
+        token_matches = len(candidate_tokens.intersection(current_tokens))
+        token_weight = 5 if maki_mode else 4
+        score += min(15 if maki_mode else 12, token_matches * token_weight)
+        if maki_mode and token_matches == 0:
+            score -= 6
+
+    for recent_key in list(recent_title_keys)[-3:]:
+        recent_tokens = {token for token in recent_key.split() if len(token) >= 3}
+        if recent_tokens:
+            overlap = len(candidate_tokens.intersection(recent_tokens))
+            score += min(4 if maki_mode else 3, overlap)
+
+    candidate_artist = _entry_artist_key(entry)
+    if candidate_artist:
+        if current_artist_key and candidate_artist == current_artist_key:
+            score += 15 if maki_mode else 9
+        elif candidate_artist in queue_artist_keys:
+            score += 8 if maki_mode else 4
+        repeat_count = sum(1 for artist in recent_artist_keys if artist == candidate_artist)
+        if repeat_count == 1:
+            score += 2
+        elif repeat_count >= 2:
+            score -= min(6, repeat_count * 2)
+        if maki_mode and candidate_artist not in queue_artist_keys and candidate_artist != current_artist_key:
+            score -= 4
+    else:
+        score -= 4 if maki_mode else 2
+
+    candidate_duration = int(entry.get("duration") or 0)
+    current_duration = int(current.duration or 0)
+    if candidate_duration and current_duration:
+        longer = max(candidate_duration, current_duration)
+        shorter = max(1, min(candidate_duration, current_duration))
+        ratio = longer / shorter
+        if ratio <= 1.35:
+            score += 4
+        elif ratio <= 2.0:
+            score += 2
+        elif ratio >= 4.0:
+            score -= 6 if maki_mode else 4
+
+    score += _autoplay_noise_penalty(title)
+    if maki_mode and source_bias < 12:
+        score -= 3
+    return score
+
+
+def _format_autoplay_mode(mode: str) -> str:
+    return "GzVibe" if mode == "gzvibe" else "Balanced"
+
+
+def _autoplay_mode_button_style(mode: str) -> discord.ButtonStyle:
+    return discord.ButtonStyle.success if mode == "gzvibe" else discord.ButtonStyle.secondary
+
+
+def _autoplay_mode_embed(mode: str) -> discord.Embed:
+    is_gzvibe = mode == "gzvibe"
+    embed = discord.Embed(
+        title="🎚️ Autoplay Mode",
+        color=0xF1C40F if is_gzvibe else 0x5865F2,
+        description=(
+            "**GzVibe** keeps the queue in the same lane with tighter artist/style continuity."
+            if is_gzvibe
+            else "**Balanced** explores broader recommendations while still avoiding repeats."
+        ),
+    )
+    embed.add_field(name="Current", value=f"**{_format_autoplay_mode(mode)}**", inline=True)
+    embed.add_field(name="Switch", value="Use `/autoplaymode` or the mode button on the music panel.", inline=True)
+    return embed
+
+
+def _summarize_autoplay_debug(entry: dict) -> dict:
+    duration = int(entry.get("duration") or 0)
+    m, s = divmod(duration, 60)
+    h, m = divmod(m, 60)
+    return {
+        "title": entry.get("title", "Unknown title"),
+        "source": entry.get("source", "unknown"),
+        "score": entry.get("score", 0),
+        "artist": entry.get("artist", "Unknown"),
+        "duration": f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}",
+    }
 
 
 def _artist_key_from_title(title: str) -> str:
@@ -3244,7 +3460,7 @@ def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
                 'webpage_url': wurl,
                 'duration': v.get('duration') or 0,
             })
-            if len(results) >= 5:
+            if len(results) >= 12:
                 break
         return results
     except Exception as e:
@@ -3253,13 +3469,33 @@ def _fetch_related_yt_dlp(webpage_url: str, exclude_url: str) -> list[dict]:
 
 
 async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> dict | None:
-    """Fetch a genuine related song for autoplay. Tries yt-dlp related videos first,
-    then falls back to a 'mix similar to <title>' text search."""
+    """Fetch a genuine related song for autoplay using the current ranking mode."""
+    ranked = await _rank_autoplay_candidates(state, current)
+    state.last_autoplay_debug = [
+        _summarize_autoplay_debug({
+            **entry,
+            "source": source_name,
+            "score": score,
+            "artist": _entry_artist_key(entry) or "Unknown",
+        })
+        for score, entry, source_name in ranked[:5]
+    ]
+    if ranked:
+        best_score, best_entry, best_source = ranked[0]
+        print(
+            f"[Autoplay] Picked {best_source} candidate "
+            f"({best_score}, mode={state.autoplay_mode}): {best_entry.get('title', 'Unknown')}"
+        )
+        return best_entry
+    return None
+
+
+async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntry") -> list[tuple[int, dict, str]]:
+    """Build a ranked list of autoplay candidates so runtime and debug share the same logic."""
     loop = asyncio.get_running_loop()
     exclude = current.webpage_url or current.url
     blocked_ids: set[str] = set(state.recent_track_ids)
     blocked_title_keys: set[str] = set(state.recent_title_keys)
-    blocked_artist_keys: set[str] = set(state.recent_artist_keys)
     current_id = _song_identity(current)
     if current_id:
         blocked_ids.add(current_id)
@@ -3268,8 +3504,7 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         blocked_title_keys.add(current_title_key)
     current_artist_key = _song_artist_key(current)
     seed_tokens = _song_signature_tokens(current.title)
-    if current_artist_key:
-        blocked_artist_keys.add(current_artist_key)
+    queue_artist_keys: set[str] = set()
     for q_item in state.queue:
         qid = _song_identity(q_item)
         if qid:
@@ -3279,7 +3514,7 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             blocked_title_keys.add(qkey)
         qartist = _song_artist_key(q_item)
         if qartist:
-            blocked_artist_keys.add(qartist)
+            queue_artist_keys.add(qartist)
 
     def _candidate_allowed(entry: dict) -> bool:
         rid = _entry_identity(entry)
@@ -3302,28 +3537,59 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             if len(seed_tokens) >= 3 and sum(1 for t in seed_tokens[:3] if t in rtokens) >= 2:
                 return False
 
-        rartist = _entry_artist_key(entry)
-        if rartist and rartist in blocked_artist_keys:
-            return False
-
         if rtitle.lower() == current.title.lower():
             return False
 
         return True
 
+    seen_candidates: set[str] = set()
+    scored_candidates: list[tuple[int, dict, str]] = []
+
+    def _consider_candidates(entries: list[dict], *, source_bias: int, source_name: str) -> None:
+        for entry in entries:
+            if not _candidate_allowed(entry):
+                continue
+            candidate_key = _entry_identity(entry) or entry.get("webpage_url") or entry.get("title", "").lower()
+            if not candidate_key or candidate_key in seen_candidates:
+                continue
+            seen_candidates.add(candidate_key)
+            score = _autoplay_candidate_score(
+                entry,
+                current=current,
+                recent_title_keys=state.recent_title_keys,
+                recent_artist_keys=state.recent_artist_keys,
+                queue_artist_keys=queue_artist_keys,
+                current_artist_key=current_artist_key,
+                autoplay_mode=state.autoplay_mode,
+                source_bias=source_bias,
+            )
+            scored_candidates.append((score, entry, source_name))
+
     # 1) Try pulling YouTube related videos via yt-dlp
     if exclude:
         related = await loop.run_in_executor(None, lambda: _fetch_related_yt_dlp(exclude, exclude))
-        for r in related:
-            if _candidate_allowed(r):
-                return r
+        _consider_candidates(
+            related,
+            source_bias=38 if state.autoplay_mode == "gzvibe" else 30,
+            source_name="related",
+        )
 
-    # 2) Fallback: search for "<title> mix" and skip exact title match
+    # 2) Fallback search pool that still prefers current-song adjacency.
     try:
-        results = await search_youtube(f"mix similar to {current.title}", max_results=10)
-        for r in results:
-            if _candidate_allowed(r):
-                return r
+        radio_queries = [
+            f"{current.title} radio",
+            f"mix similar to {current.title}",
+        ]
+        if current_artist_key:
+            radio_queries.append(f"songs like {current_artist_key} {current.title}")
+
+        for query in radio_queries:
+            results = await search_youtube(query, max_results=12)
+            _consider_candidates(
+                results,
+                source_bias=25 if state.autoplay_mode == "gzvibe" else 20,
+                source_name=query,
+            )
 
         # 3) Broader diversification search when related/mix results are still too similar.
         broad_queries = [
@@ -3335,13 +3601,18 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
 
         for q in broad_queries:
             picks = await search_youtube(q, max_results=12)
-            for r in picks:
-                if _candidate_allowed(r):
-                    return r
+            _consider_candidates(
+                picks,
+                source_bias=14 if state.autoplay_mode == "gzvibe" else 10,
+                source_name=q,
+            )
     except Exception as e:
         print(f"[Autoplay] Fallback search failed: {e}")
 
-    return None
+    if scored_candidates:
+        return sorted(scored_candidates, key=lambda item: item[0], reverse=True)
+
+    return []
 
 
 def _ffmpeg_candidate_paths() -> list[str]:
@@ -3475,11 +3746,54 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
                     duration=r.get('duration') or 0,
                     requester=seed_song.requester,
                 ))
-                print(f"[Autoplay] Queued related: {r['title']}")
+                print(f"[Autoplay] Queued related: {r['title']} (mode={state.autoplay_mode})")
         except Exception as e:
             print(f"[Autoplay] Failed to queue related song: {e}")
     play_next(guild_id, loop)
     await _post_music_panel(guild_id)
+    await _post_next_song_embed(guild_id)
+
+
+async def _post_next_song_embed(guild_id: int) -> None:
+    """Post an automatic next-up embed in the music channel when playback advances."""
+    state = get_music_state(guild_id)
+    guild = client.get_guild(guild_id)
+    if not guild or not state.current:
+        return
+
+    music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
+    if not music_ch:
+        return
+
+    if state.queue:
+        next_song = state.queue[0]
+        embed = discord.Embed(title="⏭️ Up Next", color=0x3498DB)
+        embed.description = f"[{next_song.title}]({next_song.webpage_url})"
+        embed.add_field(name="Duration", value=next_song.format_duration(), inline=True)
+        embed.add_field(name="Source", value="Queue", inline=True)
+        await music_ch.send(embed=embed)
+        return
+
+    if not state.autoplay:
+        return
+
+    ranked = await _rank_autoplay_candidates(state, state.current)
+    if not ranked:
+        return
+
+    score, entry, source = ranked[0]
+    duration = int(entry.get("duration") or 0)
+    m, s = divmod(duration, 60)
+    h, m = divmod(m, 60)
+    duration_text = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    embed = discord.Embed(title="🔮 GzVibe Next", color=0x1DB954)
+    embed.description = f"[{entry.get('title', 'Unknown title')}]({entry.get('webpage_url', '')})"
+    embed.add_field(name="Duration", value=duration_text, inline=True)
+    embed.add_field(name="Mode", value=_format_autoplay_mode(state.autoplay_mode), inline=True)
+    embed.add_field(name="Rank Score", value=str(score), inline=True)
+    embed.set_footer(text=f"Predicted from: {source}")
+    await music_ch.send(embed=embed)
 
 async def search_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
     if not current or len(current) < 2:
@@ -3587,11 +3901,57 @@ class MusicControlView(discord.ui.View):
         button.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
         button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
-        autoplay_note = "I'll queue related songs automatically!" if state.autoplay else ""
+        autoplay_note = (
+            f"I'll queue related songs automatically in **{_format_autoplay_mode(state.autoplay_mode)}** mode!"
+            if state.autoplay else ""
+        )
         await interaction.followup.send(
             f"🔁 Autoplay is now **{'ON' if state.autoplay else 'OFF'}**. {autoplay_note}",
             ephemeral=True
         )
+
+    @discord.ui.button(emoji="🎚️", label="Mode: GzVibe", style=discord.ButtonStyle.success, row=2, custom_id="autoplay_mode_toggle")
+    async def autoplay_mode_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        state.autoplay_mode = "balanced" if state.autoplay_mode == "gzvibe" else "gzvibe"
+        button.label = f"Mode: {_format_autoplay_mode(state.autoplay_mode)}"
+        button.style = _autoplay_mode_button_style(state.autoplay_mode)
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(embed=_autoplay_mode_embed(state.autoplay_mode), ephemeral=True)
+
+    @discord.ui.button(emoji="➕", label="Add To Playlist", style=discord.ButtonStyle.primary, row=2, custom_id="playlist_quick_add")
+    async def playlist_quick_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = get_music_state(self.guild_id)
+        song = state.current or (state.queue[0] if state.queue else None)
+        if not song:
+            await interaction.response.send_message("No song is available to add right now.", ephemeral=True)
+            return
+
+        playlist_name = "GzVibe Favorites"
+        user_playlists = _playlist_bucket(interaction.guild.id, interaction.user.id)
+        tracks = user_playlists.setdefault(playlist_name, [])
+        track = _playlist_track(song)
+
+        if _playlist_has_track(tracks, track):
+            embed = _gzvibe_playlist_embed(
+                "🎵 Already In Playlist",
+                f"[{song.title}]({song.webpage_url}) is already saved in **{playlist_name}**.",
+                color=0xF39C12,
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        tracks.append(track)
+        _save_music_playlists()
+
+        embed = _gzvibe_playlist_embed(
+            "✅ Added To Playlist",
+            (
+                f"Saved [{song.title}]({song.webpage_url}) to **{playlist_name}**.\n"
+                f"You now have `{len(tracks)}` songs in that playlist."
+            ),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class PaginatedHelpView(discord.ui.View):
@@ -3665,7 +4025,7 @@ async def _post_music_panel(guild_id: int):
     if q:
         footer_parts.append(f"{q} song{'s' if q != 1 else ''} in queue")
     if state.autoplay:
-        footer_parts.append("🔁 Autoplay ON")
+        footer_parts.append(f"🔁 Autoplay ON • {_format_autoplay_mode(state.autoplay_mode)}")
     if footer_parts:
         embed.set_footer(text="  •  ".join(footer_parts))
     view = MusicControlView(guild_id)
@@ -3674,6 +4034,9 @@ async def _post_music_panel(guild_id: int):
         if getattr(child, "custom_id", None) == "autoplay_toggle":
             child.label = f"Autoplay: {'ON' if state.autoplay else 'OFF'}"
             child.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
+        if getattr(child, "custom_id", None) == "autoplay_mode_toggle":
+            child.label = f"Mode: {_format_autoplay_mode(state.autoplay_mode)}"
+            child.style = _autoplay_mode_button_style(state.autoplay_mode)
     state.now_playing_msg = await music_ch.send(embed=embed, view=view)
 
 
@@ -3865,6 +4228,230 @@ async def volume(interaction: discord.Interaction, level: int):
     state = get_music_state(interaction.guild.id)
     state.volume = level / 100
     await interaction.response.send_message(f"Volume set to {level}% (applies immediately to next track).")
+
+
+@client.tree.command(name="autoplaymode", description="Set how strict autoplay should be", guild=GUILD_ID)
+@discord.app_commands.choices(mode=[
+    discord.app_commands.Choice(name="GzVibe", value="gzvibe"),
+    discord.app_commands.Choice(name="Balanced", value="balanced"),
+])
+async def autoplaymode(interaction: discord.Interaction, mode: str):
+    if not await _require_music_channel(interaction):
+        return
+    state = get_music_state(interaction.guild.id)
+    state.autoplay_mode = mode if mode in {"gzvibe", "balanced"} else "gzvibe"
+    await interaction.response.send_message(embed=_autoplay_mode_embed(state.autoplay_mode), ephemeral=True)
+    await _post_music_panel(interaction.guild.id)
+
+
+@client.tree.command(name="autoplaydebug", description="Preview the top autoplay candidates", guild=GUILD_ID)
+async def autoplaydebug(interaction: discord.Interaction):
+    if not await _require_music_channel(interaction):
+        return
+    state = get_music_state(interaction.guild.id)
+    seed_song = state.current or state.last_finished
+    if not seed_song:
+        await interaction.response.send_message("Play a song first so autoplay has a seed track.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    ranked = await _rank_autoplay_candidates(state, seed_song)
+    state.last_autoplay_debug = [
+        _summarize_autoplay_debug({
+            **entry,
+            "source": source_name,
+            "score": score,
+            "artist": _entry_artist_key(entry) or "Unknown",
+        })
+        for score, entry, source_name in ranked[:5]
+    ]
+
+    if not state.last_autoplay_debug:
+        await interaction.followup.send("I couldn't find any autoplay candidates right now.", ephemeral=True)
+        return
+
+    lines = []
+    for idx, item in enumerate(state.last_autoplay_debug, 1):
+        lines.append(
+            f"`{idx}.` **{item['score']}** • {item['title']}\n"
+            f"Artist: {item['artist']} • Duration: {item['duration']} • Source: {item['source']}"
+        )
+
+    embed = discord.Embed(
+        title="Autoplay Debug",
+        description="\n\n".join(lines),
+        color=0x1DB954,
+    )
+    embed.add_field(name="Seed Song", value=f"[{seed_song.title}]({seed_song.webpage_url})", inline=False)
+    embed.add_field(name="Mode", value=_format_autoplay_mode(state.autoplay_mode), inline=True)
+    embed.add_field(name="Autoplay", value="ON" if state.autoplay else "OFF", inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="nextsong", description="Show what the bot will play next", guild=GUILD_ID)
+async def nextsong(interaction: discord.Interaction):
+    if not await _require_music_channel(interaction):
+        return
+
+    state = get_music_state(interaction.guild.id)
+    if state.queue:
+        upcoming = state.queue[0]
+        embed = discord.Embed(title="⏭️ Next Song", color=0x3498DB)
+        embed.description = f"[{upcoming.title}]({upcoming.webpage_url})"
+        embed.add_field(name="Duration", value=upcoming.format_duration(), inline=True)
+        embed.add_field(name="From", value="Queue", inline=True)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    seed_song = state.current or state.last_finished
+    if not state.autoplay or not seed_song:
+        await interaction.response.send_message(
+            "Nothing queued right now. Turn on autoplay or add songs with `/play`.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    ranked = await _rank_autoplay_candidates(state, seed_song)
+    if not ranked:
+        await interaction.followup.send("I couldn't predict a next autoplay song right now.", ephemeral=True)
+        return
+
+    score, entry, source = ranked[0]
+    duration = int(entry.get("duration") or 0)
+    m, s = divmod(duration, 60)
+    h, m = divmod(m, 60)
+    duration_text = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    embed = discord.Embed(title="🔮 Predicted Next Song", color=0x1DB954)
+    embed.description = f"[{entry.get('title', 'Unknown title')}]({entry.get('webpage_url', '')})"
+    embed.add_field(name="Duration", value=duration_text, inline=True)
+    embed.add_field(name="Source", value=source, inline=True)
+    embed.add_field(name="Score", value=str(score), inline=True)
+    embed.set_footer(text=f"Autoplay mode: {_format_autoplay_mode(state.autoplay_mode)}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@client.tree.command(name="playlist", description="Manage your saved music playlists", guild=GUILD_ID)
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name="Save current queue", value="save"),
+    discord.app_commands.Choice(name="List playlists", value="list"),
+    discord.app_commands.Choice(name="Play a playlist", value="play"),
+    discord.app_commands.Choice(name="Delete a playlist", value="delete"),
+])
+@discord.app_commands.describe(
+    action="What to do",
+    name="Playlist name (required for save/play/delete)",
+)
+async def playlist(interaction: discord.Interaction, action: str, name: str = ""):
+    if not await _require_music_channel(interaction):
+        return
+
+    state = get_music_state(interaction.guild.id)
+    user_playlists = _playlist_bucket(interaction.guild.id, interaction.user.id)
+    normalized_name = _normalize_playlist_name(name)
+
+    if action == "list":
+        if not user_playlists:
+            await interaction.response.send_message("You don't have any saved playlists yet.", ephemeral=True)
+            return
+        lines = []
+        for pname, tracks in sorted(user_playlists.items()):
+            lines.append(f"• **{pname}** — `{len(tracks)}` songs")
+        embed = discord.Embed(title="🎶 Your Playlists", description="\n".join(lines), color=0x5865F2)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if not normalized_name:
+        await interaction.response.send_message("Please provide a playlist name.", ephemeral=True)
+        return
+
+    if action == "save":
+        tracks: list[dict] = []
+        if state.current:
+            tracks.append(_playlist_track(state.current))
+        tracks.extend(_playlist_track(song) for song in list(state.queue))
+        if not tracks:
+            await interaction.response.send_message("Nothing is playing or queued to save.", ephemeral=True)
+            return
+        if len(tracks) > 50:
+            tracks = tracks[:50]
+        user_playlists[normalized_name] = tracks
+        _save_music_playlists()
+        await interaction.response.send_message(
+            f"Saved **{normalized_name}** with `{len(tracks)}` songs.",
+            ephemeral=True,
+        )
+        return
+
+    if action == "delete":
+        if normalized_name not in user_playlists:
+            await interaction.response.send_message("That playlist doesn't exist.", ephemeral=True)
+            return
+        del user_playlists[normalized_name]
+        _save_music_playlists()
+        await interaction.response.send_message(f"Deleted playlist **{normalized_name}**.", ephemeral=True)
+        return
+
+    if action == "play":
+        tracks = user_playlists.get(normalized_name)
+        if not tracks:
+            await interaction.response.send_message("That playlist doesn't exist or is empty.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(interaction.user.id)
+        if not member or not member.voice or not member.voice.channel:
+            await interaction.response.send_message("Join a voice channel first.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        vc = interaction.guild.voice_client
+        if vc is None:
+            vc = await member.voice.channel.connect()
+            state.voice_client = vc
+        elif vc.channel != member.voice.channel:
+            await vc.move_to(member.voice.channel)
+            state.voice_client = vc
+        else:
+            state.voice_client = vc
+
+        added = 0
+        for track in tracks[:50]:
+            lookup = track.get("webpage_url") or track.get("title")
+            if not lookup:
+                continue
+            try:
+                results = await search_youtube_resilient(lookup, max_results=1)
+                if not results:
+                    continue
+                r = results[0]
+                state.queue.append(SongEntry(
+                    title=r.get("title", track.get("title", "Unknown")),
+                    url=r["url"],
+                    webpage_url=r.get("webpage_url", track.get("webpage_url", "")),
+                    duration=r.get("duration", track.get("duration", 0)),
+                    requester=interaction.user,
+                    local_path=r.get("local_path"),
+                ))
+                added += 1
+            except Exception as e:
+                print(f"[Playlist] Could not queue track from {normalized_name}: {e}")
+
+        if added == 0:
+            await interaction.followup.send("Could not queue any songs from that playlist right now.", ephemeral=True)
+            return
+
+        if vc and not vc.is_playing() and not vc.is_paused() and state.queue:
+            play_next(interaction.guild.id, asyncio.get_running_loop())
+            await _post_music_panel(interaction.guild.id)
+
+        await interaction.followup.send(
+            f"Queued `{added}` songs from **{normalized_name}**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message("Unknown playlist action.", ephemeral=True)
 
 @client.tree.command(name="announce", description="Send an announcement to a specific channel", guild=GUILD_ID)
 @app_commands.default_permissions(manage_messages=True)
