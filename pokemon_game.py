@@ -78,6 +78,11 @@ def _resolve_text_channel(guild: discord.Guild, key: str, *names: str) -> discor
     for channel in guild.text_channels:
         if channel.name.casefold() in wanted:
             return channel
+    if key == "pokemon_channel":
+        for channel in guild.text_channels:
+            topic = (channel.topic or "").casefold()
+            if "/pokemon battle" in topic or "pokemon battles" in topic or "challenge others to pokemon" in topic:
+                return channel
     return None
 
 

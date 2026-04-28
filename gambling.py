@@ -61,6 +61,11 @@ def _resolve_text_channel(guild: discord.Guild, key: str, *names: str) -> discor
     for channel in guild.text_channels:
         if channel.name.casefold() in wanted:
             return channel
+    if key == "casino_channel":
+        for channel in guild.text_channels:
+            topic = (channel.topic or "").casefold()
+            if "/slots" in topic or "/blackjack" in topic or "/roulette" in topic or "casino" in topic:
+                return channel
     return None
 
 

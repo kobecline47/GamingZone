@@ -682,11 +682,37 @@ def _tracked_text_channel(guild: discord.Guild, key: str) -> discord.TextChannel
     return ch if isinstance(ch, discord.TextChannel) else None
 
 
+def _match_channel_by_key(guild: discord.Guild, key: str) -> discord.TextChannel | None:
+    for ch in guild.text_channels:
+        topic = (ch.topic or "").casefold()
+        if not topic:
+            continue
+        if key == "casino_channel" and (
+            "/slots" in topic or "/blackjack" in topic or "/roulette" in topic or "casino" in topic
+        ):
+            return ch
+        if key == "pokemon_channel" and (
+            "/pokemon battle" in topic or "pokemon battles" in topic or "challenge others to pokemon" in topic
+        ):
+            return ch
+        if key == "music_channel" and (
+            "request music" in topic or "/play /skip /queue" in topic or "music commands" in topic
+        ):
+            return ch
+        if key == "verify_channel" and "verify" in topic and "unlock" in topic:
+            return ch
+        if key == "free_games_channel" and ("free game" in topic or "steam deals" in topic):
+            return ch
+    return None
+
+
 def _resolve_or_track_text_channel(guild: discord.Guild, key: str, *names: str) -> discord.TextChannel | None:
     tracked = _tracked_text_channel(guild, key)
     if tracked:
         return tracked
     found = _find_text_channel_ci(guild, *names)
+    if not found:
+        found = _match_channel_by_key(guild, key)
     if found:
         _remember_channel(guild, key, found)
     return found
