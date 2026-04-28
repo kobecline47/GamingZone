@@ -2706,6 +2706,39 @@ def _normalized_title_key(title: str) -> str:
     return t
 
 
+def _song_core_key(title: str) -> str:
+    """Best-effort core track key, stripping artist-prefix formats like 'Artist - Song'."""
+    raw = (title or "").lower()
+    raw = re.sub(r"\([^)]*\)", " ", raw)
+    raw = re.sub(r"\[[^\]]*\]", " ", raw)
+
+    # Common YouTube style: "Artist - Song"
+    if " - " in raw:
+        rhs = raw.split(" - ", 1)[1].strip()
+        rhs_key = _normalized_title_key(rhs)
+        if rhs_key:
+            return rhs_key
+
+    # "Song by Artist"
+    if " by " in raw:
+        lhs = raw.split(" by ", 1)[0].strip()
+        lhs_key = _normalized_title_key(lhs)
+        if lhs_key:
+            return lhs_key
+
+    return _normalized_title_key(raw)
+
+
+def _same_song_key(a: str, b: str) -> bool:
+    """Treat keys as same song if equal or one clearly contains the other."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter = min(len(a), len(b))
+    return shorter >= 6 and (a in b or b in a)
+
+
 def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> None:
     if not song:
         return
@@ -2713,7 +2746,7 @@ def _remember_finished_song(state: GuildMusicState, song: SongEntry | None) -> N
     sid = _song_identity(song)
     if sid:
         state.recent_track_ids.append(sid)
-    tkey = _normalized_title_key(song.title)
+    tkey = _song_core_key(song.title)
     if tkey:
         state.recent_title_keys.append(tkey)
 
@@ -3068,14 +3101,14 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
     current_id = _song_identity(current)
     if current_id:
         blocked_ids.add(current_id)
-    current_title_key = _normalized_title_key(current.title)
+    current_title_key = _song_core_key(current.title)
     if current_title_key:
         blocked_title_keys.add(current_title_key)
     for q_item in state.queue:
         qid = _song_identity(q_item)
         if qid:
             blocked_ids.add(qid)
-        qkey = _normalized_title_key(q_item.title)
+        qkey = _song_core_key(q_item.title)
         if qkey:
             blocked_title_keys.add(qkey)
 
@@ -3086,9 +3119,10 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             rid = _entry_identity(r)
             if rid and rid in blocked_ids:
                 continue
-            rkey = _normalized_title_key(r.get('title', ''))
-            if rkey and rkey in blocked_title_keys:
-                continue
+            rkey = _song_core_key(r.get('title', ''))
+            if rkey:
+                if any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
+                    continue
             if r.get('title', '').lower() == current.title.lower():
                 continue
             return r
@@ -3100,9 +3134,10 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
             rid = _entry_identity(r)
             if rid and rid in blocked_ids:
                 continue
-            rkey = _normalized_title_key(r.get('title', ''))
-            if rkey and rkey in blocked_title_keys:
-                continue
+            rkey = _song_core_key(r.get('title', ''))
+            if rkey:
+                if any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
+                    continue
             if r.get('title', '').lower() != current.title.lower():
                 return r
     except Exception as e:
