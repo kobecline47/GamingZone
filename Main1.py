@@ -3513,13 +3513,49 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         })
         for score, entry, source_name in ranked[:5]
     ]
+
     if ranked:
-        best_score, best_entry, best_source = ranked[0]
-        print(
-            f"[Autoplay] Picked {best_source} candidate "
-            f"({best_score}, mode={state.autoplay_mode}): {best_entry.get('title', 'Unknown')}"
-        )
-        return best_entry
+        recent_ids = set(state.recent_track_ids)
+        current_id = _song_identity(current)
+        if current_id:
+            recent_ids.add(current_id)
+
+        recent_title_keys = set(state.recent_title_keys)
+        current_key = _song_core_key(current.title)
+        if current_key:
+            recent_title_keys.add(current_key)
+
+        seed_titles = [current.title]
+        if state.last_finished and state.last_finished.title:
+            seed_titles.append(state.last_finished.title)
+
+        for score, entry, source_name in ranked:
+            candidate_id = _entry_identity(entry)
+            if candidate_id and candidate_id in recent_ids:
+                continue
+
+            candidate_title = entry.get("title", "")
+            if not candidate_title:
+                continue
+
+            candidate_key = _song_core_key(candidate_title)
+            if candidate_key and any(_same_song_key(candidate_key, key) for key in recent_title_keys):
+                continue
+
+            if any(_titles_too_similar(seed_title, candidate_title) for seed_title in seed_titles if seed_title):
+                continue
+
+            candidate_url = entry.get("webpage_url") or ""
+            if candidate_url and current.webpage_url and candidate_url == current.webpage_url:
+                continue
+
+            print(
+                f"[Autoplay] Picked {source_name} candidate "
+                f"({score}, mode={state.autoplay_mode}): {candidate_title}"
+            )
+            return entry
+
+        print("[Autoplay] Ranked candidates were all repeat-like; no autoplay pick made.")
     return None
 
 
