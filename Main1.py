@@ -504,8 +504,6 @@ class Client(commands.Bot):
                     print("[Sync] Skipped guild sync because no primary guild was resolved.")
                 else:
                     guild_obj = discord.Object(id=primary_guild.id)
-                    # Clear stale guild-scoped copies of global commands before syncing.
-                    self.tree.clear_commands(guild=guild_obj)
                     synced_guild = await self.tree.sync(guild=guild_obj)
                     print(f"Synced {len(synced_guild)} slash commands to primary guild {primary_guild.id}")
                     try:
