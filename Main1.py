@@ -3833,7 +3833,8 @@ async def play_next_async(guild_id: int, loop: asyncio.AbstractEventLoop):
                 print(f"[Autoplay] Queued related: {r['title']} (mode={state.autoplay_mode})")
         except Exception as e:
             print(f"[Autoplay] Failed to queue related song: {e}")
-    play_next(guild_id, loop)
+    _loop = asyncio.get_running_loop()
+    await _loop.run_in_executor(None, lambda: play_next(guild_id, _loop))
     await _post_music_panel(guild_id)
     await _post_next_song_embed(guild_id)
 
@@ -4234,7 +4235,8 @@ async def play(interaction: discord.Interaction, query: str):
         )
         state.queue.append(entry)
         if not vc.is_playing() and not vc.is_paused():
-            play_next(interaction.guild.id, asyncio.get_running_loop())
+            _loop = asyncio.get_running_loop()
+            _loop.run_in_executor(None, lambda: play_next(interaction.guild.id, _loop))
             await interaction.followup.send(f"▶️ Starting **{entry.title}** — see the player below!", ephemeral=True)
             await _post_music_panel(interaction.guild.id)
         else:
