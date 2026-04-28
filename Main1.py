@@ -4215,10 +4215,30 @@ async def _post_next_song_embed(guild_id: int) -> None:
         return
 
     ranked = await _rank_autoplay_candidates(state, state.current)
-    if not ranked:
-        return
+    entry: dict | None = None
+    score = 0
+    source = ""
+    using_fallback = False
 
-    score, entry, source = ranked[0]
+    if ranked:
+        score, entry, source = ranked[0]
+    else:
+        entry = await _autoplay_last_chance_pick(state, state.current)
+        if not entry:
+            return
+        using_fallback = True
+        source = "last-chance fallback"
+        score = _autoplay_candidate_score(
+            entry,
+            current=state.current,
+            recent_title_keys=state.recent_title_keys,
+            recent_artist_keys=state.recent_artist_keys,
+            queue_artist_keys=set(),
+            current_artist_key=_song_artist_key(state.current),
+            autoplay_mode=state.autoplay_mode,
+            source_bias=9,
+        )
+
     duration = int(entry.get("duration") or 0)
     m, s = divmod(duration, 60)
     h, m = divmod(m, 60)
@@ -4229,7 +4249,10 @@ async def _post_next_song_embed(guild_id: int) -> None:
     embed.add_field(name="Duration", value=duration_text, inline=True)
     embed.add_field(name="Mode", value=_format_autoplay_mode(state.autoplay_mode), inline=True)
     embed.add_field(name="Rank Score", value=str(score), inline=True)
-    embed.set_footer(text=f"Predicted from: {source}")
+    footer = f"Predicted from: {source}"
+    if using_fallback:
+        footer += " • fallback"
+    embed.set_footer(text=footer)
     await music_ch.send(embed=embed)
 
 async def search_autocomplete(interaction: discord.Interaction, current: str) -> list[discord.app_commands.Choice[str]]:
