@@ -4028,21 +4028,22 @@ async def _post_music_panel(guild_id: int):
     music_ch = _resolve_or_track_text_channel(guild, "music_channel", MUSIC_CHANNEL_NAME, "music-channel", "music")
     if not music_ch:
         return
-    # On restart the in-memory message reference is lost, so clean up any
-    # recent stale bot "Now Playing" panels before posting a new one.
+    # On restart the in-memory message reference is lost, so clean up recent
+    # stale bot panel variants before posting a new one.
     try:
-        async for msg in music_ch.history(limit=30):
+        stale_titles = {"🎵 Now Playing", "Now Playing", "🎵 GzVibe Now Playing"}
+        async for msg in music_ch.history(limit=200):
             if msg.author.id != client.user.id:
                 continue
             if not msg.embeds:
                 continue
             first_embed = msg.embeds[0]
-            if (first_embed.title or "").strip() == "🎵 Now Playing":
+            title = (first_embed.title or "").strip()
+            if title in stale_titles:
                 try:
                     await msg.delete()
                 except Exception:
                     pass
-                break
     except Exception:
         pass
     # Delete previous panel
@@ -4273,6 +4274,7 @@ async def nowplaying(interaction: discord.Interaction):
     embed.add_field(name="🔊 Volume", value=f"{int(state.volume * 100)}%", inline=True)
     embed.set_footer(text="Music Live View • GzVibe")
     await interaction.response.send_message(embed=embed)
+    await _post_music_panel(interaction.guild.id)
 
 @client.tree.command(name="volume", description="Set the playback volume (0-100)", guild=GUILD_ID)
 async def volume(interaction: discord.Interaction, level: int):
