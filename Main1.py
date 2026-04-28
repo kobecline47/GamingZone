@@ -3747,15 +3747,19 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
     """Best-effort fallback when normal autoplay ranking cannot pick a track."""
     artist_key = _song_artist_key(current)
     query_seed = _autoplay_query_seed(current)
-    queries = [
-        f"songs like {query_seed}",
-        f"music similar to {query_seed}",
-    ]
+    # Emergency fallback should prefer different songs by the same or adjacent
+    # artist, not alternate uploads/versions of the current song.
     if artist_key:
-        queries.extend([
+        queries = [
             f"{artist_key} best songs",
             f"{artist_key} radio",
-        ])
+            f"artists similar to {artist_key} best songs",
+        ]
+    else:
+        queries = [
+            f"songs like {query_seed}",
+            f"music similar to {query_seed}",
+        ]
 
     recent_ids = set(state.recent_track_ids)
     current_id = _song_identity(current)
@@ -3777,7 +3781,6 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
     result_sets = await asyncio.gather(*[_safe_search(q) for q in queries])
 
     best_strict: tuple[int, dict] | None = None
-    relaxed_pool: list[tuple[int, dict]] = []
     for query, results in zip(queries, result_sets):
         for entry in results:
             title = entry.get("title", "")
@@ -3807,8 +3810,9 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
 
             if "radio" in query.lower() or "best songs" in query.lower():
                 score += 2
+            if "artists similar to" in query.lower():
+                score += 1
 
-            # Strict lane: preserve same-song guards for best quality picks.
             strict_allowed = True
             if candidate_key and any(_same_song_key(candidate_key, key) for key in recent_title_keys):
                 strict_allowed = False
@@ -3818,17 +3822,9 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
             if strict_allowed:
                 if best_strict is None or score > best_strict[0]:
                     best_strict = (score, entry)
-            else:
-                # Relaxed lane: keep as backup if strict lane is empty.
-                # We still reject exact same video and recent IDs above.
-                relaxed_pool.append((score, entry))
 
     if best_strict:
         return best_strict[1]
-
-    if relaxed_pool:
-        relaxed_pool.sort(key=lambda item: item[0], reverse=True)
-        return relaxed_pool[0][1]
 
     return None
 
