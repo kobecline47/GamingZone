@@ -3326,7 +3326,6 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
             'quiet': True,
             'no_warnings': True,
             'default_search': 'ytsearch',
-            'format': 'bestaudio/best',
             'noplaylist': True,
             'http_headers': {'User-Agent': 'Mozilla/5.0'},
             'source_address': '0.0.0.0',
@@ -3366,11 +3365,12 @@ def _ytdlp_search(query: str, max_results: int) -> list[dict]:
                                 if not entry:
                                     continue
                                 try:
-                                    stream_url = entry.get('url')
                                     webpage_url = entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
+                                    # Keep search lightweight: carry a watch URL when direct stream
+                                    # URL is unavailable; playback will resolve a fresh stream later.
+                                    stream_url = entry.get('url')
                                     if not stream_url or 'youtube.com/watch' in str(stream_url):
-                                        resolved = ydl.extract_info(webpage_url, download=False)
-                                        stream_url = resolved.get('url')
+                                        stream_url = webpage_url
                                     if not stream_url:
                                         continue
 
@@ -3520,39 +3520,60 @@ def _ytdlp_resolve_url(url: str) -> list[dict]:
         import yt_dlp
 
         cookiefile = _resolve_yt_cookiefile()
-        ydl_opts = {
+        base_opts = {
             'quiet': True,
             'no_warnings': True,
-            'format': 'bestaudio/best',
             'noplaylist': True,
             'http_headers': {'User-Agent': 'Mozilla/5.0'},
             'source_address': '0.0.0.0',
         }
         if cookiefile and os.path.exists(cookiefile):
-            ydl_opts['cookiefile'] = cookiefile
+            base_opts['cookiefile'] = cookiefile
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        attempts = [
+            {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio/best'},
+            {**base_opts, 'format': 'bestaudio/best'},
+            base_opts,
+        ]
 
-            # Playlist-ish responses can still happen; use first entry if present.
-            if info and info.get('entries'):
-                info = next((e for e in info.get('entries', []) if e), None)
-            if not info:
-                return []
+        for ydl_opts in attempts:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
 
-            stream_url = info.get('url')
-            if not stream_url and info.get('webpage_url'):
-                resolved = ydl.extract_info(info.get('webpage_url'), download=False)
-                stream_url = resolved.get('url') if resolved else None
-            if not stream_url:
-                return []
+                # Playlist-ish responses can still happen; use first entry if present.
+                if info and info.get('entries'):
+                    info = next((e for e in info.get('entries', []) if e), None)
+                if not info:
+                    continue
 
-            return [{
-                'title': info.get('title', 'Unknown title'),
-                'url': stream_url,
-                'webpage_url': info.get('webpage_url') or url,
-                'duration': info.get('duration', 0) or 0,
-            }]
+                stream_url = info.get('url')
+                if not stream_url:
+                    formats = info.get('formats') or []
+                    audio_formats = [
+                        f for f in formats
+                        if f.get('url') and str(f.get('acodec', 'none')) != 'none'
+                    ]
+                    if audio_formats:
+                        best_audio = max(audio_formats, key=lambda f: int(f.get('abr') or f.get('tbr') or 0))
+                        stream_url = best_audio.get('url')
+
+                if not stream_url:
+                    stream_url = info.get('webpage_url') or url
+                if not stream_url:
+                    continue
+
+                return [{
+                    'title': info.get('title', 'Unknown title'),
+                    'url': stream_url,
+                    'webpage_url': info.get('webpage_url') or url,
+                    'duration': info.get('duration', 0) or 0,
+                }]
+            except Exception as e:
+                print(f"[yt-dlp] direct url attempt failed: {e}")
+                continue
+
+        return []
     except Exception as e:
         print(f"[yt-dlp] direct url resolve failed: {e}")
         return []
@@ -3999,20 +4020,40 @@ def _extract_stream_url(song: SongEntry) -> str | None:
     try:
         import yt_dlp
 
-        opts = dict(YTDL_STREAM_OPTS)
+        base_opts = dict(YTDL_STREAM_OPTS)
         cookiefile = _resolve_yt_cookiefile()
         if cookiefile:
-            opts['cookiefile'] = cookiefile
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=False)
-            if info and info.get('url'):
-                url = info['url']
-                # Verify URL is not empty and looks valid
+            base_opts['cookiefile'] = cookiefile
+
+        attempts = [
+            base_opts,
+            {**base_opts, 'format': 'bestaudio/best'},
+            {k: v for k, v in base_opts.items() if k != 'format'},
+        ]
+
+        for opts in attempts:
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(target, download=False)
+                if not info:
+                    continue
+
+                url = info.get('url')
+                if not url:
+                    formats = info.get('formats') or []
+                    audio_formats = [
+                        f for f in formats
+                        if f.get('url') and str(f.get('acodec', 'none')) != 'none'
+                    ]
+                    if audio_formats:
+                        best_audio = max(audio_formats, key=lambda f: int(f.get('abr') or f.get('tbr') or 0))
+                        url = best_audio.get('url')
+
                 if isinstance(url, str) and url.strip() and url.startswith('http'):
                     print(f"[Music] Stream URL resolved for {song.title}: {url[:80]}...")
                     return url
-                else:
-                    print(f"[Music] Invalid stream URL format for {song.title}: {url}")
+            except Exception as e:
+                print(f"[Music] yt-dlp stream resolve attempt failed for {song.title}: {e}")
     except Exception as e:
         print(f"[Music] yt-dlp stream resolve failed for {song.title}: {e}")
 
