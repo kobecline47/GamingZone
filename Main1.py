@@ -3736,7 +3736,8 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
 
     result_sets = await asyncio.gather(*[_safe_search(q) for q in queries])
 
-    best: tuple[int, dict] | None = None
+    best_strict: tuple[int, dict] | None = None
+    relaxed_pool: list[tuple[int, dict]] = []
     for query, results in zip(queries, result_sets):
         for entry in results:
             title = entry.get("title", "")
@@ -3747,16 +3748,11 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
             if candidate_id and candidate_id in recent_ids:
                 continue
 
-            candidate_key = _song_core_key(title)
-            if candidate_key and any(_same_song_key(candidate_key, key) for key in recent_title_keys):
-                continue
-
-            if _titles_too_similar(current.title, title):
-                continue
-
             candidate_url = entry.get("webpage_url") or ""
             if candidate_url and current.webpage_url and candidate_url == current.webpage_url:
                 continue
+
+            candidate_key = _song_core_key(title)
 
             score = _autoplay_candidate_score(
                 entry,
@@ -3772,10 +3768,29 @@ async def _autoplay_last_chance_pick(state: "GuildMusicState", current: "SongEnt
             if "radio" in query.lower() or "best songs" in query.lower():
                 score += 2
 
-            if best is None or score > best[0]:
-                best = (score, entry)
+            # Strict lane: preserve same-song guards for best quality picks.
+            strict_allowed = True
+            if candidate_key and any(_same_song_key(candidate_key, key) for key in recent_title_keys):
+                strict_allowed = False
+            if strict_allowed and _titles_too_similar(current.title, title):
+                strict_allowed = False
 
-    return best[1] if best else None
+            if strict_allowed:
+                if best_strict is None or score > best_strict[0]:
+                    best_strict = (score, entry)
+            else:
+                # Relaxed lane: keep as backup if strict lane is empty.
+                # We still reject exact same video and recent IDs above.
+                relaxed_pool.append((score, entry))
+
+    if best_strict:
+        return best_strict[1]
+
+    if relaxed_pool:
+        relaxed_pool.sort(key=lambda item: item[0], reverse=True)
+        return relaxed_pool[0][1]
+
+    return None
 
 
 async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntry") -> list[tuple[int, dict, str]]:
