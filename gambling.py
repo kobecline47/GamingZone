@@ -139,6 +139,23 @@ def _check_bet(uid: int, amount: int) -> str | None:
     return None
 
 
+class PlayAgainView(discord.ui.View):
+    def __init__(self, uid: int, command_hint: str):
+        super().__init__(timeout=300)
+        self.uid = uid
+        self.command_hint = command_hint
+
+    @discord.ui.button(label="Play Again", emoji="🎮", style=discord.ButtonStyle.success)
+    async def play_again(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("❌ This play-again button isn't for your game.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Run `/{self.command_hint}` to play again.",
+            ephemeral=True,
+        )
+
+
 def _bal_line(uid: int) -> str:
     return f"💼 **Balance:** `{_wallet(uid):,}` PokeCoins"
 
@@ -834,6 +851,16 @@ class BlackjackView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         self._disable_all()
+
+    @discord.ui.button(label="Play Again", style=discord.ButtonStyle.success, emoji="🎮")
+    async def play_again(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Run `/blackjack bet:{self.bet}` to play again.",
+            ephemeral=True,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2163,10 +2190,11 @@ def setup_gambling(bot: commands.Bot) -> None:
             bonus=bonus,
             revealed=[s1, s2, s3],
         )
+        replay_view = PlayAgainView(uid, f"slots bet:{bet}")
         if result_img:
-            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
-            await interaction.edit_original_response(embed=result_embed)
+            await interaction.edit_original_response(embed=result_embed, view=replay_view)
 
     # ── /blackjack ────────────────────────────────────────────────────────────
     @bot.tree.command(name="blackjack", description="🃏 Play Blackjack against the dealer")
@@ -2193,9 +2221,16 @@ def setup_gambling(bot: commands.Bot) -> None:
                 hide_dealer=False, bonus=bonus,
             )
             if img_file:
-                await interaction.response.send_message(embed=embed, file=img_file)
+                await interaction.response.send_message(
+                    embed=embed,
+                    file=img_file,
+                    view=PlayAgainView(uid, f"blackjack bet:{bet}"),
+                )
             else:
-                await interaction.response.send_message(embed=embed)
+                await interaction.response.send_message(
+                    embed=embed,
+                    view=PlayAgainView(uid, f"blackjack bet:{bet}"),
+                )
             return
         view  = BlackjackView(uid, bet, player, dealer, deck)
         embed, img_file = _bj_embed_with_image(player, dealer, bet, uid, "🎯 Your move!")
@@ -2233,10 +2268,11 @@ def setup_gambling(bot: commands.Bot) -> None:
             WALLETS[uid] = _wallet(uid) - bet
             _record_loss(uid, bet)
         result_embed, result_img = _coinflip_embed_with_image(result, choice, bet, uid, bonus=bonus)
+        replay_view = PlayAgainView(uid, f"coinflip bet:{bet} choice:{choice}")
         if result_img:
-            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
-            await interaction.edit_original_response(embed=result_embed)
+            await interaction.edit_original_response(embed=result_embed, view=replay_view)
 
     # ── /roulette ─────────────────────────────────────────────────────────────
     @bot.tree.command(name="roulette", description="🎡 Spin the roulette wheel!")
@@ -2262,7 +2298,7 @@ def setup_gambling(bot: commands.Bot) -> None:
                     ephemeral=True,
                 )
                 return
-        spin_seconds = 45
+        spin_seconds = 8
         spin_embed, spin_img = _roulette_embed_with_image(
             None,
             choice,
@@ -2312,6 +2348,7 @@ def setup_gambling(bot: commands.Bot) -> None:
         await interaction.edit_original_response(
             embed=result_embed,
             attachments=[result_img] if result_img else [],
+            view=PlayAgainView(uid, f"roulette bet:{bet} choice:{choice}"),
         )
 
     # ── /dice ─────────────────────────────────────────────────────────────────
@@ -2332,10 +2369,11 @@ def setup_gambling(bot: commands.Bot) -> None:
         p_roll = random.randint(1, 6)
         b_roll = random.randint(1, 6)
         result_embed, result_img = _dice_embed_with_image(p_roll, b_roll, bet, uid)
+        replay_view = PlayAgainView(uid, f"dice bet:{bet}")
         if result_img:
-            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
-            await interaction.edit_original_response(embed=result_embed)
+            await interaction.edit_original_response(embed=result_embed, view=replay_view)
 
     # ── /highlow ──────────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -2389,10 +2427,11 @@ def setup_gambling(bot: commands.Bot) -> None:
             result=result,
             bonus=bonus,
         )
+        replay_view = PlayAgainView(uid, f"highlow bet:{bet} guess:{guess}")
         if result_img:
-            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+            await interaction.edit_original_response(embed=result_embed, attachments=[result_img], view=replay_view)
         else:
-            await interaction.edit_original_response(embed=result_embed)
+            await interaction.edit_original_response(embed=result_embed, view=replay_view)
 
     # ── /plinko ───────────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -2467,9 +2506,16 @@ def setup_gambling(bot: commands.Bot) -> None:
         if result_img:
             result_embed.description = None
             result_embed.set_image(url="attachment://plinko_board.png")
-            await interaction.edit_original_response(embed=result_embed, attachments=[result_img])
+            await interaction.edit_original_response(
+                embed=result_embed,
+                attachments=[result_img],
+                view=PlayAgainView(uid, f"plinko bet:{bet}"),
+            )
         else:
-            await interaction.edit_original_response(embed=result_embed)
+            await interaction.edit_original_response(
+                embed=result_embed,
+                view=PlayAgainView(uid, f"plinko bet:{bet}"),
+            )
 
     # ── /heist ────────────────────────────────────────────────────────────────
     @bot.tree.command(
