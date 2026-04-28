@@ -2841,11 +2841,20 @@ def _youtube_video_id(url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         host = (parsed.netloc or "").lower()
         if "youtu.be" in host:
-            return parsed.path.lstrip("/")
-        if "youtube.com" in host:
+            return (parsed.path or "").lstrip("/").split("/")[0]
+        if "youtube.com" in host or "youtube-nocookie.com" in host:
             q = urllib.parse.parse_qs(parsed.query)
             if q.get("v"):
                 return q["v"][0]
+            if q.get("id"):
+                return q["id"][0]
+            path_parts = [p for p in (parsed.path or "").split("/") if p]
+            if len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live", "v"}:
+                return path_parts[1]
+        if "googlevideo.com" in host:
+            q = urllib.parse.parse_qs(parsed.query)
+            if q.get("id"):
+                return q["id"][0]
     except Exception:
         return ""
     return ""
@@ -3363,7 +3372,14 @@ def _yt_suggestions(query: str) -> list[str]:
 
 async def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results))
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _pytubefix_search(query, max_results)),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        print(f'[Search] pytubefix timed out for query: {query!r}')
+        return []
 
 
 def _looks_like_url(text: str) -> bool:
@@ -3504,13 +3520,49 @@ async def fetch_related_song(state: "GuildMusicState", current: "SongEntry") -> 
         })
         for score, entry, source_name in ranked[:5]
     ]
+
     if ranked:
-        best_score, best_entry, best_source = ranked[0]
-        print(
-            f"[Autoplay] Picked {best_source} candidate "
-            f"({best_score}, mode={state.autoplay_mode}): {best_entry.get('title', 'Unknown')}"
-        )
-        return best_entry
+        recent_ids = set(state.recent_track_ids)
+        current_id = _song_identity(current)
+        if current_id:
+            recent_ids.add(current_id)
+
+        recent_title_keys = set(state.recent_title_keys)
+        current_key = _song_core_key(current.title)
+        if current_key:
+            recent_title_keys.add(current_key)
+
+        seed_titles = [current.title]
+        if state.last_finished and state.last_finished.title:
+            seed_titles.append(state.last_finished.title)
+
+        for score, entry, source_name in ranked:
+            candidate_id = _entry_identity(entry)
+            if candidate_id and candidate_id in recent_ids:
+                continue
+
+            candidate_title = entry.get("title", "")
+            if not candidate_title:
+                continue
+
+            candidate_key = _song_core_key(candidate_title)
+            if candidate_key and any(_same_song_key(candidate_key, key) for key in recent_title_keys):
+                continue
+
+            if any(_titles_too_similar(seed_title, candidate_title) for seed_title in seed_titles if seed_title):
+                continue
+
+            candidate_url = entry.get("webpage_url") or ""
+            if candidate_url and current.webpage_url and candidate_url == current.webpage_url:
+                continue
+
+            print(
+                f"[Autoplay] Picked {source_name} candidate "
+                f"({score}, mode={state.autoplay_mode}): {candidate_title}"
+            )
+            return entry
+
+        print("[Autoplay] Ranked candidates were all repeat-like; no autoplay pick made.")
     return None
 
 
@@ -3528,6 +3580,12 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
         blocked_title_keys.add(current_title_key)
     current_artist_key = _song_artist_key(current)
     seed_tokens = _song_signature_tokens(current.title)
+    recent_seed_titles: list[str] = [current.title]
+    if state.last_finished and state.last_finished.title:
+        recent_seed_titles.append(state.last_finished.title)
+    for q_item in list(state.queue)[:2]:
+        if q_item and q_item.title:
+            recent_seed_titles.append(q_item.title)
     queue_artist_keys: set[str] = set()
     for q_item in state.queue:
         qid = _song_identity(q_item)
@@ -3550,6 +3608,8 @@ async def _rank_autoplay_candidates(state: "GuildMusicState", current: "SongEntr
         if rkey and any(_same_song_key(rkey, bkey) for bkey in blocked_title_keys):
             return False
         if _titles_too_similar(current.title, rtitle):
+            return False
+        if any(_titles_too_similar(seed_title, rtitle) for seed_title in recent_seed_titles if seed_title):
             return False
 
         # Hard guard: if candidate still contains the seed song signature tokens,
@@ -4031,8 +4091,9 @@ async def _post_music_panel(guild_id: int):
     # On restart the in-memory message reference is lost, so clean up recent
     # stale bot panel variants before posting a new one.
     try:
-        stale_titles = {"🎵 Now Playing", "Now Playing", "🎵 GzVibe Now Playing"}
-        async for msg in music_ch.history(limit=200):
+        stale_titles = {"🎵 Now Playing", "Now Playing", "🎵 GzVibe Now Playing", "✦ GzVibe Control Deck ✦"}
+        deleted_panels = 0
+        async for msg in music_ch.history(limit=50):
             if msg.author.id != client.user.id:
                 continue
             if not msg.embeds:
@@ -4042,6 +4103,9 @@ async def _post_music_panel(guild_id: int):
             if title in stale_titles:
                 try:
                     await msg.delete()
+                    deleted_panels += 1
+                    if deleted_panels >= 3:
+                        break
                 except Exception:
                     pass
     except Exception:
@@ -4056,16 +4120,23 @@ async def _post_music_panel(guild_id: int):
     if not state.current:
         return
     embed = discord.Embed(
-        title="🎵 GzVibe Now Playing",
-        description=f"[{state.current.title}]({state.current.webpage_url})",
-        color=0x1DB954,
+        title="✦ GzVibe Control Deck ✦",
+        description=(
+            f"### [{state.current.title}]({state.current.webpage_url})\n"
+            "`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+            f"**Vibe Mode:** `{_format_autoplay_mode(state.autoplay_mode)}`  •  "
+            f"**Autoplay:** `{'ON' if state.autoplay else 'OFF'}`"
+        ),
+        color=0x00D1B2,
     )
     thumb = _youtube_thumbnail(state.current.webpage_url or state.current.url)
     if thumb:
         embed.set_thumbnail(url=thumb)
-    embed.add_field(name="⏱️ Duration", value=state.current.format_duration(), inline=True)
-    embed.add_field(name="🎧 Requested by", value=state.current.requester.mention, inline=True)
-    embed.add_field(name="🔊 Volume", value=f"{int(state.volume * 100)}%", inline=True)
+    embed.add_field(name="⏱️ Duration", value=f"`{state.current.format_duration()}`", inline=True)
+    embed.add_field(name="🎧 Requested By", value=state.current.requester.mention, inline=True)
+    embed.add_field(name="🔊 Volume", value=f"`{int(state.volume * 100)}%`", inline=True)
+    embed.add_field(name="📦 Queue Depth", value=f"`{len(state.queue)}` tracks waiting", inline=False)
+    embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
     q = len(state.queue)
     footer_parts = []
     if q:
@@ -4073,9 +4144,9 @@ async def _post_music_panel(guild_id: int):
     if state.autoplay:
         footer_parts.append(f"🔁 Autoplay ON • {_format_autoplay_mode(state.autoplay_mode)}")
     if footer_parts:
-        embed.set_footer(text="  •  ".join(footer_parts))
+        embed.set_footer(text="  ✦  ".join(footer_parts))
     else:
-        embed.set_footer(text="GzVibe Panel • Controls Ready")
+        embed.set_footer(text="GzVibe Deck • Controls Live")
     view = MusicControlView(guild_id)
     # Reflect autoplay state on the button
     for child in view.children:
@@ -4138,7 +4209,13 @@ async def play(interaction: discord.Interaction, query: str):
         else:
             state.voice_client = vc
 
-        results = await search_youtube_resilient(query, max_results=1)
+        try:
+            results = await asyncio.wait_for(search_youtube_resilient(query, max_results=1), timeout=40.0)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "Search timed out — YouTube may be rate-limiting. Try a direct YouTube URL or a more specific query."
+            )
+            return
         if not results:
             await interaction.followup.send(
                 "No playable results found right now. Try a more specific title (song + artist), "
@@ -4265,14 +4342,27 @@ async def nowplaying(interaction: discord.Interaction):
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
-    embed = discord.Embed(title="🎵 GzVibe Now Playing", description=f"[{state.current.title}]({state.current.webpage_url})", color=0x1DB954)
+    embed = discord.Embed(
+        title="✦ GzVibe Live Track ✦",
+        description=(
+            f"## [{state.current.title}]({state.current.webpage_url})\n"
+            "`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`"
+        ),
+        color=0x00D1B2,
+    )
     thumb = _youtube_thumbnail(state.current.webpage_url or state.current.url)
     if thumb:
         embed.set_thumbnail(url=thumb)
-    embed.add_field(name="⏱️ Duration", value=state.current.format_duration(), inline=True)
-    embed.add_field(name="🎧 Requested by", value=state.current.requester.mention, inline=True)
-    embed.add_field(name="🔊 Volume", value=f"{int(state.volume * 100)}%", inline=True)
-    embed.set_footer(text="Music Live View • GzVibe")
+    embed.add_field(name="⏱️ Duration", value=f"`{state.current.format_duration()}`", inline=True)
+    embed.add_field(name="🎧 Requested By", value=state.current.requester.mention, inline=True)
+    embed.add_field(name="🔊 Volume", value=f"`{int(state.volume * 100)}%`", inline=True)
+    embed.add_field(
+        name="🔁 Autoplay",
+        value=f"`{'ON' if state.autoplay else 'OFF'}` in `{_format_autoplay_mode(state.autoplay_mode)}`",
+        inline=False,
+    )
+    embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
+    embed.set_footer(text="GzVibe Live View • Neon Style")
     await interaction.response.send_message(embed=embed)
     await _post_music_panel(interaction.guild.id)
 
@@ -5349,8 +5439,30 @@ async def serverhealth(interaction: discord.Interaction):
         f"ticket_sla_check: {'✅' if ticket_sla_check.is_running() else '❌'}",
     ]
 
-    embed = discord.Embed(title="🩺 Gz Dyno Health Card", color=0x2ECC71)
-    embed.description = "Live diagnostics for runtime, wiring, and background automation."
+    wiring_values = [mod_log, ticket_log, casino_ch, pokemon_ch, music_ch, verify_ch, free_games_ch]
+    wiring_ok = sum(1 for item in wiring_values if item)
+    tasks_running = sum(
+        1
+        for is_running in (
+            giveaway_check.is_running(),
+            streamer_check.is_running(),
+            free_games_check.is_running(),
+            empty_vc_cleanup.is_running(),
+            ticket_sla_check.is_running(),
+        )
+        if is_running
+    )
+    health_score = wiring_ok + tasks_running
+    score_total = len(wiring_values) + 5
+    score_fill = max(0, min(10, round((health_score / score_total) * 10)))
+    health_bar = "🟩" * score_fill + "⬛" * (10 - score_fill)
+    health_color = 0x2ECC71 if health_score >= score_total - 1 else (0xF1C40F if health_score >= score_total - 3 else 0xE74C3C)
+
+    embed = discord.Embed(title="🩺 Gz Dyno Health Card", color=health_color)
+    embed.description = (
+        "### Live Runtime Telemetry\n"
+        f"`System Score` **{health_score}/{score_total}**  \n{health_bar}"
+    )
     embed.add_field(name="⚙️ Runtime", value=f"Uptime: **{uptime}**\nMarker: `{STARTUP_MARKER}`\nPID: `{os.getpid()}`", inline=False)
     embed.add_field(
         name="🧭 Channel Wiring",
@@ -5376,7 +5488,8 @@ async def serverhealth(interaction: discord.Interaction):
     )
     embed.add_field(name="🔁 Background Tasks", value="\n".join(task_lines), inline=False)
     embed.add_field(name="📦 Data", value=f"Managed channel IDs: **{len(MANAGED_CHANNEL_IDS.get(str(guild.id), {}))}**\nPosted free-game IDs: **{len(POSTED_FREE_GAMES)}**", inline=False)
-    embed.set_footer(text="Gz Dyno Card • /serverhealth")
+    embed.add_field(name="🧩 Build", value=f"`{STARTUP_MARKER}`", inline=False)
+    embed.set_footer(text="Gz Dyno Card • High Visual Telemetry")
     embed.timestamp = now
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
