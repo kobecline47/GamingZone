@@ -2103,8 +2103,14 @@ async def on_message(message: discord.Message):
     if message.author.id not in WHITELIST and not message.author.guild_permissions.administrator:
         content_lower = message.content.lower()
 
-        # Banned word filter
-        if any(word in content_lower for word in BANNED_WORDS):
+        # Banned word filter — use word boundaries to avoid false positives like "nig" in "Goodnight"
+        has_banned_word = False
+        for word in BANNED_WORDS:
+            if re.search(rf'\b{re.escape(word)}\b', content_lower):
+                has_banned_word = True
+                break
+        
+        if has_banned_word:
             try:
                 await message.delete()
             except discord.HTTPException:
