@@ -38,6 +38,8 @@ from pokemon_game import _wallet, _ensure_player, WALLETS
 BOT_LOG_NAME = "🤖┃bot-logs"
 CASINO_CHANNEL_NAME = "casino-floor"
 _MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+PRIMARY_GUILD_ID = int(os.getenv("PRIMARY_GUILD_ID", "711335159189864468"))
+PRIMARY_GUILD = discord.Object(id=PRIMARY_GUILD_ID)
 
 
 def _tracked_channel_id(guild_id: int, key: str) -> int | None:
@@ -99,6 +101,46 @@ CASINO_STATS: dict[int, dict] = {}
 _DAILY_CD:    dict[int, float] = {}   # uid → epoch of last /daily claim
 _WORK_CD:     dict[int, float] = {}   # uid → epoch of last /work claim
 _HEIST_BUSY_CHANNELS: set[int] = set()
+
+# ── Among Us config ──────────────────────────────────────────────────────────
+AMOGUS_MIN_PLAYERS  = 3
+AMOGUS_MAX_PLAYERS  = 10
+AMOGUS_JOIN_SECONDS = 40
+AMOGUS_VOTE_SECONDS = 35
+_AMOGUS_BUSY_CHANNELS: set[int] = set()
+_AMOGUS_BOT_NAMES = [
+    "Red", "Blue", "Green", "Pink", "Orange", "Yellow",
+    "Black", "White", "Cyan", "Lime", "Purple", "Brown",
+]
+
+_AMOGUS_TASK_EVENTS = [
+    "{name} fixed the wiring in Electrical. Lights flickered back on.",
+    "{name} emptied the trash chutes in Storage.",
+    "{name} calibrated the weapons targeting system.",
+    "{name} watered the plants in O2. Oxygen stable.",
+    "{name} started a reactor sequence in the engine room.",
+    "{name} ran a medbay scan. Results: Normal.",
+    "{name} charted a new course in Navigation.",
+    "{name} refueled the upper engine.",
+    "{name} re-uploaded the chart to fix Comms.",
+    "{name} reviewed the security cameras. All clear.",
+    "{name} submitted scan results in Admin.",
+    "{name} cleared an asteroid in Weapons.",
+    "{name} cleaned the O2 filter.",
+    "{name} stabilized the steering in Navigation.",
+]
+_AMOGUS_SABOTAGE_EVENTS = [
+    "⚠️ Lights went out — someone sabotaged Electrical!",
+    "☢️ Reactor meltdown incoming — sabotage detected in the core!",
+    "📡 Comms knocked out — the lines have been cut!",
+    "🌿 O2 is depleting — life support has been sabotaged!",
+    "🚨 A loud bang echoed through the corridors...",
+]
+_AMOGUS_LOCATIONS = [
+    "Cafeteria", "Electrical", "O2", "Reactor", "Security",
+    "Medbay", "Storage", "Admin", "Navigation", "Shields",
+    "Weapons", "Communications", "Engine Room", "Specimen Room",
+]
 
 _WORK_EVENTS = [
     "You refereed a ranked Pokemon battle and earned **{coins:,}** PokeCoins.",
@@ -1887,6 +1929,429 @@ def _plinko_board(col: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 🔴  AMONG US  (multiplayer social deduction)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AmogusBotPlayer:
+    def __init__(self, slot: int, name: str):
+        self.id = -(10_000 + slot)
+        self.display_name = f"{name} Bot"
+        self.mention = f"**{self.display_name}**"
+
+    async def send(self, *_args, **_kwargs):
+        return None
+
+
+def _amogus_is_bot(player) -> bool:
+    return isinstance(player, AmogusBotPlayer)
+
+
+def _amogus_autofill_players(participants: list) -> list:
+    filled = list(participants)
+    if len(filled) >= AMOGUS_MIN_PLAYERS:
+        return filled
+
+    used_names = {getattr(player, "display_name", "") for player in filled}
+    bot_slot = 1
+    for name in _AMOGUS_BOT_NAMES:
+        bot_name = f"{name} Bot"
+        if bot_name in used_names:
+            continue
+        filled.append(AmogusBotPlayer(bot_slot, name))
+        bot_slot += 1
+        if len(filled) >= AMOGUS_MIN_PLAYERS:
+            break
+    return filled
+
+def _amogus_lobby_embed(
+    host: discord.Member,
+    bet: int,
+    participants: list,
+    *,
+    closed: bool = False,
+) -> tuple[discord.Embed, discord.File | None]:
+    embed = discord.Embed(
+        title="🔴 Among Us — Lobby",
+        description=(
+            f"**Host:** {host.mention}\n"
+            f"**Bet per player:** `{bet:,}` PokeCoins\n"
+            f"**Min players:** {AMOGUS_MIN_PLAYERS}  ·  **Max:** {AMOGUS_MAX_PLAYERS}\n\n"
+            f"One of you is secretly the **IMPOSTOR** 🔪\n"
+            f"Crewmates: vote out the impostor to split the pot!\n"
+            f"Impostor: stay hidden and take everything!\n\n"
+            f"**Crewmate win →** pot split among crewmates\n"
+            f"**Impostor win →** impostor takes the full pot"
+        ),
+        color=0xC0392B,
+    )
+    roster_lines = [f"👤 {m.display_name}" for m in participants]
+    embed.add_field(
+        name=f"👥 Players ({len(participants)}/{AMOGUS_MAX_PLAYERS})",
+        value="\n".join(roster_lines) or "No one yet",
+        inline=False,
+    )
+    if closed:
+        embed.set_footer(text="Lobby locked — assigning roles and starting the game...")
+    else:
+        embed.set_footer(
+            text=(
+                f"Press Join to enter — {AMOGUS_JOIN_SECONDS}s window  ·  "
+                f"Missing seats auto-fill with bot crew if nobody joins"
+            )
+        )
+    panel_lines = [
+        f"Host: {host.display_name}",
+        f"Bet each: {bet:,}",
+        f"Players: {len(participants)}/{AMOGUS_MAX_PLAYERS}",
+        "Mode: Social deduction",
+    ]
+    panel_lines.extend(p.display_name for p in participants[:5])
+    return embed, _heist_render_image_file("Among Us Lobby", panel_lines, (145, 92, 182))
+
+
+async def _run_amogus_game(
+    message: discord.Message,
+    channel_id: int,
+    participants: list,
+    bet: int,
+) -> None:
+    """Run the full Among Us game sequence after the lobby closes."""
+    valid = []
+    dropped = []
+    for m in participants:
+        if _amogus_is_bot(m):
+            valid.append(m)
+            continue
+        if _check_bet(m.id, bet) is None:
+            valid.append(m)
+        else:
+            dropped.append(m.display_name)
+
+    if not any(not _amogus_is_bot(player) for player in valid):
+        cancel_embed = discord.Embed(
+            title="🔴 Among Us — Cancelled",
+            description=(
+                f"Nobody in the lobby had enough PokeCoins to start.\n"
+                + (f"Couldn't afford bet: {', '.join(dropped)}" if dropped else "")
+            ),
+            color=0x95A5A6,
+        )
+        await message.edit(embed=cancel_embed, view=None)
+        _AMOGUS_BUSY_CHANNELS.discard(channel_id)
+        return
+
+    valid = _amogus_autofill_players(valid)
+
+    human_players = [player for player in valid if not _amogus_is_bot(player)]
+    bot_players = [player for player in valid if _amogus_is_bot(player)]
+    impostor_pool = bot_players if len(human_players) == 1 and bot_players else valid
+    impostor = random.choice(impostor_pool)
+    crewmates = [m for m in valid if m.id != impostor.id]
+    human_crewmates = [m for m in crewmates if not _amogus_is_bot(m)]
+    n_players = len(valid)
+    total_pot = bet * n_players
+
+    for m in valid:
+        if not _amogus_is_bot(m):
+            WALLETS[m.id] = _wallet(m.id) - bet
+
+    if not _amogus_is_bot(impostor):
+        try:
+            await impostor.send(
+                f"🔪 **You are the IMPOSTOR** in a game of Among Us on **{message.guild.name}**!\n"
+                f"Stay hidden. If the crewmates vote you out — you lose. If they miss — you win the full pot!\n"
+                f"**Full pot: {total_pot:,} PokeCoins**"
+            )
+        except Exception:
+            pass
+
+    kickoff_embed = discord.Embed(
+        title="🔴 Among Us — Game Started",
+        description=(
+            f"**Players:** `{n_players}`\n"
+            f"**Bet each:** `{bet:,}` PokeCoins\n"
+            f"**Total pot:** `{total_pot:,}` PokeCoins\n"
+            "Scanning tasks and sabotage activity..."
+        ),
+        color=0x8E44AD,
+    )
+    kickoff_lines = [
+        f"Players: {n_players}",
+        f"Bet each: {bet:,}",
+        f"Total pot: {total_pot:,}",
+        "Round feed starting...",
+    ]
+    kickoff_img = _heist_render_image_file("Among Us", kickoff_lines, (145, 92, 182))
+    if kickoff_img:
+        kickoff_embed.set_image(url="attachment://heist_panel.png")
+        await message.edit(embed=kickoff_embed, attachments=[kickoff_img], view=None)
+    else:
+        await message.edit(embed=kickoff_embed, attachments=[], view=None)
+
+    round_blocks: list[str] = []
+    for round_num in range(1, 4):
+        await asyncio.sleep(3)
+        events: list[str] = []
+        for _ in range(random.randint(2, 3)):
+            if random.random() < 0.20:
+                events.append(random.choice(_AMOGUS_SABOTAGE_EVENTS))
+            else:
+                crew_member = random.choice(valid)
+                task = random.choice(_AMOGUS_TASK_EVENTS).format(name=crew_member.display_name)
+                events.append(f"✅ {task}")
+        round_log = "\n".join(f"• {e}" for e in events)
+        round_blocks.append(f"**Round {round_num}:**\n" + round_log)
+
+        round_embed = discord.Embed(
+            title=f"🔴 Among Us — Round {round_num}",
+            description=round_log,
+            color=0xE74C3C,
+        )
+        round_embed.add_field(
+            name="👥 Players",
+            value=" · ".join(m.display_name for m in valid),
+            inline=False,
+        )
+        round_embed.set_footer(text=f"Round {round_num}/3 — emergency meeting follows round 3")
+
+        round_lines = [
+            f"Round {round_num}",
+            f"Players: {len(valid)}",
+            "",
+        ]
+        round_lines.extend(events[:6])
+        round_img = _heist_render_image_file(f"Among Us R{round_num}", round_lines, (145, 92, 182))
+        if round_img:
+            round_embed.set_image(url="attachment://heist_panel.png")
+            await message.channel.send(embed=round_embed, file=round_img)
+        else:
+            await message.channel.send(embed=round_embed)
+
+    await asyncio.sleep(3)
+
+    crewmate_split = total_pot // len(crewmates) if crewmates else total_pot
+    vote_embed = discord.Embed(
+        title="🚨 EMERGENCY MEETING — Vote the Impostor Out!",
+        description=(
+            f"**{n_players} players** are alive.\n"
+            f"Use the dropdown below to cast your vote!\n"
+            f"You have **{AMOGUS_VOTE_SECONDS} seconds** to decide.\n\n"
+            + "\n\n".join(round_blocks)
+        ),
+        color=0xF39C12,
+    )
+    vote_embed.add_field(
+        name="💰 Stakes",
+        value=(
+            f"Total pot: **{total_pot:,}** PokeCoins\n"
+            f"Crewmate win → **{crewmate_split:,}** each\n"
+            f"Impostor win → **{total_pot:,}** for the impostor"
+        ),
+        inline=False,
+    )
+    vote_embed.set_footer(text=f"🗳️ Vote closes in {AMOGUS_VOTE_SECONDS} seconds!")
+    vote_view = AmogusVotingView(valid)
+    vote_message = await message.channel.send(embed=vote_embed, view=vote_view)
+    await asyncio.sleep(AMOGUS_VOTE_SECONDS)
+    vote_view.stop()
+
+    vote_counts: dict[int, int] = {m.id: 0 for m in valid}
+    for player in valid:
+        if _amogus_is_bot(player) and player.id not in vote_view.votes:
+            vote_targets = [target for target in valid if target.id != player.id]
+            vote_view.votes[player.id] = random.choice(vote_targets).id
+    for target_id in vote_view.votes.values():
+        if target_id in vote_counts:
+            vote_counts[target_id] += 1
+
+    max_votes = max(vote_counts.values(), default=0)
+    top_ids = [mid for mid, v in vote_counts.items() if v == max_votes]
+    ejected_id = random.choice(top_ids)
+    ejected = next((m for m in valid if m.id == ejected_id), None)
+
+    vote_lines: list[str] = []
+    for m in valid:
+        vc = vote_counts.get(m.id, 0)
+        tag = ""
+        if m.id == ejected_id:
+            tag = " ☠️ **EJECTED**"
+        elif m.id == impostor.id:
+            tag = " 🔪 *(impostor)*"
+        vote_lines.append(f"**{m.display_name}** — {vc} vote{'s' if vc != 1 else ''}{tag}")
+
+    if ejected_id == impostor.id:
+        split = total_pot // max(1, len(human_crewmates))
+        for m in human_crewmates:
+            WALLETS[m.id] = _wallet(m.id) + split
+            net = split - bet
+            if net > 0:
+                _record_win(m.id, net)
+            else:
+                _record_loss(m.id, -net)
+        if not _amogus_is_bot(impostor):
+            _record_loss(impostor.id, bet)
+        result_embed = discord.Embed(
+            title="✅ Crewmates Win! Impostor Ejected!",
+            description=(
+                f"☠️ **{ejected.display_name} was The Impostor.** 🔪\n\n"
+                f"The crew worked together and voted correctly!\n\n"
+                f"**Each human crewmate receives:** `{split:,}` PokeCoins\n"
+                f"**{impostor.display_name} loses:** `{bet:,}` PokeCoins"
+            ),
+            color=0x2ECC71,
+        )
+        result_embed.add_field(name="📊 Vote Results", value="\n".join(vote_lines), inline=False)
+        result_embed.add_field(name="🔪 Impostor", value=impostor.mention, inline=True)
+        result_embed.add_field(
+            name="🏆 Crewmate Winners",
+            value=" ".join(m.mention for m in human_crewmates) if human_crewmates else "Bot crew",
+            inline=True,
+        )
+        result_embed.set_footer(text="GG! Play again with /amogus  ·  /casinomenu for all games")
+        await vote_message.edit(embed=result_embed, view=None)
+        for m in human_crewmates:
+            await _log_coin_event(message.guild, m, split - bet, "among_us_crewmate_win")
+        if not _amogus_is_bot(impostor):
+            await _log_coin_event(message.guild, impostor, -bet, "among_us_impostor_loss")
+    else:
+        if not _amogus_is_bot(impostor):
+            WALLETS[impostor.id] = _wallet(impostor.id) + total_pot
+            net_imp = total_pot - bet
+            if net_imp > 0:
+                _record_win(impostor.id, net_imp)
+        for m in human_crewmates:
+            _record_loss(m.id, bet)
+        result_embed = discord.Embed(
+            title="🔪 Impostor Wins! Wrong Ejection!",
+            description=(
+                f"☠️ **{ejected.display_name if ejected else 'Unknown'} was innocent.**\n\n"
+                f"The impostor remains among you... and takes everything! 😈\n\n"
+                f"**{impostor.display_name} wins:** `{total_pot:,}` PokeCoins\n"
+                f"**Each human crewmate loses:** `{bet:,}` PokeCoins"
+            ),
+            color=0xC0392B,
+        )
+        result_embed.add_field(name="📊 Vote Results", value="\n".join(vote_lines), inline=False)
+        result_embed.add_field(name="🔪 Impostor (Winner)", value=impostor.mention, inline=True)
+        result_embed.add_field(name="💀 Ejected (Innocent)", value=ejected.mention if ejected else "Unknown", inline=True)
+        result_embed.set_footer(text="Better luck next time! /amogus to play again  ·  /casinomenu")
+        await vote_message.edit(embed=result_embed, view=None)
+        if not _amogus_is_bot(impostor):
+            await _log_coin_event(message.guild, impostor, total_pot - bet, "among_us_impostor_win")
+        for m in human_crewmates:
+            await _log_coin_event(message.guild, m, -bet, "among_us_crewmate_loss")
+
+    _AMOGUS_BUSY_CHANNELS.discard(channel_id)
+
+
+class AmogusVotingView(discord.ui.View):
+    """Dropdown for players to vote who the impostor is."""
+
+    def __init__(self, players: list):
+        super().__init__(timeout=AMOGUS_VOTE_SECONDS + 5)
+        self.players = players
+        self.votes: dict[int, int] = {}
+        options = [
+            discord.SelectOption(label=m.display_name[:25], value=str(m.id), emoji="👤")
+            for m in players
+        ]
+        select = discord.ui.Select(
+            placeholder="🗳️ Vote to eject...",
+            options=options,
+            custom_id="amogus_vote_select",
+        )
+        select.callback = self._vote_callback
+        self.add_item(select)
+
+    async def _vote_callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id not in {m.id for m in self.players}:
+            await interaction.response.send_message("❌ You're not in this game!", ephemeral=True)
+            return
+        if interaction.user.id in self.votes:
+            await interaction.response.send_message("✅ You already cast your vote!", ephemeral=True)
+            return
+        target_id = int(interaction.data["values"][0])
+        target = next((m for m in self.players if m.id == target_id), None)
+        self.votes[interaction.user.id] = target_id
+        await interaction.response.send_message(
+            f"🗳️ Voted to eject **{target.display_name if target else 'Unknown'}**. Vote locked in!",
+            ephemeral=True,
+        )
+
+
+class AmogusLobbyView(discord.ui.View):
+    def __init__(self, host: discord.Member, bet: int):
+        super().__init__(timeout=AMOGUS_JOIN_SECONDS)
+        self.host = host
+        self.bet = bet
+        self.participants: dict[int, discord.Member] = {host.id: host}
+        self.message: discord.Message | None = None
+        self._lock = asyncio.Lock()
+        self._resolved = False
+
+    async def _refresh_message(self, *, closed: bool = False) -> None:
+        if self.message is None:
+            return
+        embed, lobby_img = _amogus_lobby_embed(self.host, self.bet, list(self.participants.values()), closed=closed)
+        if lobby_img:
+            embed.set_image(url="attachment://heist_panel.png")
+            await self.message.edit(
+                embed=embed,
+                attachments=[lobby_img],
+                view=None if closed else self,
+            )
+        else:
+            await self.message.edit(embed=embed, attachments=[], view=None if closed else self)
+
+    async def _launch(self) -> None:
+        async with self._lock:
+            if self._resolved:
+                return
+            self._resolved = True
+            self.stop()
+            await self._refresh_message(closed=True)
+        if self.message is not None:
+            channel_id = self.message.channel.id if self.message.channel else 0
+            await _run_amogus_game(self.message, channel_id, list(self.participants.values()), self.bet)
+
+    async def on_timeout(self) -> None:
+        await self._launch()
+
+    @discord.ui.button(label="Join Game", style=discord.ButtonStyle.danger, emoji="🔴")
+    async def join_game(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self._lock:
+            if self._resolved:
+                await interaction.response.send_message("❌ This lobby is already closed.", ephemeral=True)
+                return
+            if interaction.user.id in self.participants:
+                await interaction.response.send_message("✅ You're already in this game!", ephemeral=True)
+                return
+            if len(self.participants) >= AMOGUS_MAX_PLAYERS:
+                await interaction.response.send_message("❌ Lobby is full!", ephemeral=True)
+                return
+            err = _check_bet(interaction.user.id, self.bet)
+            if err:
+                await interaction.response.send_message(err, ephemeral=True)
+                return
+            self.participants[interaction.user.id] = interaction.user
+            await interaction.response.send_message(
+                f"🔴 You joined Among Us for **{self.bet:,}** PokeCoins. Don't act sus! 👀",
+                ephemeral=True,
+            )
+        await self._refresh_message()
+
+    @discord.ui.button(label="Start Now", style=discord.ButtonStyle.primary, emoji="🚀")
+    async def start_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host.id:
+            await interaction.response.send_message("❌ Only the host can start early.", ephemeral=True)
+            return
+        fill_count = max(0, AMOGUS_MIN_PLAYERS - len(self.participants))
+        note = f" Filling the remaining {fill_count} seat(s) with bot crew." if fill_count else ""
+        await interaction.response.send_message(f"🚀 Starting the game now...{note}", ephemeral=True)
+        await self._launch()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 📊  CASINO MENU  (updated with stats + new games)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1915,8 +2380,10 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
     embed.add_field(name="🃏 /highlow <bet>",           value="Is the next card **higher** or **lower**? Correct = **1.9×**!",       inline=False)
     embed.add_field(name="🎯 /plinko <bet>",            value="Drop the ball through 8 rows of pegs. Up to **3× your bet!**",        inline=False)
     embed.add_field(name="🦹 /heist <bet> <target>",    value="Start a crew heist friends can join. Pick your target — up to **15× your bet!**",  inline=False)
+    embed.add_field(name="🔴 /amogus <bet>",            value="Multiplayer social deduction. Vote out the impostor or get played for the whole pot.", inline=False)
     embed.add_field(name="📅 /daily",                   value=f"Claim **{DAILY_RANGE[0]}–{DAILY_RANGE[1]} free PokeCoins** every 24 hours!", inline=False)
     embed.add_field(name="💼 /work",                    value=f"Do a random game-themed job for **{WORK_RANGE[0]}–{WORK_RANGE[1]}** coins (1h cooldown)", inline=False)
+    embed.add_field(name="💰 /wallet",                  value="View your current shared PokeCoin balance used by both casino and Pokemon.", inline=False)
     if s["games"] > 0:
         embed.add_field(
             name="📊 Your Casino Stats",
@@ -1938,9 +2405,7 @@ def _casino_menu_embed(uid: int) -> discord.Embed:
 def setup_gambling(bot: commands.Bot) -> None:
     """Register all casino slash commands globally."""
 
-    # Skip if already registered (check first command as marker)
-    if bot.tree.get_command("casinomenu") is not None:
-        return
+    # Don't skip re-registration - ensure all commands are present
 
     # ── /casinomenu ───────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -1991,7 +2456,7 @@ def setup_gambling(bot: commands.Bot) -> None:
                 overwrites=perms,
                 topic=(
                     "Use all casino slash commands here! "
-                    "/slots /blackjack /roulette /dice /heist /plinko /highlow /coinflip /daily"
+                    "/slots /blackjack /roulette /dice /heist /amogus /plinko /highlow /coinflip /daily /work /wallet"
                 ),
             )
 
@@ -2008,8 +2473,10 @@ def setup_gambling(bot: commands.Bot) -> None:
                 "🃏 `/highlow` — Higher or lower card? **1.9×** payout!\n"
                 "🎯 `/plinko` — Drop the ball, up to **3×** payout!\n"
                 "🦹 `/heist` — Start a joinable crew heist, up to **15×** payout!\n"
+                "🔴 `/amogus` — Multiplayer Among Us. Vote out the impostor or lose the pot!\n"
                 "📅 `/daily` — Claim free coins every 24 hours!\n"
-                "� `/work` — Do random game jobs for extra PokeCoins!\n"
+                "💼 `/work` — Do random game jobs for extra PokeCoins!\n"
+                "💰 `/wallet` — View your shared PokeCoin balance!\n"
                 "�📊 `/casinomenu` — See all games & your personal stats!\n\n"
                 "⚡ **Every win** has a **7% chance** of a 🌟 **3× BONUS ROUND!**\n"
                 "*All bets use your PokeCoin wallet — earn more with `/daily` & Pokémon!*"
@@ -2048,12 +2515,18 @@ def setup_gambling(bot: commands.Bot) -> None:
                 ephemeral=True,
             )
             return
+        before = _wallet(uid)
         amount = random.randint(*DAILY_RANGE)
-        WALLETS[uid] = _wallet(uid) + amount
+        WALLETS[uid] = before + amount
+        after = _wallet(uid)
         _DAILY_CD[uid] = now
         embed = discord.Embed(
             title="📅 Daily Reward Claimed!",
-            description=f"**+{amount:,} PokeCoins** added to your wallet!\n\n{_bal_line(uid)}",
+            description=(
+                f"**+{amount:,} PokeCoins** added to your wallet!\n"
+                f"`{before:,} + {amount:,} = {after:,}`\n\n"
+                f"💼 **Balance:** `{after:,}` PokeCoins"
+            ),
             color=0x2ECC71,
         )
         embed.set_footer(text="Come back in 24 hours for your next reward!  •  /slots /blackjack /roulette")
@@ -2082,19 +2555,47 @@ def setup_gambling(bot: commands.Bot) -> None:
             )
             return
 
+        before = _wallet(uid)
         amount = random.randint(*WORK_RANGE)
-        WALLETS[uid] = _wallet(uid) + amount
+        WALLETS[uid] = before + amount
+        after = _wallet(uid)
         _WORK_CD[uid] = now
         event = random.choice(_WORK_EVENTS).format(coins=amount)
 
         embed = discord.Embed(
             title="💼 Shift Complete!",
-            description=f"{event}\n\n{_bal_line(uid)}",
+            description=(
+                f"{event}\n"
+                f"`{before:,} + {amount:,} = {after:,}`\n\n"
+                f"💼 **Balance:** `{after:,}` PokeCoins"
+            ),
             color=0x2ECC71,
         )
         embed.set_footer(text="Use /work again after cooldown  •  /daily /slots /blackjack")
         await interaction.response.send_message(embed=embed)
         await _log_coin_event(interaction.guild, interaction.user, amount, "work")
+
+    # ── /wallet ───────────────────────────────────────────────────────────────
+    @bot.tree.command(
+        name="wallet",
+        description="💰 View your shared PokeCoin balance",
+    )
+    async def cmd_wallet(interaction: discord.Interaction):
+        if not await _require_casino_channel(interaction):
+            return
+        uid = interaction.user.id
+        _ensure_player(uid)
+        bal = _wallet(uid)
+        embed = discord.Embed(
+            title="💰 PokeCoin Wallet",
+            description=(
+                f"💼 **Balance:** `{bal:,}` PokeCoins\n\n"
+                "This is the same wallet used across casino and Pokemon commands."
+            ),
+            color=0xF1C40F,
+        )
+        embed.set_footer(text="Try /daily or /work to earn more")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ── /givepokcoin ───────────────────────────────────────────────────────────
     @bot.tree.command(
@@ -2635,4 +3136,41 @@ def setup_gambling(bot: commands.Bot) -> None:
             view.message = await interaction.original_response()
         except Exception:
             _HEIST_BUSY_CHANNELS.discard(interaction.channel_id)
+            raise
+
+    # ── /amogus ───────────────────────────────────────────────────────────────
+    @bot.tree.command(
+        name="amogus",
+        description="🔴 Start a multiplayer Among Us betting game!",
+    )
+    @app_commands.describe(bet="PokeCoins each player puts into the pot")
+    async def cmd_amogus(interaction: discord.Interaction, bet: int):
+        if not await _require_casino_channel(interaction):
+            return
+
+        err = _check_bet(interaction.user.id, bet)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        if interaction.channel_id in _AMOGUS_BUSY_CHANNELS:
+            await interaction.response.send_message(
+                "❌ An Among Us lobby is already active in this channel. Let that round finish first.",
+                ephemeral=True,
+            )
+            return
+
+        _AMOGUS_BUSY_CHANNELS.add(interaction.channel_id)
+        view = AmogusLobbyView(interaction.user, bet)
+        embed, lobby_img = _amogus_lobby_embed(interaction.user, bet, [interaction.user])
+
+        try:
+            if lobby_img:
+                embed.set_image(url="attachment://heist_panel.png")
+                await interaction.response.send_message(embed=embed, file=lobby_img, view=view)
+            else:
+                await interaction.response.send_message(embed=embed, view=view)
+            view.message = await interaction.original_response()
+        except Exception:
+            _AMOGUS_BUSY_CHANNELS.discard(interaction.channel_id)
             raise

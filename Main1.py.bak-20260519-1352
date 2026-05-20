@@ -397,6 +397,7 @@ class Client(commands.Bot):
                 except Exception as e:
                     print(f"[Voice] Reconnect failed: {e}")
                     state.current = None
+            return
 
         # ── Personal Space logic ──────────────────────────────────────────────
         lobby_id = PERSONAL_SPACE_LOBBY.get(gid)
@@ -404,6 +405,7 @@ class Client(commands.Bot):
         # User joined the lobby trigger channel → create their private VC
         if lobby_id and after.channel and after.channel.id == lobby_id:
             guild = member.guild
+            category = after.channel.category
             # Create a private channel: only the owner + admins can see it by default
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=False),
@@ -454,6 +456,8 @@ class Client(commands.Bot):
                 if minutes > 0:
                     xp_gain = minutes * 10
                     old_lvl, new_lvl, leveled_up = _add_xp(gid, uid, xp_gain)
+                    level_ch = _resolve_levels_channel(member.guild)
+                    gain_target = level_ch
                     total_xp = XP_DATA.get(gid, {}).get(uid, 0)
                     current_level = _xp_to_level(total_xp)
                     next_level = current_level + 1
@@ -461,28 +465,27 @@ class Client(commands.Bot):
                     xp_this_level = total_xp - sum(_xp_required(l) for l in range(current_level))
                     progress = min(1.0, xp_this_level / xp_for_next) if xp_for_next else 0.0
                     bar = "▰" * int(progress * 18) + "▱" * (18 - int(progress * 18))
-                    if leveled_up:
-                        try:
-                            level_embed = _build_gz_levelup_card(
-                                member.guild,
-                                member,
-                                new_lvl,
-                                total_xp,
-                                xp_this_level,
-                                xp_for_next,
-                            )
-                            level_embed.add_field(name="Voice XP Bonus", value=f"+{xp_gain} XP", inline=True)
-                            level_embed.set_footer(text="Gaming Zone Level Card • Auto-removes soon")
-                            announce_ch = _resolve_levels_channel(member.guild) or member.guild.system_channel
-                            if announce_ch:
-                                await announce_ch.send(
-                                    content=member.mention,
-                                    embed=level_embed,
-                                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                                    delete_after=12,
-                                )
-                        except Exception:
-                            pass
+                    msg = (
+                        f"🎤 {member.mention} earned +{xp_gain} XP for voice chatting!\n"
+                        f"Progress to Level {next_level}\n{bar} {xp_this_level}/{xp_for_next} XP"
+                    )
+                    if gain_target:
+                        await gain_target.send(msg)
+                    # Level-up message
+                    if leveled_up and gain_target:
+                        embed = discord.Embed(
+                            title=f"{member.display_name} Leveled Up!",
+                            description=f"Congratulations {member.mention}, you reached **Level {new_lvl}**!",
+                            color=0x8e44ad,
+                        )
+                        embed.set_thumbnail(url=member.display_avatar.url)
+                        embed.add_field(
+                            name="Progress",
+                            value=f"{bar} {xp_this_level}/{xp_for_next} XP",
+                            inline=False,
+                        )
+                        embed.set_footer(text="Keep chatting, inviting, and joining voice to earn more XP!")
+                        await gain_target.send(embed=embed)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if before.author.bot or not before.guild:
@@ -914,12 +917,6 @@ IDLERPG_RACES = [
     {"name": "Orc", "emoji": "🪓", "desc": "Brutal strength and battle focus."},
     {"name": "Tiefling", "emoji": "😈", "desc": "Hellborn will and dark charisma."},
     {"name": "Dragonborn", "emoji": "🐲", "desc": "Scaled honor and draconic power."},
-    {"name": "Halfling", "emoji": "🦶", "desc": "Small frame, huge luck."},
-    {"name": "Gnome", "emoji": "⚙️", "desc": "Inventive mind and arcane curiosity."},
-    {"name": "Aasimar", "emoji": "😇", "desc": "Celestial-blooded with radiant resolve."},
-    {"name": "Goblin", "emoji": "🧨", "desc": "Scrappy survivor with chaotic tactics."},
-    {"name": "Tabaxi", "emoji": "🐈", "desc": "Feline hunter with fast reflexes."},
-    {"name": "Genasi", "emoji": "🌪️", "desc": "Element-touched wanderer."},
 ]
 
 IDLERPG_CLASSES = [
@@ -929,18 +926,6 @@ IDLERPG_CLASSES = [
     {"name": "Cleric", "emoji": "✨", "desc": "Holy support with strong sustain."},
     {"name": "Ranger", "emoji": "🏹", "desc": "Ranged hunter with survival skills."},
     {"name": "Paladin", "emoji": "🛡", "desc": "Sacred knight with balanced might."},
-]
-
-IDLERPG_ALIGNMENTS = [
-    {"name": "Lawful Good", "emoji": "🟦", "desc": "Honorable and compassionate defender."},
-    {"name": "Neutral Good", "emoji": "🟩", "desc": "Kind-hearted and practical helper."},
-    {"name": "Chaotic Good", "emoji": "🟢", "desc": "Freedom-driven hero against tyranny."},
-    {"name": "Lawful Neutral", "emoji": "⚖️", "desc": "Duty first, emotion second."},
-    {"name": "True Neutral", "emoji": "🧭", "desc": "Balance above all extremes."},
-    {"name": "Chaotic Neutral", "emoji": "🟠", "desc": "Unpredictable and fiercely independent."},
-    {"name": "Lawful Evil", "emoji": "🔷", "desc": "Disciplined ambition at any cost."},
-    {"name": "Neutral Evil", "emoji": "🟣", "desc": "Self-serving and opportunistic."},
-    {"name": "Chaotic Evil", "emoji": "🔺", "desc": "Destructive, ruthless, and volatile."},
 ]
 
 IDLERPG_CLASS_CRATE_COST = 325
@@ -977,18 +962,6 @@ IDLERPG_LOOT_POOL = [
     ("Runic Prism", "🔷", 0, 24),
     ("Blood Oath Token", "🩸", 0, 20),
     ("Verdant Fetish", "🌿", 0, 18),
-    ("Abyssal Sigil", "🕳️", 0, 22),
-    ("Clockwork Core", "⚙️", 0, 19),
-    ("Celestial Feather", "🪽", 0, 21),
-    ("Eldritch Eye", "👁️", 0, 24),
-    ("Phoenix Ember", "🪶", 0, 23),
-    ("Leviathan Fang", "🦈", 0, 22),
-    ("Chrono Dust", "⏳", 0, 20),
-    ("Void Lantern", "🏮", 0, 21),
-    ("Stormheart Crystal", "💎", 0, 23),
-    ("Obsidian Idol", "🗿", 0, 22),
-    ("Dawn Oath Scroll", "📜", 0, 19),
-    ("Fae Bloom", "🌸", 0, 18),
 ]
 
 IDLERPG_ENCOUNTER_TABLE = [
@@ -1674,7 +1647,7 @@ XP_PER_MSG   = 15
 XP_COOLDOWN_SECS = 60
 _LEVELS_SAVE = os.path.join(_IDLERPG_BASE_PATH, "levels_data.json")
 _LEVELS_RESTORE_STATE_SAVE = os.path.join(_IDLERPG_BASE_PATH, "levels_restore_state.json")
-XP_GAIN_FEED_ENABLED = False
+XP_GAIN_FEED_ENABLED = True
 
 XP_RESTORE_SNAPSHOT_ID = "gz-may19-2026-levels-restore-v1"
 XP_RESTORE_SNAPSHOT: list[tuple[str, int]] = [
@@ -2093,7 +2066,6 @@ def _idlerpg_profile(user: discord.abc.User, create: bool = False) -> dict | Non
             "favor": 0,
             "race": None,
             "class": None,
-            "alignment": None,
             "recent_drops": [],
             "recent_encounters": [],
         }
@@ -2225,8 +2197,6 @@ def _idlerpg_build_missing(profile: dict) -> list[str]:
         missing.append("Race (/race)")
     if not profile.get("class"):
         missing.append("Class (/class)")
-    if not profile.get("alignment"):
-        missing.append("Alignment (/alignment)")
     if not profile.get("god"):
         missing.append("God (/follow)")
     return missing
@@ -2397,12 +2367,6 @@ class IdleRPGBuildView(discord.ui.View):
             discord.SelectOption(label="Orc", emoji="🪓", value="Orc"),
             discord.SelectOption(label="Tiefling", emoji="😈", value="Tiefling"),
             discord.SelectOption(label="Dragonborn", emoji="🐲", value="Dragonborn"),
-            discord.SelectOption(label="Halfling", emoji="🦶", value="Halfling"),
-            discord.SelectOption(label="Gnome", emoji="⚙️", value="Gnome"),
-            discord.SelectOption(label="Aasimar", emoji="😇", value="Aasimar"),
-            discord.SelectOption(label="Goblin", emoji="🧨", value="Goblin"),
-            discord.SelectOption(label="Tabaxi", emoji="🐈", value="Tabaxi"),
-            discord.SelectOption(label="Genasi", emoji="🌪️", value="Genasi"),
         ],
     )
     async def race_select(self, interaction: discord.Interaction, select: discord.ui.Select):
@@ -2478,35 +2442,6 @@ class IdleRPGBuildView(discord.ui.View):
         profile["god"] = selected_god
         _save_idlerpg_data()
         await interaction.response.send_message(f"God set to **{selected_god}**.", ephemeral=True)
-
-    @discord.ui.select(
-        placeholder="Choose your alignment",
-        min_values=1,
-        max_values=1,
-        options=[
-            discord.SelectOption(label="Lawful Good", emoji="🟦", value="Lawful Good"),
-            discord.SelectOption(label="Neutral Good", emoji="🟩", value="Neutral Good"),
-            discord.SelectOption(label="Chaotic Good", emoji="🟢", value="Chaotic Good"),
-            discord.SelectOption(label="Lawful Neutral", emoji="⚖️", value="Lawful Neutral"),
-            discord.SelectOption(label="True Neutral", emoji="🧭", value="True Neutral"),
-            discord.SelectOption(label="Chaotic Neutral", emoji="🟠", value="Chaotic Neutral"),
-            discord.SelectOption(label="Lawful Evil", emoji="🔷", value="Lawful Evil"),
-            discord.SelectOption(label="Neutral Evil", emoji="🟣", value="Neutral Evil"),
-            discord.SelectOption(label="Chaotic Evil", emoji="🔺", value="Chaotic Evil"),
-        ],
-        row=3,
-    )
-    async def alignment_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if self._not_owner(interaction):
-            await interaction.response.send_message("This build panel belongs to another player.", ephemeral=True)
-            return
-        profile = _idlerpg_profile(interaction.user)
-        if not profile:
-            await interaction.response.send_message("Create a character first with /create.", ephemeral=True)
-            return
-        profile["alignment"] = select.values[0]
-        _save_idlerpg_data()
-        await interaction.response.send_message(f"Alignment set to **{select.values[0]}**.", ephemeral=True)
 
     @discord.ui.button(label="Check Build", style=discord.ButtonStyle.primary, emoji="✅")
     async def check_build(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2798,7 +2733,7 @@ class IdleRPGStarterView(discord.ui.View):
             return
         embed = discord.Embed(
             title="IdleRPG Character Setup",
-            description="Pick your race, class, alignment, and god from the dropdowns.",
+            description="Pick your race, class, and god from the dropdowns.",
             color=0x2ECC71,
         )
         missing = _idlerpg_build_missing(profile)
@@ -2971,7 +2906,7 @@ class IdleRPGHelpView(discord.ui.View):
     @discord.ui.button(label="Build Path", style=discord.ButtonStyle.success, emoji="🧱")
     async def build_path(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "Build order: `/create` -> `/race` -> `/class` -> `/alignment` -> `/follow` -> `/adventure` -> `/status`.",
+            "Build order: `/create` -> `/race` -> `/class` -> `/follow` -> `/adventure` -> `/status`.",
             ephemeral=True,
         )
 
@@ -2988,128 +2923,10 @@ class IdleRPGHelpView(discord.ui.View):
             await idlerpg_shop.callback(interaction)
         except Exception as e:
             print(f"[IdleRPG] Help store button failed: {e}")
-
-    @discord.ui.button(label="Open Codex", style=discord.ButtonStyle.primary, emoji="📚")
-    async def open_codex(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            embed=_idlerpg_codex_embed("overview"),
-            view=IdleRPGCodexView(interaction.user.id),
-            ephemeral=True,
-        )
-
-
-def _idlerpg_codex_embed(section: str) -> discord.Embed:
-    section = (section or "overview").lower()
-    if section == "build":
-        embed = discord.Embed(
-            title="IdleRPG Codex • Build",
-            description="Character setup and progression gates.",
-            color=0x2ECC71,
-        )
-        embed.add_field(name="Setup Path", value="`/create` `/race` `/class` `/alignment` `/follow`", inline=False)
-        embed.add_field(name="Species", value=f"**{len(IDLERPG_RACES)}** total", inline=True)
-        embed.add_field(name="Classes", value=f"**{len(IDLERPG_CLASSES)}** total", inline=True)
-        embed.add_field(name="Alignments", value=f"**{len(IDLERPG_ALIGNMENTS)}** total", inline=True)
-        embed.set_footer(text="Use buttons to view more sections.")
-        return embed
-    if section == "loot":
-        embed = discord.Embed(
-            title="IdleRPG Codex • Loot Pools",
-            description="All obtainable item families and pool sizes.",
-            color=0x9B59B6,
-        )
-        embed.add_field(name="Loot Items", value=f"**{len(IDLERPG_LOOT_POOL)}**", inline=True)
-        embed.add_field(name="General Gear", value=f"**{len(IDLERPG_GEAR_POOL)}**", inline=True)
-        embed.add_field(name="Class Gear", value=f"**{sum(len(v) for v in IDLERPG_CLASS_GEAR_POOLS.values())}**", inline=True)
-        preview = "\n".join([f"{item[1]} {item[0]}" for item in IDLERPG_LOOT_POOL[:12]])
-        embed.add_field(name="Loot Preview", value=preview or "No loot configured.", inline=False)
-        embed.set_footer(text="Chests can drop additional gear/chest rewards.")
-        return embed
-    if section == "encounters":
-        embed = discord.Embed(
-            title="IdleRPG Codex • Encounters",
-            description="Timed mission types and pacing.",
-            color=0xE67E22,
-        )
-        lines = []
-        for entry in IDLERPG_ENCOUNTER_TABLE:
-            dmin, dmax = entry.get("duration", (0, 0))
-            lines.append(
-                f"{entry.get('emoji', '⚡')} **{entry.get('encounter', 'Mission')}** • x{entry.get('mult', 1.0)} • {int(dmin)//60}-{int(dmax)//60}m"
-            )
-        embed.add_field(name="Mission Types", value="\n".join(lines), inline=False)
-        embed.set_footer(text="Resolve completed missions with /status.")
-        return embed
-    if section == "economy":
-        embed = discord.Embed(
-            title="IdleRPG Codex • Economy",
-            description="Coins, favor, and item flow.",
-            color=0x3498DB,
-        )
-        embed.add_field(name="Start", value="Level 1 • 100 coins", inline=True)
-        embed.add_field(name="Class Crate", value=f"{IDLERPG_CLASS_CRATE_COST} coins", inline=True)
-        embed.add_field(name="Core Commands", value="`/idlerpgshop` `/equip` `/sell` `/sacrifice` `/open`", inline=False)
-        embed.set_footer(text="Favor scales with loot/chest sacrifices.")
-        return embed
-
-    embed = discord.Embed(
-        title="IdleRPG Codex • Overview",
-        description="Clickable index of everything currently in the game.",
-        color=0x5865F2,
-    )
-    embed.add_field(name="Species", value=str(len(IDLERPG_RACES)), inline=True)
-    embed.add_field(name="Classes", value=str(len(IDLERPG_CLASSES)), inline=True)
-    embed.add_field(name="Gods", value=str(len(IDLERPG_GODS)), inline=True)
-    embed.add_field(name="Alignments", value=str(len(IDLERPG_ALIGNMENTS)), inline=True)
-    embed.add_field(name="Encounters", value=str(len(IDLERPG_ENCOUNTER_TABLE)), inline=True)
-    embed.add_field(name="Loot Pool", value=str(len(IDLERPG_LOOT_POOL)), inline=True)
-    embed.add_field(name="Navigate", value="Use the buttons below to drill into Build, Loot, Encounters, and Economy.", inline=False)
-    embed.set_footer(text="IdleRPG Codex")
-    return embed
-
-
-class IdleRPGCodexView(discord.ui.View):
-    def __init__(self, user_id: int):
-        super().__init__(timeout=900)
-        self.user_id = user_id
-
-    def _owner_only(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.user_id
-
-    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, emoji="📖")
-    async def codex_overview(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._owner_only(interaction):
-            await interaction.response.send_message("This codex panel belongs to another player.", ephemeral=True)
-            return
-        await interaction.response.edit_message(embed=_idlerpg_codex_embed("overview"), view=self)
-
-    @discord.ui.button(label="Build", style=discord.ButtonStyle.success, emoji="🧬")
-    async def codex_build(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._owner_only(interaction):
-            await interaction.response.send_message("This codex panel belongs to another player.", ephemeral=True)
-            return
-        await interaction.response.edit_message(embed=_idlerpg_codex_embed("build"), view=self)
-
-    @discord.ui.button(label="Loot", style=discord.ButtonStyle.secondary, emoji="🎒")
-    async def codex_loot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._owner_only(interaction):
-            await interaction.response.send_message("This codex panel belongs to another player.", ephemeral=True)
-            return
-        await interaction.response.edit_message(embed=_idlerpg_codex_embed("loot"), view=self)
-
-    @discord.ui.button(label="Encounters", style=discord.ButtonStyle.secondary, emoji="⚔️")
-    async def codex_encounters(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._owner_only(interaction):
-            await interaction.response.send_message("This codex panel belongs to another player.", ephemeral=True)
-            return
-        await interaction.response.edit_message(embed=_idlerpg_codex_embed("encounters"), view=self)
-
-    @discord.ui.button(label="Economy", style=discord.ButtonStyle.secondary, emoji="💰")
-    async def codex_economy(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._owner_only(interaction):
-            await interaction.response.send_message("This codex panel belongs to another player.", ephemeral=True)
-            return
-        await interaction.response.edit_message(embed=_idlerpg_codex_embed("economy"), view=self)
+            if interaction.response.is_done():
+                await interaction.followup.send("Store button failed. Please run /idlerpgshop.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Store button failed. Please run /idlerpgshop.", ephemeral=True)
 
 
 _load_prestige_data()
@@ -3908,6 +3725,8 @@ async def on_message(message: discord.Message):
     if now_f - cooldowns.get(uid, 0) >= XP_COOLDOWN_SECS:
         cooldowns[uid] = now_f
         old_lvl, new_lvl, leveled_up = _add_xp(gid, uid, XP_PER_MSG)
+        level_ch = _resolve_levels_channel(message.guild)
+        gain_target = level_ch or message.channel
         total_xp = XP_DATA.get(gid, {}).get(uid, 0)
         current_level = _xp_to_level(total_xp)
         next_level = current_level + 1
@@ -3921,30 +3740,28 @@ async def on_message(message: discord.Message):
         )
         if XP_GAIN_FEED_ENABLED:
             try:
-                level_ch = _resolve_levels_channel(message.guild)
-                gain_target = level_ch or message.channel
                 await gain_target.send(gain_msg)
             except Exception:
                 pass
         if leveled_up:
+            embed = discord.Embed(
+                title=f"LEVEL UP!",
+                description=f"{message.author.mention} reached Level {new_lvl}!",
+                color=0xF1C40F,
+            )
+            embed.add_field(name="Level", value=f"{new_lvl}", inline=True)
+            embed.add_field(name="Total XP", value=f"{total_xp}", inline=True)
+            embed.add_field(name=f"Progress to Level {new_lvl+1}", value=f"{bar} {xp_this_level}/{xp_for_next} XP", inline=False)
+            embed.set_footer(text="GamingZone • Keep chatting, voice chatting, and inviting others to earn more XP!")
+            embed.timestamp = discord.utils.utcnow()
+            embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
             try:
-                level_embed = _build_gz_levelup_card(
-                    message.guild,
-                    message.author,
-                    new_lvl,
-                    total_xp,
-                    xp_this_level,
-                    xp_for_next,
-                )
-                level_embed.set_footer(text="Gaming Zone Level Card • Auto-removes soon")
-                await message.channel.send(
-                    content=message.author.mention,
-                    embed=level_embed,
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                    delete_after=12,
-                )
+                await gain_target.send(embed=embed)
             except Exception:
-                pass
+                await message.channel.send(
+                    f"🎉 {message.author.mention} leveled up to **Level {new_lvl}**!",
+                    delete_after=10,
+                )
 
     # ── Auto-moderation ───────────────────────────────────────────────────────
     # Skip whitelisted users and admins
@@ -7358,89 +7175,6 @@ async def setupgames(interaction: discord.Interaction):
                          f"Channels: {', '.join(created_channels) or 'none new'}")
 
 # ── Level / XP Commands ───────────────────────────────────────────────────────
-def _gz_progress_bar(current: int, needed: int, width: int = 16) -> str:
-    if needed <= 0:
-        return "█" * width
-    ratio = max(0.0, min(1.0, current / needed))
-    filled = int(round(ratio * width))
-    return "█" * filled + "░" * (width - filled)
-
-
-def _gz_brand_image_url(guild: discord.Guild | None) -> str | None:
-    if guild is None:
-        return None
-    if guild.banner:
-        return guild.banner.url
-    if guild.icon:
-        return guild.icon.url
-    return None
-
-
-def _build_gz_levelup_card(
-    guild: discord.Guild,
-    member: discord.Member,
-    new_level: int,
-    total_xp: int,
-    xp_in_level: int,
-    xp_for_next: int,
-) -> discord.Embed:
-    progress_bar = _gz_progress_bar(max(0, xp_in_level), max(1, xp_for_next))
-    embed = discord.Embed(
-        title="Gaming Zone | Level Up",
-        description=f"You reached **Level {new_level}**.",
-        color=0x00C853,
-    )
-    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Level", value=str(new_level), inline=True)
-    embed.add_field(name="Total XP", value=f"{total_xp:,}", inline=True)
-    embed.add_field(
-        name=f"Progress to Level {new_level + 1}",
-        value=f"{progress_bar}  {max(0, xp_in_level)}/{max(1, xp_for_next)} XP",
-        inline=False,
-    )
-    brand_image = _gz_brand_image_url(guild)
-    if brand_image:
-        embed.set_image(url=brand_image)
-    embed.set_footer(text="Gaming Zone Level Card")
-    embed.timestamp = discord.utils.utcnow()
-    return embed
-
-
-def _build_gz_rank_card(
-    guild: discord.Guild,
-    member: discord.Member,
-    level: int,
-    total_xp: int,
-    xp_in_level: int,
-    xp_for_next: int,
-    voice_mins: int,
-) -> discord.Embed:
-    progress_bar = _gz_progress_bar(max(0, xp_in_level), max(1, xp_for_next))
-    progress_pct = int(round((max(0, xp_in_level) / max(1, xp_for_next)) * 100))
-    embed = discord.Embed(
-        title="Gaming Zone | Rank Card",
-        description=f"**{member.mention}** progression snapshot",
-        color=0x5865F2,
-    )
-    embed.set_author(name=f"{member.display_name} • Gaming Zone Rank Card", icon_url=member.display_avatar.url)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Level", value=f"{level}", inline=True)
-    embed.add_field(name="Total XP", value=f"{total_xp:,}", inline=True)
-    embed.add_field(name="Voice Time", value=f"{voice_mins:,} min", inline=True)
-    embed.add_field(
-        name=f"Progress to Level {level + 1}",
-        value=f"{progress_bar}  {max(0, xp_in_level)}/{max(1, xp_for_next)} XP  ({progress_pct}%)",
-        inline=False,
-    )
-    brand_image = _gz_brand_image_url(guild)
-    if brand_image:
-        embed.set_image(url=brand_image)
-    embed.set_footer(text="Gaming Zone Rank Card")
-    embed.timestamp = discord.utils.utcnow()
-    return embed
-
-
 @client.tree.command(name="rank", description="Check your text level and XP")
 async def rank(interaction: discord.Interaction, user: discord.Member = None):
     target = user or interaction.user
@@ -7452,16 +7186,13 @@ async def rank(interaction: discord.Interaction, user: discord.Member = None):
     xp_in_level = xp
     for lvl in range(1, level + 1):
         xp_in_level -= _xp_required(lvl)
+    embed = discord.Embed(title=f"📊 {target.display_name}'s Rank", color=0x5865F2)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Level", value=str(level), inline=True)
+    embed.add_field(name="Total XP", value=str(xp), inline=True)
+    embed.add_field(name="Progress", value=f"{max(xp_in_level,0)}/{xp_for_next} XP to level {level+1}", inline=False)
     voice_mins = VOICE_MINUTES.get(gid, {}).get(target.id, 0)
-    embed = _build_gz_rank_card(
-        interaction.guild,
-        target,
-        level,
-        xp,
-        xp_in_level,
-        xp_for_next,
-        voice_mins,
-    )
+    embed.add_field(name="🎙️ Voice Time", value=f"{voice_mins} min", inline=True)
     await interaction.response.send_message(embed=embed)
 
 def _collect_leaderboard_top(guild: discord.Guild, limit: int = 20) -> list[tuple[int, int]]:
@@ -8243,7 +7974,7 @@ async def bot_info(interaction: discord.Interaction):
     embed2.set_thumbnail(url=interaction.guild.me.display_avatar.url)
     embed2.add_field(name="📊 Levels & XP", value=(
         "Members earn XP every minute of chatting or being in voice.\n"
-        "Level ups are sent privately as branded cards. Use `/rank` and `/leaderboard`."
+        "Level ups are announced in the levels channel. Use `/rank` and `/leaderboard`."
     ), inline=False)
     embed2.add_field(name="🎉 Giveaways", value=(
         "Admins run timed giveaways with `/giveaway`. Members enter by reacting 🎉.\n"
@@ -8634,7 +8365,6 @@ async def _ensure_idlerpg_starter_panel(panel_ch: discord.TextChannel) -> tuple[
     embed.add_field(name="Timed Missions", value="Adventures are timed. Use Status to resolve rewards.", inline=False)
     embed.add_field(name="Gear Loop", value="After status resolves a drop, use equip/sell/keep buttons.", inline=False)
     embed.add_field(name="Store", value="Open the class crate store from the panel buttons.", inline=False)
-    embed.add_field(name="Codex", value="Use /idlerpgcodex for a clickable full game index.", inline=False)
     embed.set_footer(text="IdleRPG panel • persistent controls")
 
     try:
@@ -8661,25 +8391,13 @@ async def idlerpg_help(interaction: discord.Interaction):
         description="Build your hero, deploy timed quests, then check-in via status to resolve rewards.",
         color=0x5865F2,
     )
-    embed.add_field(name="Build", value="`/create` `/race` `/class` `/alignment` `/follow`", inline=False)
+    embed.add_field(name="Build", value="`/create` `/race` `/class` `/follow`", inline=False)
     embed.add_field(name="Mission", value="`/adventure` starts timed run\n`/status` resolves completed run", inline=False)
     embed.add_field(name="Inventory", value="`/inventory` `/equip` `/sell` `/sacrifice` `/ex` `/open`", inline=False)
     embed.add_field(name="Store", value="`/idlerpgshop` for class-themed gear crates and quick chest access.", inline=False)
-    embed.add_field(name="Click Flow", value="Use `/idlerpgpanel` and `/idlerpgcodex` for one-click controls and full game info.", inline=False)
+    embed.add_field(name="Click Flow", value="Use `/idlerpgpanel` for one-click mission controls.", inline=False)
     embed.set_footer(text="Use the buttons below for quick guidance.")
     await interaction.response.send_message(embed=embed, view=IdleRPGHelpView())
-
-
-@client.tree.command(name="idlerpgcodex", description="Open the clickable IdleRPG codex", guild=GUILD_ID)
-async def idlerpg_codex(interaction: discord.Interaction):
-    allowed, target_ch = _idlerpg_allowed_channel(interaction)
-    if not allowed:
-        await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
-        return
-    await interaction.response.send_message(
-        embed=_idlerpg_codex_embed("overview"),
-        view=IdleRPGCodexView(interaction.user.id),
-    )
 
 
 @client.tree.command(name="idlerpgpanel", description="Open the clickable IdleRPG control panel", guild=GUILD_ID)
@@ -8770,9 +8488,8 @@ async def idlerpg_create(interaction: discord.Interaction, name: str):
     embed.add_field(name="Coins", value="100", inline=True)
     embed.add_field(name="Build Step 1", value="Choose race with **/race**", inline=False)
     embed.add_field(name="Build Step 2", value="Choose class with **/class**", inline=False)
-    embed.add_field(name="Build Step 3", value="Choose alignment with **/alignment**", inline=False)
-    embed.add_field(name="Build Step 4", value="Choose god with **/follow**", inline=False)
-    embed.set_footer(text="You can only run /adventure after all 4 build steps are complete.")
+    embed.add_field(name="Build Step 3", value="Choose god with **/follow**", inline=False)
+    embed.set_footer(text="You can only run /adventure after all 3 build steps are complete.")
     await interaction.response.send_message(embed=embed, view=IdleRPGBuildView(interaction.user.id))
 
 
@@ -8810,17 +8527,8 @@ async def idlerpg_status(interaction: discord.Interaction):
     embed.add_field(name="Equipped", value=equip_text, inline=False)
     embed.add_field(name="Race", value=profile.get("race") or "None", inline=True)
     embed.add_field(name="Class", value=profile.get("class") or "None", inline=True)
-    embed.add_field(name="Alignment", value=profile.get("alignment") or "None", inline=True)
     embed.add_field(name="Inventory", value=str(len(inventory)), inline=True)
     embed.add_field(name="Chests", value=f"🧰 {magic_chests} | 🪬 {mythic_chests}", inline=False)
-    embed.add_field(
-        name="Game Pools",
-        value=(
-            f"Loot: **{len(IDLERPG_LOOT_POOL)}** | General Gear: **{len(IDLERPG_GEAR_POOL)}** | "
-            f"Class Gear: **{sum(len(v) for v in IDLERPG_CLASS_GEAR_POOLS.values())}**"
-        ),
-        inline=False,
-    )
     embed.add_field(
         name="Rarity Summary",
         value=(
@@ -8875,12 +8583,11 @@ async def idlerpg_status(interaction: discord.Interaction):
             reward_view = IdleRPGRewardChoiceView(interaction.user.id, int(item.get("id")))
 
     missing = _idlerpg_build_missing(profile)
-    total_build_steps = 4
     if missing:
-        embed.add_field(name="Build Progress", value=f"Incomplete ({total_build_steps - len(missing)}/{total_build_steps})\nMissing: " + ", ".join(missing), inline=False)
+        embed.add_field(name="Build Progress", value=f"Incomplete ({3 - len(missing)}/3)\nMissing: " + ", ".join(missing), inline=False)
         embed.set_footer(text="Complete your build path to unlock /adventure.")
     else:
-        embed.add_field(name="Build Progress", value="Complete (4/4) - Adventure unlocked", inline=False)
+        embed.add_field(name="Build Progress", value="Complete (3/3) - Adventure unlocked", inline=False)
         embed.set_footer(text="Build complete. You are ready for /adventure.")
 
     embed.timestamp = discord.utils.utcnow()
@@ -8954,7 +8661,7 @@ async def idlerpg_adventure(interaction: discord.Interaction):
     embed.add_field(name="Launch", value=f"<t:{int(adv.get('start_ts', int(time.time())))}:t>", inline=True)
     embed.add_field(name="ETA", value=f"<t:{end_ts}:R>", inline=True)
     embed.add_field(name="Resolve", value="Use **/status** to check and claim mission rewards.", inline=False)
-    embed.add_field(name="Build", value=f"{profile.get('race')} • {profile.get('class')} • {profile.get('alignment')} • {profile.get('god')}", inline=False)
+    embed.add_field(name="Build", value=f"{profile.get('race')} • {profile.get('class')} • {profile.get('god')}", inline=False)
     embed.set_footer(text="Timed mission active. Progress updates are visible in /status.")
     embed.timestamp = discord.utils.utcnow()
 
@@ -9138,7 +8845,7 @@ async def idlerpg_ex(interaction: discord.Interaction):
 
 
 @client.tree.command(name="race", description="Choose your race", guild=GUILD_ID)
-@app_commands.describe(race="Pick any available species shown in /idlerpgcodex")
+@app_commands.describe(race="Human, Elf, Dwarf, Orc, Tiefling, or Dragonborn")
 async def idlerpg_race(interaction: discord.Interaction, race: str):
     allowed, target_ch = _idlerpg_allowed_channel(interaction)
     if not allowed:
@@ -9183,30 +8890,6 @@ async def idlerpg_class(interaction: discord.Interaction, class_name: str):
     profile["class"] = pick["name"]
     _save_idlerpg_data()
     await interaction.response.send_message(f"Class selected: {pick['emoji']} **{pick['name']}**.")
-
-
-@client.tree.command(name="alignment", description="Choose your moral alignment", guild=GUILD_ID)
-@app_commands.describe(alignment="Examples: Lawful Good, True Neutral, Chaotic Evil")
-async def idlerpg_alignment(interaction: discord.Interaction, alignment: str):
-    allowed, target_ch = _idlerpg_allowed_channel(interaction)
-    if not allowed:
-        await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
-        return
-
-    profile = _idlerpg_profile(interaction.user)
-    if not profile:
-        await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
-        return
-
-    pick = next((a for a in IDLERPG_ALIGNMENTS if a["name"].lower() == alignment.lower()), None)
-    if not pick:
-        options = "\n".join([f"{a['emoji']} **{a['name']}** - {a['desc']}" for a in IDLERPG_ALIGNMENTS])
-        await interaction.response.send_message(f"Invalid alignment. Choose one:\n{options}", ephemeral=True)
-        return
-
-    profile["alignment"] = pick["name"]
-    _save_idlerpg_data()
-    await interaction.response.send_message(f"Alignment selected: {pick['emoji']} **{pick['name']}**.")
 
 
 @client.tree.command(name="open", description="Open one magic chest", guild=GUILD_ID)

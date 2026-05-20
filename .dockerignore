@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python caches and environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+.venv/
+venv/
+bot_env/
+
+# Local editor/state
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+startup_output.txt
+startup_capture.txt
+sync_capture.txt
+temp_logs.txt
+output.txt
+*.bak
+*.bak-*
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Build/runtime artifacts
+node_modules/
+dist/
+build/

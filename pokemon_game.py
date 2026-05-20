@@ -6,6 +6,7 @@ Adds a /pokemon command group with: battle, accept, decline, attack, forfeit, mo
 import random
 import json
 import os
+import shutil
 import threading
 import discord
 from discord import app_commands
@@ -56,6 +57,8 @@ LOSE_COINS      = 30     # coins consolation for losing
 STARTER_POKEMON = "Eevee"  # free pokemon every new player gets
 POKEMON_CHANNEL_NAME = "pokemon-battle"
 _MANAGED_CHANNELS_SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "managed_channels.json")
+PRIMARY_GUILD_ID = int(os.getenv("PRIMARY_GUILD_ID", "711335159189864468"))
+PRIMARY_GUILD = discord.Object(id=PRIMARY_GUILD_ID)
 
 
 def _economy_data_dir() -> str:
@@ -64,6 +67,11 @@ def _economy_data_dir() -> str:
     if explicit:
         os.makedirs(explicit, exist_ok=True)
         return explicit
+
+    shared = os.getenv("BOT_DATA_DIR", "").strip()
+    if shared:
+        os.makedirs(shared, exist_ok=True)
+        return shared
 
     railway_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
     if railway_mount:
@@ -77,6 +85,7 @@ def _economy_data_dir() -> str:
 
 
 _POKEMON_ECONOMY_SAVE = os.path.join(_economy_data_dir(), "pokemon_economy_state.json")
+_LEGACY_POKEMON_ECONOMY_SAVE = "/app/pokemon_economy_state.json"
 _ECONOMY_SAVE_LOCK = threading.RLock()
 _ECONOMY_LOADING = False
 
@@ -109,8 +118,26 @@ def _save_economy_state() -> None:
         print(f"[PokemonEconomy] Save failed: {e}")
 
 
+def _maybe_migrate_economy_state() -> None:
+    if _POKEMON_ECONOMY_SAVE == _LEGACY_POKEMON_ECONOMY_SAVE:
+        return
+    if os.path.exists(_POKEMON_ECONOMY_SAVE):
+        return
+    if not os.path.exists(_LEGACY_POKEMON_ECONOMY_SAVE):
+        return
+    try:
+        os.makedirs(os.path.dirname(_POKEMON_ECONOMY_SAVE), exist_ok=True)
+        shutil.copy2(_LEGACY_POKEMON_ECONOMY_SAVE, _POKEMON_ECONOMY_SAVE)
+        print(
+            f"[PokemonEconomy] Migrated legacy save from {_LEGACY_POKEMON_ECONOMY_SAVE} to {_POKEMON_ECONOMY_SAVE}."
+        )
+    except Exception as e:
+        print(f"[PokemonEconomy] Migration failed: {e}")
+
+
 def _load_economy_state() -> None:
     global _ECONOMY_LOADING
+    _maybe_migrate_economy_state()
     if not os.path.exists(_POKEMON_ECONOMY_SAVE):
         return
     try:
@@ -189,6 +216,8 @@ DAILY_CLAIMED = _AutoSaveDict(DAILY_CLAIMED, on_change=_save_economy_state)
 ACTIVE_POKEMON = _AutoSaveDict(ACTIVE_POKEMON, on_change=_save_economy_state)
 _load_economy_state()
 print(f"[PokemonEconomy] Using save file: {_POKEMON_ECONOMY_SAVE}")
+if _POKEMON_ECONOMY_SAVE.startswith("/app/"):
+    print("[PokemonEconomy] Warning: using ephemeral /app storage. Mount a Railway volume and set BOT_DATA_DIR.")
 
 
 def _tracked_channel_id(guild_id: int, key: str) -> int | None:
@@ -906,11 +935,13 @@ def setup_pokemon(bot: commands.Bot) -> None:
     pokemon_group = app_commands.Group(
         name="pokemon",
         description="⚔️ Pokemon-style turn-based battle mini game",
+        guild_ids=[PRIMARY_GUILD_ID],
     )
 
     raid_group = app_commands.Group(
         name="raid",
         description="🦹 Team up for raid boss battles",
+        guild_ids=[PRIMARY_GUILD_ID],
     )
 
     # ── /pokemon battle ───────────────────────────────────────────────────────
@@ -1429,7 +1460,7 @@ def setup_pokemon(bot: commands.Bot) -> None:
     async def cmd_raid_boss(interaction: discord.Interaction):
         await _start_raid_boss(interaction)
 
-    # Register the group globally
+    # Register the groups globally.
     bot.tree.add_command(pokemon_group)
     bot.tree.add_command(raid_group)
 
