@@ -945,13 +945,62 @@ IDLERPG_ALIGNMENTS = [
 ]
 
 IDLERPG_CLASS_CRATE_COST = 325
+IDLERPG_SUPPLY_CACHE_COST = 450
+IDLERPG_FAVOR_BLESSING_COST = 120
+IDLERPG_CONTRACT_REFRESH_COST = 300
+IDLERPG_BLESSING_CHARGES = 3
+IDLERPG_BLESSING_MULT = 1.20
+
+IDLERPG_CONTRACT_POOL = [
+    {"id": "adventures", "name": "Complete Adventures", "target": 3, "reward_coins": 260, "reward_favor": 12},
+    {"id": "bosses", "name": "Defeat Boss Encounters", "target": 1, "reward_coins": 420, "reward_favor": 18},
+    {"id": "chests_opened", "name": "Open Chests", "target": 2, "reward_coins": 240, "reward_favor": 10},
+    {"id": "items_sacrificed", "name": "Offer Sacrifices", "target": 4, "reward_coins": 180, "reward_favor": 22},
+    {"id": "crate_buys", "name": "Buy Class Crates", "target": 2, "reward_coins": 320, "reward_favor": 10},
+]
 IDLERPG_CLASS_GEAR_POOLS = {
-    "Warrior": [("Colossus Greatsword", "⚔️", 155), ("Ironquake Axe", "🪓", 150), ("Bulwark Plate", "🛡️", 148)],
-    "Mage": [("Astral Focus Staff", "🪄", 162), ("Void Codex", "📘", 150), ("Runebound Orb", "🔮", 154)],
-    "Rogue": [("Nightfang Daggers", "🗡️", 158), ("Silent Hood", "🕶️", 146), ("Shadowstep Boots", "👢", 144)],
-    "Cleric": [("Sanctified Mace", "🔨", 152), ("Dawnlit Censer", "✨", 147), ("Aegis Reliquary", "🛡️", 149)],
-    "Ranger": [("Windsplit Bow", "🏹", 156), ("Tracker Cloak", "🧥", 145), ("Falcon Quiver", "🧷", 148)],
-    "Paladin": [("Oathkeeper Blade", "⚔️", 160), ("Dragoncrest Shield", "🛡️", 152), ("Radiant Helm", "⛑️", 150)],
+    "Warrior": [
+        ("Colossus Greatsword", "⚔️", 155),
+        ("Ironquake Axe", "🪓", 150),
+        ("Bulwark Plate", "🛡️", 148),
+        ("Titanbreaker Hammer", "🔨", 163),
+        ("Arena Chainblade", "⛓️", 152),
+    ],
+    "Mage": [
+        ("Astral Focus Staff", "🪄", 162),
+        ("Void Codex", "📘", 150),
+        ("Runebound Orb", "🔮", 154),
+        ("Cometbrand Scepter", "☄️", 166),
+        ("Manastorm Grimoire", "📖", 153),
+    ],
+    "Rogue": [
+        ("Nightfang Daggers", "🗡️", 158),
+        ("Silent Hood", "🕶️", 146),
+        ("Shadowstep Boots", "👢", 144),
+        ("Venomwire Kris", "🦂", 161),
+        ("Phantom Lockpick Set", "🗝️", 149),
+    ],
+    "Cleric": [
+        ("Sanctified Mace", "🔨", 152),
+        ("Dawnlit Censer", "✨", 147),
+        ("Aegis Reliquary", "🛡️", 149),
+        ("Seraphic Warhammer", "☀️", 160),
+        ("Mercy Bell", "🔔", 151),
+    ],
+    "Ranger": [
+        ("Windsplit Bow", "🏹", 156),
+        ("Tracker Cloak", "🧥", 145),
+        ("Falcon Quiver", "🧷", 148),
+        ("Galepiercer Longbow", "🌬️", 162),
+        ("Moontrail Bracers", "🪬", 150),
+    ],
+    "Paladin": [
+        ("Oathkeeper Blade", "⚔️", 160),
+        ("Dragoncrest Shield", "🛡️", 152),
+        ("Radiant Helm", "⛑️", 150),
+        ("Sunforged Bastion", "🛡️", 165),
+        ("Judicator Lance", "🗡️", 154),
+    ],
 }
 
 IDLERPG_GEAR_POOL = [
@@ -965,6 +1014,16 @@ IDLERPG_GEAR_POOL = [
     ("Rune Carbine", "🔫", 114),
     ("Starforged Buckler", "🛡️", 108),
     ("Wyrmfang Spear", "🪓", 120),
+    ("Voidglass Rapier", "🗡️", 126),
+    ("Dreadcoil Whip", "🌀", 132),
+    ("Ironbark Polearm", "🌲", 128),
+    ("Hexfire Baton", "🔥", 130),
+    ("Howling Greatbow", "🏹", 136),
+    ("Riftbreaker Axe", "🪓", 140),
+    ("Stormplate Cuirass", "🛡️", 145),
+    ("Lunar Edge", "🌙", 149),
+    ("Cataclysm Pike", "⚡", 154),
+    ("Relicbreaker Blade", "⚔️", 159),
 ]
 
 IDLERPG_LOOT_POOL = [
@@ -990,6 +1049,24 @@ IDLERPG_LOOT_POOL = [
     ("Obsidian Idol", "🗿", 0, 22),
     ("Dawn Oath Scroll", "📜", 0, 19),
     ("Fae Bloom", "🌸", 0, 18),
+    ("Ashen Sanctum Key", "🗝️", 0, 24),
+    ("Mirror of Echoes", "🪞", 0, 22),
+    ("Sable Pearl", "⚫", 0, 20),
+    ("Aurora Thread", "🧵", 0, 21),
+    ("Thunderbone Fragment", "🦴", 0, 23),
+    ("Oracle Tear", "💧", 0, 24),
+    ("Witchlight Candle", "🕯️", 0, 19),
+    ("Blightroot Cluster", "🪴", 0, 18),
+    ("Tidal Rune Tablet", "🪨", 0, 22),
+    ("Skyforge Nail", "📎", 0, 20),
+    ("Gilded Scarab", "🪲", 0, 21),
+    ("Sunspoke Amber", "🟠", 0, 20),
+    ("Nightcourt Crest", "♠️", 0, 23),
+    ("Runebound Hourglass", "⌛", 0, 25),
+    ("Cinderheart Core", "❤️", 0, 24),
+    ("Frostveil Petal", "❄️", 0, 19),
+    ("Graveseal Coin", "🪙", 0, 21),
+    ("Mythspeaker Totem", "🗿", 0, 26),
 ]
 
 IDLERPG_ENCOUNTER_TABLE = [
@@ -1046,6 +1123,61 @@ IDLERPG_ENCOUNTER_TABLE = [
             "A dragon-kin tyrant rose from an ancient throne and marked your name.",
             "The dungeon heart awakened, and a legendary warlord challenged your oath.",
             "A fallen champion returned in cursed armor, demanding trial by steel.",
+        ],
+    },
+    {
+        "encounter": "Cursed Harbor",
+        "emoji": "⚓",
+        "mult": 1.22,
+        "duration": (220, 360),
+        "flavors": [
+            "Fog rolled over the docks as drowned raiders clawed from black water.",
+            "You hunted contraband relics through shipwreck alleys lit by witchfire.",
+            "A bell tolled at midnight and the harbor dead rose to collect old debts.",
+        ],
+    },
+    {
+        "encounter": "Crystal Cavern Raid",
+        "emoji": "💠",
+        "mult": 1.32,
+        "duration": (260, 420),
+        "flavors": [
+            "Resonant crystals amplified every spell as shardbeasts swarmed your path.",
+            "You crossed glass bridges above abyssal pits to secure volatile ore.",
+            "A prism golem split your party with mirrored light walls.",
+        ],
+    },
+    {
+        "encounter": "Bloodmoon Hunt",
+        "emoji": "🌕",
+        "mult": 1.5,
+        "duration": (340, 540),
+        "flavors": [
+            "Under crimson moonlight, feral warbands stalked your camp perimeter.",
+            "A huntmaster marked your party and unleashed the pack.",
+            "Each horn call drew tougher beasts from the treeline.",
+        ],
+    },
+    {
+        "encounter": "Arcane Rift Siege",
+        "emoji": "🌀",
+        "mult": 1.65,
+        "duration": (420, 620),
+        "flavors": [
+            "Reality tore open above the citadel and voidspawn flooded the battlements.",
+            "You stabilized shattered runes while spellfire rained from the rift.",
+            "A rift herald twisted gravity, forcing your party into a desperate push.",
+        ],
+    },
+    {
+        "encounter": "Elder Wyrm Pursuit",
+        "emoji": "🐲",
+        "mult": 1.95,
+        "duration": (560, 860),
+        "flavors": [
+            "An elder wyrm scorched the valley, and your party gave chase through ruins.",
+            "Wingbeats split the storm clouds as draconic sentries blocked each pass.",
+            "You cornered the wyrm at a shattered keep and prepared for a final stand.",
         ],
     },
 ]
@@ -2282,6 +2414,92 @@ def _idlerpg_item_rarity(item: dict) -> tuple[str, int, str]:
     return "Common", 0x95A5A6, "⚪"
 
 
+def _idlerpg_daily_key() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _idlerpg_contract_stats(profile: dict) -> dict:
+    contracts = profile.setdefault("daily_contracts", {})
+    stats = contracts.get("stats")
+    if not isinstance(stats, dict):
+        stats = {
+            "adventures": 0,
+            "bosses": 0,
+            "chests_opened": 0,
+            "items_sacrificed": 0,
+            "crate_buys": 0,
+        }
+        contracts["stats"] = stats
+    return stats
+
+
+def _idlerpg_roll_daily_contracts(profile: dict, *, force: bool = False) -> dict:
+    contracts = profile.setdefault("daily_contracts", {})
+    today = _idlerpg_daily_key()
+    should_roll = force or contracts.get("day") != today or not isinstance(contracts.get("contracts"), list)
+    if not should_roll:
+        return contracts
+
+    picks = random.sample(IDLERPG_CONTRACT_POOL, k=min(3, len(IDLERPG_CONTRACT_POOL)))
+    contracts["day"] = today
+    contracts["contracts"] = [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "target": int(p["target"]),
+            "reward_coins": int(p["reward_coins"]),
+            "reward_favor": int(p["reward_favor"]),
+            "claimed": False,
+        }
+        for p in picks
+    ]
+    contracts["stats"] = {
+        "adventures": 0,
+        "bosses": 0,
+        "chests_opened": 0,
+        "items_sacrificed": 0,
+        "crate_buys": 0,
+    }
+    return contracts
+
+
+def _idlerpg_contract_progress(profile: dict) -> list[dict]:
+    contracts = _idlerpg_roll_daily_contracts(profile)
+    stats = _idlerpg_contract_stats(profile)
+    rows = []
+    for c in contracts.get("contracts", []):
+        cid = str(c.get("id", ""))
+        target = max(1, int(c.get("target", 1)))
+        current = max(0, int(stats.get(cid, 0)))
+        rows.append({
+            "id": cid,
+            "name": str(c.get("name", cid.title())),
+            "target": target,
+            "current": current,
+            "claimed": bool(c.get("claimed", False)),
+            "reward_coins": int(c.get("reward_coins", 0)),
+            "reward_favor": int(c.get("reward_favor", 0)),
+            "complete": current >= target,
+        })
+    return rows
+
+
+def _idlerpg_increment_contract_stat(profile: dict, key: str, amount: int = 1) -> None:
+    _idlerpg_roll_daily_contracts(profile)
+    stats = _idlerpg_contract_stats(profile)
+    stats[key] = max(0, int(stats.get(key, 0)) + int(amount))
+
+
+def _idlerpg_make_boss_cache(profile: dict, encounter: str) -> dict:
+    bonus_item = _idlerpg_make_item(kind="super_chest", profile=profile)
+    bonus_coins = random.randint(260, 520)
+    return {
+        "encounter": encounter,
+        "coins": bonus_coins,
+        "item": bonus_item,
+    }
+
+
 def _idlerpg_progress_bar(ratio: float, width: int = 10) -> str:
     ratio = max(0.0, min(1.0, ratio))
     fill = int(round(ratio * width))
@@ -2290,12 +2508,18 @@ def _idlerpg_progress_bar(ratio: float, width: int = 10) -> str:
 
 def _idlerpg_prepare_adventure(profile: dict) -> dict:
     roll = random.random()
+
+    # Scale encounter selection by multiplier tier so new encounters are used automatically.
+    low_tier = [c for c in IDLERPG_ENCOUNTER_TABLE if float(c.get("mult", 1.0)) <= 1.20]
+    mid_tier = [c for c in IDLERPG_ENCOUNTER_TABLE if 1.20 < float(c.get("mult", 1.0)) <= 1.60]
+    high_tier = [c for c in IDLERPG_ENCOUNTER_TABLE if float(c.get("mult", 1.0)) > 1.60]
+
     if roll < 0.45:
-        candidates = IDLERPG_ENCOUNTER_TABLE[:2]
+        candidates = low_tier or IDLERPG_ENCOUNTER_TABLE
     elif roll < 0.90:
-        candidates = IDLERPG_ENCOUNTER_TABLE[1:4]
+        candidates = mid_tier or IDLERPG_ENCOUNTER_TABLE
     else:
-        candidates = IDLERPG_ENCOUNTER_TABLE[3:]
+        candidates = high_tier or IDLERPG_ENCOUNTER_TABLE
 
     recent_encounters = _idlerpg_recent_values(profile, "recent_encounters")
     fresh_candidates = [c for c in candidates if c.get("encounter") not in recent_encounters]
@@ -2329,9 +2553,11 @@ def _idlerpg_resolve_adventure(profile: dict) -> dict | None:
     if not isinstance(adv, dict):
         return None
 
-    xp_gain = int(adv.get("base_xp", 0) * float(adv.get("mult", 1.0)))
-    coin_gain = int(adv.get("base_coin", 0) * float(adv.get("mult", 1.0)))
-    favor_gain = int(adv.get("base_favor", 0) * (1.2 if adv.get("encounter") == "Boss Event" else 1.0))
+    mult = float(adv.get("mult", 1.0))
+    encounter_name = str(adv.get("encounter", "Mission"))
+    xp_gain = int(adv.get("base_xp", 0) * mult)
+    coin_gain = int(adv.get("base_coin", 0) * mult)
+    favor_gain = int(adv.get("base_favor", 0) * (1.2 if encounter_name == "Boss Event" else 1.0))
 
     god = (profile.get("god") or "").lower()
     god_def = next((g for g in IDLERPG_GODS if g.get("name", "").lower() == god), None)
@@ -2351,6 +2577,13 @@ def _idlerpg_resolve_adventure(profile: dict) -> dict | None:
         coin_gain = int(coin_gain * 1.10)
         favor_gain = int(favor_gain * 1.10)
 
+    blessing_charges = int(profile.get("blessing_charges", 0))
+    if blessing_charges > 0:
+        xp_gain = int(xp_gain * IDLERPG_BLESSING_MULT)
+        coin_gain = int(coin_gain * IDLERPG_BLESSING_MULT)
+        favor_gain = int(favor_gain * IDLERPG_BLESSING_MULT)
+        profile["blessing_charges"] = blessing_charges - 1
+
     if random.random() < 0.05:
         profile.setdefault("inventory", []).append(_idlerpg_make_item(kind="chest", profile=profile))
     if random.random() < 0.006:
@@ -2366,9 +2599,14 @@ def _idlerpg_resolve_adventure(profile: dict) -> dict | None:
     old_lvl, new_lvl = _idlerpg_level_up(profile)
     profile["active_adventure"] = None
 
+    _idlerpg_increment_contract_stat(profile, "adventures", 1)
+    if encounter_name == "Boss Event" or mult >= 1.8:
+        _idlerpg_increment_contract_stat(profile, "bosses", 1)
+
     return {
         "encounter": adv.get("encounter", "Skirmish"),
         "encounter_emoji": adv.get("encounter_emoji", "⚡"),
+        "mult": mult,
         "flavor": adv.get("flavor", "Mission complete."),
         "xp": xp_gain,
         "coins": coin_gain,
@@ -2640,6 +2878,7 @@ class IdleRPGShopView(discord.ui.View):
             return
 
         profile["money"] = coins - IDLERPG_CLASS_CRATE_COST
+        _idlerpg_increment_contract_stat(profile, "crate_buys", 1)
         reward = _idlerpg_make_class_gear(class_name, profile=profile)
         profile.setdefault("inventory", []).append(reward)
         bonus = None
@@ -2674,6 +2913,67 @@ class IdleRPGShopView(discord.ui.View):
 
         embed.set_footer(text="Tip: use /status to view chest count and new gear.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _buy_supply_cache(self, interaction: discord.Interaction):
+        if not self._is_owner(interaction):
+            await interaction.response.send_message("This shop panel belongs to another player.", ephemeral=True)
+            return
+        profile = _idlerpg_profile(interaction.user)
+        if not profile:
+            await interaction.response.send_message("Create your character first with /create.", ephemeral=True)
+            return
+
+        coins = int(profile.get("money", 0))
+        if coins < IDLERPG_SUPPLY_CACHE_COST:
+            await interaction.response.send_message(
+                f"Not enough coins. Supply cache costs **{IDLERPG_SUPPLY_CACHE_COST}**. You have **{coins}**.",
+                ephemeral=True,
+            )
+            return
+
+        profile["money"] = coins - IDLERPG_SUPPLY_CACHE_COST
+        cache_chest = _idlerpg_make_item(kind="chest", profile=profile)
+        cache_gear = _idlerpg_make_item(kind="gear", profile=profile)
+        profile.setdefault("inventory", []).append(cache_chest)
+        profile["inventory"].append(cache_gear)
+        _save_idlerpg_data()
+
+        chest_rarity, _, chest_marker = _idlerpg_item_rarity(cache_chest)
+        gear_rarity, _, gear_marker = _idlerpg_item_rarity(cache_gear)
+        embed = discord.Embed(
+            title="Supply Cache Purchased",
+            description=f"You spent **{IDLERPG_SUPPLY_CACHE_COST}** coins on guaranteed supplies.",
+            color=0x1ABC9C,
+        )
+        embed.add_field(name="Chest", value=f"{chest_marker} {cache_chest.get('emoji', '🧰')} **{cache_chest.get('name', 'Chest')}** [{chest_rarity}]", inline=False)
+        embed.add_field(name="Gear", value=f"{gear_marker} {cache_gear.get('emoji', '🎁')} **{cache_gear.get('name', 'Gear')}** [{gear_rarity}]", inline=False)
+        embed.add_field(name="Coins Left", value=str(profile.get("money", 0)), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _buy_favor_blessing(self, interaction: discord.Interaction):
+        if not self._is_owner(interaction):
+            await interaction.response.send_message("This shop panel belongs to another player.", ephemeral=True)
+            return
+        profile = _idlerpg_profile(interaction.user)
+        if not profile:
+            await interaction.response.send_message("Create your character first with /create.", ephemeral=True)
+            return
+
+        favor = int(profile.get("favor", 0))
+        if favor < IDLERPG_FAVOR_BLESSING_COST:
+            await interaction.response.send_message(
+                f"Not enough favor. Blessing costs **{IDLERPG_FAVOR_BLESSING_COST}** favor. You have **{favor}**.",
+                ephemeral=True,
+            )
+            return
+
+        profile["favor"] = favor - IDLERPG_FAVOR_BLESSING_COST
+        profile["blessing_charges"] = int(profile.get("blessing_charges", 0)) + IDLERPG_BLESSING_CHARGES
+        _save_idlerpg_data()
+        await interaction.response.send_message(
+            f"Blessing activated. Next **{IDLERPG_BLESSING_CHARGES}** adventures gain +{int((IDLERPG_BLESSING_MULT - 1.0) * 100)}% XP/Coins/Favor.",
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Warrior", style=discord.ButtonStyle.primary, emoji="⚔️", row=0)
     async def buy_warrior(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2712,6 +3012,14 @@ class IdleRPGShopView(discord.ui.View):
                 await interaction.followup.send("Open Chest failed. Please run /open once.", ephemeral=True)
             else:
                 await interaction.response.send_message("Open Chest failed. Please run /open once.", ephemeral=True)
+
+    @discord.ui.button(label="Supply Cache", style=discord.ButtonStyle.secondary, emoji="📦", row=2)
+    async def buy_supply_cache(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy_supply_cache(interaction)
+
+    @discord.ui.button(label="Favor Blessing", style=discord.ButtonStyle.primary, emoji="✨", row=2)
+    async def buy_favor_blessing(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy_favor_blessing(interaction)
 
 
 class IdleRPGSacrificeAltarView(discord.ui.View):
@@ -2770,6 +3078,7 @@ class IdleRPGSacrificeAltarView(discord.ui.View):
             gain = _idlerpg_sacrifice_gain(item)
             profile.get("inventory", []).remove(item)
             profile["favor"] = int(profile.get("favor", 0)) + gain
+            _idlerpg_increment_contract_stat(profile, "items_sacrificed", 1)
             _save_idlerpg_data()
 
             god_name = profile.get("god", "your god")
@@ -2871,6 +3180,17 @@ class IdleRPGStarterView(discord.ui.View):
         embed.set_footer(text="Select from your latest inventory items below.")
         await interaction.response.send_message(embed=embed, view=IdleRPGSacrificeAltarView(interaction.user.id, recent), ephemeral=True)
 
+    @discord.ui.button(label="Daily Contracts", style=discord.ButtonStyle.primary, emoji="📜", custom_id="idlerpg_starter_contracts", row=1)
+    async def starter_contracts(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await idlerpg_contracts.callback(interaction)
+        except Exception as e:
+            print(f"[IdleRPG] Starter contracts button failed: {e}")
+            if interaction.response.is_done():
+                await interaction.followup.send("Contracts button failed. Please run /idlerpgcontracts.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Contracts button failed. Please run /idlerpgcontracts.", ephemeral=True)
+
     @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, emoji="❓", custom_id="idlerpg_starter_help")
     async def starter_help(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
@@ -2902,6 +3222,117 @@ class IdleRPGStatusPanelView(discord.ui.View):
                 await interaction.followup.send("Status panel button failed. Please run /status once.", ephemeral=True)
             else:
                 await interaction.response.send_message("Status panel button failed. Please run /status once.", ephemeral=True)
+
+
+class IdleRPGBossCacheView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=1800)
+        self.user_id = int(user_id)
+
+    @discord.ui.button(label="Claim Boss Cache", style=discord.ButtonStyle.success, emoji="🏆")
+    async def claim_boss_cache(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This boss cache belongs to another player.", ephemeral=True)
+            return
+        profile = _idlerpg_profile(interaction.user)
+        if not profile:
+            await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
+            return
+        cache = profile.get("pending_boss_cache")
+        if not isinstance(cache, dict):
+            await interaction.response.send_message("No boss cache is waiting right now.", ephemeral=True)
+            return
+
+        bonus_item = cache.get("item") if isinstance(cache.get("item"), dict) else None
+        bonus_coins = int(cache.get("coins", 0))
+        if isinstance(bonus_item, dict):
+            profile.setdefault("inventory", []).append(bonus_item)
+        profile["money"] = int(profile.get("money", 0)) + bonus_coins
+        profile["pending_boss_cache"] = None
+        _save_idlerpg_data()
+
+        marker = bonus_item.get("emoji", "🎁") if isinstance(bonus_item, dict) else "🎁"
+        name = bonus_item.get("name", "Bonus Reward") if isinstance(bonus_item, dict) else "Bonus Reward"
+        await interaction.response.send_message(
+            f"Boss cache claimed: **+{bonus_coins}** coins and {marker} **{name}**.",
+            ephemeral=True,
+        )
+
+
+class IdleRPGContractsView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=1800)
+        self.user_id = int(user_id)
+
+    def _is_owner(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="Claim Ready Rewards", style=discord.ButtonStyle.success, emoji="✅")
+    async def claim_ready(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_owner(interaction):
+            await interaction.response.send_message("This contract panel belongs to another player.", ephemeral=True)
+            return
+        profile = _idlerpg_profile(interaction.user)
+        if not profile:
+            await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
+            return
+
+        rows = _idlerpg_contract_progress(profile)
+        if not rows:
+            await interaction.response.send_message("No contracts are active yet.", ephemeral=True)
+            return
+
+        coins = 0
+        favor = 0
+        claimed_any = False
+        contracts = profile.setdefault("daily_contracts", {}).setdefault("contracts", [])
+        for row in rows:
+            if row["complete"] and not row["claimed"]:
+                for c in contracts:
+                    if str(c.get("id")) == row["id"] and not bool(c.get("claimed", False)):
+                        c["claimed"] = True
+                        coins += int(c.get("reward_coins", 0))
+                        favor += int(c.get("reward_favor", 0))
+                        claimed_any = True
+                        break
+
+        if not claimed_any:
+            await interaction.response.send_message("No completed contracts are ready to claim yet.", ephemeral=True)
+            return
+
+        profile["money"] = int(profile.get("money", 0)) + coins
+        profile["favor"] = int(profile.get("favor", 0)) + favor
+        _save_idlerpg_data()
+        await interaction.response.send_message(
+            f"Contract rewards claimed: **+{coins} coins** and **+{favor} favor**.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Refresh Contracts", style=discord.ButtonStyle.primary, emoji="🔄")
+    async def refresh_contracts(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_owner(interaction):
+            await interaction.response.send_message("This contract panel belongs to another player.", ephemeral=True)
+            return
+        profile = _idlerpg_profile(interaction.user)
+        if not profile:
+            await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
+            return
+
+        coins = int(profile.get("money", 0))
+        if coins < IDLERPG_CONTRACT_REFRESH_COST:
+            await interaction.response.send_message(
+                f"You need **{IDLERPG_CONTRACT_REFRESH_COST}** coins to refresh contracts. You have **{coins}**.",
+                ephemeral=True,
+            )
+            return
+
+        profile["money"] = coins - IDLERPG_CONTRACT_REFRESH_COST
+        _idlerpg_roll_daily_contracts(profile, force=True)
+        _save_idlerpg_data()
+        await interaction.response.send_message(
+            f"Contracts refreshed for **{IDLERPG_CONTRACT_REFRESH_COST}** coins. Re-open /idlerpgcontracts.",
+            ephemeral=True,
+        )
 
 
 class IdleRPGRewardChoiceView(discord.ui.View):
@@ -2977,6 +3408,7 @@ class IdleRPGRewardChoiceView(discord.ui.View):
 
         profile.get("inventory", []).remove(item)
         profile["favor"] = int(profile.get("favor", 0)) + gain
+        _idlerpg_increment_contract_stat(profile, "items_sacrificed", 1)
         _save_idlerpg_data()
 
         god_name = profile.get("god", "your god")
@@ -3070,8 +3502,11 @@ def _idlerpg_codex_embed(section: str) -> discord.Embed:
         )
         embed.add_field(name="Start", value="Level 1 • 100 coins", inline=True)
         embed.add_field(name="Class Crate", value=f"{IDLERPG_CLASS_CRATE_COST} coins", inline=True)
-        embed.add_field(name="Core Commands", value="`/idlerpgshop` `/equip` `/sell` `/sacrifice` `/open`", inline=False)
-        embed.set_footer(text="Favor scales with loot/chest sacrifices.")
+        embed.add_field(name="Supply Cache", value=f"{IDLERPG_SUPPLY_CACHE_COST} coins", inline=True)
+        embed.add_field(name="Favor Blessing", value=f"{IDLERPG_FAVOR_BLESSING_COST} favor", inline=True)
+        embed.add_field(name="Daily Contracts", value=f"`/idlerpgcontracts` (refresh {IDLERPG_CONTRACT_REFRESH_COST} coins)", inline=False)
+        embed.add_field(name="Core Commands", value="`/idlerpgshop` `/equip` `/sell` `/sacrifice` `/open` `/bosscache`", inline=False)
+        embed.set_footer(text="Favor now buys temporary blessings and scales from offerings/contracts.")
         return embed
 
     embed = discord.Embed(
@@ -8749,6 +9184,7 @@ async def idlerpg_help(interaction: discord.Interaction):
     embed.add_field(name="Mission", value="`/adventure` starts timed run\n`/status` resolves completed run", inline=False)
     embed.add_field(name="Inventory", value="`/inventory` `/equip` `/sell` `/sacrifice` `/ex` `/open`", inline=False)
     embed.add_field(name="Store", value="`/idlerpgshop` for class-themed gear crates and quick chest access.", inline=False)
+    embed.add_field(name="Contracts", value="`/idlerpgcontracts` for daily objectives and claimable rewards.", inline=False)
     embed.add_field(name="Click Flow", value="Use `/idlerpgpanel` and `/idlerpgcodex` for one-click controls and full game info.", inline=False)
     embed.set_footer(text="Use the buttons below for quick guidance.")
     await interaction.response.send_message(embed=embed, view=IdleRPGHelpView(), ephemeral=True)
@@ -8786,8 +9222,77 @@ async def idlerpg_panel(interaction: discord.Interaction):
     embed.add_field(name="Quest", value="Start timed runs, then check status to resolve rewards.", inline=False)
     embed.add_field(name="Gear Loop", value="After status resolves a drop, use reward buttons to equip/sell/keep.", inline=False)
     embed.add_field(name="Shop", value="Open the class crate store from the panel buttons or /idlerpgshop.", inline=False)
+    embed.add_field(name="Contracts", value="Open daily objectives with /idlerpgcontracts.", inline=False)
     embed.set_footer(text="Panel is player-bound; buttons only work for you.")
     await interaction.response.send_message(embed=embed, view=IdleRPGAdventureView(interaction.user.id), ephemeral=True)
+
+
+@client.tree.command(name="idlerpgcontracts", description="Open daily IdleRPG contracts", guild=GUILD_ID)
+async def idlerpg_contracts(interaction: discord.Interaction):
+    allowed, target_ch = _idlerpg_allowed_channel(interaction)
+    if not allowed:
+        await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
+        return
+
+    profile = _idlerpg_profile(interaction.user)
+    if not profile:
+        await interaction.response.send_message("Create your character first with /create.", ephemeral=True)
+        return
+
+    rows = _idlerpg_contract_progress(profile)
+    day = profile.get("daily_contracts", {}).get("day", _idlerpg_daily_key())
+    coins = int(profile.get("money", 0))
+    favor = int(profile.get("favor", 0))
+    lines = []
+    for row in rows:
+        marker = "✅" if row["claimed"] else ("🟢" if row["complete"] else "🟡")
+        lines.append(
+            f"{marker} **{row['name']}** {row['current']}/{row['target']}"
+            f" • Reward: {row['reward_coins']} coins + {row['reward_favor']} favor"
+        )
+
+    embed = discord.Embed(
+        title="IdleRPG Daily Contracts",
+        description="Complete objectives to claim extra rewards each day.",
+        color=0x16A085,
+    )
+    embed.add_field(name="Contracts", value="\n".join(lines) if lines else "No contracts available.", inline=False)
+    embed.add_field(name="Wallet", value=f"Coins: **{coins}**\nFavor: **{favor}**", inline=True)
+    embed.add_field(name="Refresh Cost", value=f"{IDLERPG_CONTRACT_REFRESH_COST} coins", inline=True)
+    embed.add_field(name="Date", value=day, inline=True)
+    embed.set_footer(text="Claim ready rewards with the button below.")
+    _save_idlerpg_data()
+    await interaction.response.send_message(embed=embed, view=IdleRPGContractsView(interaction.user.id), ephemeral=True)
+
+
+@client.tree.command(name="bosscache", description="Claim your pending boss cache", guild=GUILD_ID)
+async def idlerpg_bosscache(interaction: discord.Interaction):
+    allowed, target_ch = _idlerpg_allowed_channel(interaction)
+    if not allowed:
+        await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
+        return
+
+    profile = _idlerpg_profile(interaction.user)
+    if not profile:
+        await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
+        return
+
+    cache = profile.get("pending_boss_cache")
+    if not isinstance(cache, dict):
+        await interaction.response.send_message("No boss cache is waiting right now.", ephemeral=True)
+        return
+
+    item = cache.get("item") if isinstance(cache.get("item"), dict) else None
+    item_label = f"{item.get('emoji', '🎁')} {item.get('name', 'Bonus Reward')}" if isinstance(item, dict) else "🎁 Bonus Reward"
+    embed = discord.Embed(
+        title="Boss Cache Ready",
+        description=f"From **{cache.get('encounter', 'Boss Encounter')}**",
+        color=0xF39C12,
+    )
+    embed.add_field(name="Coins", value=f"+{int(cache.get('coins', 0))}", inline=True)
+    embed.add_field(name="Item", value=item_label, inline=True)
+    embed.set_footer(text="Claim to move rewards into your wallet and inventory.")
+    await interaction.response.send_message(embed=embed, view=IdleRPGBossCacheView(interaction.user.id), ephemeral=True)
 
 
 @client.tree.command(name="idlerpgshop", description="Open the IdleRPG class crate store", guild=GUILD_ID)
@@ -8824,7 +9329,15 @@ async def idlerpg_shop(interaction: discord.Interaction, public: bool = False):
         ),
         inline=False,
     )
-    embed.set_footer(text="Use the buttons below to buy crates or open chests.")
+    embed.add_field(
+        name="More Spending",
+        value=(
+            f"📦 Supply Cache: **{IDLERPG_SUPPLY_CACHE_COST}** coins\n"
+            f"✨ Favor Blessing: **{IDLERPG_FAVOR_BLESSING_COST}** favor"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Use the buttons below to buy crates, supply caches, blessings, or open chests.")
     await interaction.response.send_message(embed=embed, view=IdleRPGShopView(interaction.user.id), ephemeral=shop_ephemeral)
 
 
@@ -8898,6 +9411,7 @@ async def idlerpg_status(interaction: discord.Interaction, public: bool = False)
     embed.add_field(name="Coins", value=f"{profile.get('money', 0)}", inline=True)
     embed.add_field(name="God", value=profile.get("god") or "None", inline=True)
     embed.add_field(name="Favor", value=str(profile.get("favor", 0)), inline=True)
+    embed.add_field(name="Blessing Charges", value=str(profile.get("blessing_charges", 0)), inline=True)
     embed.add_field(name="Equipped", value=equip_text, inline=False)
     embed.add_field(name="Race", value=profile.get("race") or "None", inline=True)
     embed.add_field(name="Class", value=profile.get("class") or "None", inline=True)
@@ -8923,6 +9437,7 @@ async def idlerpg_status(interaction: discord.Interaction, public: bool = False)
 
     mission_result = None
     reward_view = None
+    boss_cache_view = None
     adv = profile.get("active_adventure")
     if isinstance(adv, dict):
         now_ts = int(time.time())
@@ -8965,6 +9480,23 @@ async def idlerpg_status(interaction: discord.Interaction, public: bool = False)
         if isinstance(item, dict) and item.get("id") is not None:
             reward_view = IdleRPGRewardChoiceView(interaction.user.id, int(item.get("id")))
 
+        mult = float(mission_result.get("mult", 1.0))
+        if (mission_result.get("encounter") == "Boss Event" or mult >= 1.8) and not isinstance(profile.get("pending_boss_cache"), dict):
+            profile["pending_boss_cache"] = _idlerpg_make_boss_cache(profile, mission_result.get("encounter", "Boss Encounter"))
+            _save_idlerpg_data()
+            boss_cache_view = IdleRPGBossCacheView(interaction.user.id)
+
+    pending_cache = profile.get("pending_boss_cache")
+    if isinstance(pending_cache, dict):
+        embed.add_field(
+            name="Boss Cache",
+            value=(
+                f"Ready from **{pending_cache.get('encounter', 'Boss Encounter')}**\n"
+                f"Use `/bosscache` or the claim button when prompted."
+            ),
+            inline=False,
+        )
+
     missing = _idlerpg_build_missing(profile)
     total_build_steps = 4
     if missing:
@@ -8987,6 +9519,20 @@ async def idlerpg_status(interaction: discord.Interaction, public: bool = False)
             view=reward_view,
             ephemeral=True,
         )
+
+    if boss_cache_view and isinstance(profile.get("pending_boss_cache"), dict):
+        cache = profile.get("pending_boss_cache")
+        item = cache.get("item") if isinstance(cache.get("item"), dict) else None
+        item_label = f"{item.get('emoji', '🎁')} **{item.get('name', 'Bonus Reward')}**" if isinstance(item, dict) else "🎁 **Bonus Reward**"
+        boss_embed = discord.Embed(
+            title="Boss Cache Unlocked",
+            description=f"You earned a bonus cache from **{cache.get('encounter', 'Boss Encounter')}**.",
+            color=0xF39C12,
+        )
+        boss_embed.add_field(name="Coins", value=f"+{int(cache.get('coins', 0))}", inline=True)
+        boss_embed.add_field(name="Item", value=item_label, inline=True)
+        boss_embed.set_footer(text="Claim now or later with /bosscache.")
+        await interaction.followup.send(embed=boss_embed, view=boss_cache_view, ephemeral=True)
 
 
 @client.tree.command(name="adventure", description="Go on an IdleRPG adventure", guild=GUILD_ID)
@@ -9206,6 +9752,7 @@ async def idlerpg_sacrifice(interaction: discord.Interaction, item_id: str):
     inv.remove(item)
     gain = int(item.get("favor", 10))
     profile["favor"] = int(profile.get("favor", 0)) + gain
+    _idlerpg_increment_contract_stat(profile, "items_sacrificed", 1)
     _save_idlerpg_data()
     await interaction.response.send_message(f"Sacrificed **{item.get('name', 'loot')}**. Favor +**{gain}**.")
 
@@ -9231,6 +9778,7 @@ async def idlerpg_ex(interaction: discord.Interaction):
     favor = sum(int(i.get("favor", 10)) for i in loot)
     profile["inventory"] = [i for i in inv if i.get("type") != "loot"]
     profile["favor"] = int(profile.get("favor", 0)) + favor
+    _idlerpg_increment_contract_stat(profile, "items_sacrificed", len(loot))
     _save_idlerpg_data()
     await interaction.response.send_message(f"Mass sacrifice complete. Favor +**{favor}**.")
 
@@ -9342,6 +9890,7 @@ async def idlerpg_open(interaction: discord.Interaction):
 
     inv.append(bonus_item)
     profile["money"] = int(profile.get("money", 0)) + coins
+    _idlerpg_increment_contract_stat(profile, "chests_opened", 1)
     _save_idlerpg_data()
 
     bonus_rarity, bonus_color, bonus_marker = _idlerpg_item_rarity(bonus_item)
