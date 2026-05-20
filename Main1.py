@@ -2506,12 +2506,33 @@ def _idlerpg_progress_bar(ratio: float, width: int = 10) -> str:
     return "█" * fill + "░" * (width - fill)
 
 
-def _idlerpg_travel_visual(ratio: float, width: int = 12) -> str:
+def _idlerpg_travel_visual(ratio: float) -> str:
     ratio = max(0.0, min(1.0, ratio))
-    pos = min(width - 1, max(0, int(round(ratio * (width - 1)))))
-    tiles = ["·"] * width
-    tiles[pos] = "🧍"
-    return "🏁" + "".join(tiles) + "🏰"
+    orbit = [
+        (0, 4),
+        (1, 6),
+        (2, 7),
+        (3, 6),
+        (4, 4),
+        (3, 2),
+        (2, 1),
+        (1, 2),
+    ]
+    rows, cols = 5, 9
+    grid = [[" "] * cols for _ in range(rows)]
+    grid[2][4] = "🌍"
+
+    # Blend mission progress with a time offset so checks feel animated.
+    progress_offset = int(round(ratio * (len(orbit) - 1)))
+    spin_offset = int(time.time() // 2) % len(orbit)
+    idx = (progress_offset + spin_offset) % len(orbit)
+
+    for r, c in orbit:
+        if grid[r][c] == " ":
+            grid[r][c] = "·"
+    wr, wc = orbit[idx]
+    grid[wr][wc] = "🚶"
+    return "\n".join("".join(row).rstrip() for row in grid)
 
 
 def _idlerpg_prepare_adventure(profile: dict) -> dict:
