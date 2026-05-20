@@ -682,6 +682,7 @@ class Client(commands.Bot):
             client.add_view(TicketView())
             client.add_view(OpenTicketView())
             client.add_view(IdleRPGStarterView())
+            client.add_view(IdleRPGStatusPanelView())
             # Resolve primary guild by name first (Gaming Zone), then ID fallback.
             primary_guild = discord.utils.find(
                 lambda g: g.name.casefold() == PRIMARY_GUILD_NAME.casefold(),
@@ -2880,6 +2881,27 @@ class IdleRPGStarterView(discord.ui.View):
                 await interaction.followup.send("Help button failed. Please run /idlerpghelp.", ephemeral=True)
             else:
                 await interaction.response.send_message("Help button failed. Please run /idlerpghelp.", ephemeral=True)
+
+
+class IdleRPGStatusPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Check My Status",
+        style=discord.ButtonStyle.primary,
+        emoji="📊",
+        custom_id="idlerpg_status_panel_check",
+    )
+    async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await idlerpg_status.callback(interaction)
+        except Exception as e:
+            print(f"[IdleRPG] Status panel button failed: {e}")
+            if interaction.response.is_done():
+                await interaction.followup.send("Status panel button failed. Please run /status once.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Status panel button failed. Please run /status once.", ephemeral=True)
 
 
 class IdleRPGRewardChoiceView(discord.ui.View):
@@ -8588,6 +8610,13 @@ async def setupidlerpg(interaction: discord.Interaction):
             ephemeral=True,
         )
 
+    status_msg, status_state = await _ensure_idlerpg_status_panel(idlerpg_ch)
+    if status_msg is not None:
+        await interaction.followup.send(
+            f"Status panel {status_state} in {idlerpg_ch.mention}.",
+            ephemeral=True,
+        )
+
 
 @client.tree.command(name="setupidlerpgpanel", description="Post the persistent IdleRPG starter panel (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -8649,6 +8678,61 @@ async def _ensure_idlerpg_starter_panel(panel_ch: discord.TextChannel) -> tuple[
     return msg, "posted"
 
 
+async def _ensure_idlerpg_status_panel(panel_ch: discord.TextChannel) -> tuple[discord.Message | None, str]:
+    # Reuse existing pinned status panel to avoid duplicates.
+    try:
+        pinned = await panel_ch.pins()
+        for p in pinned:
+            if p.author and p.author.id == client.user.id and p.embeds:
+                if (p.embeds[0].title or "").strip().lower() == "idlerpg status panel":
+                    return p, "already exists"
+    except Exception:
+        pass
+
+    embed = discord.Embed(
+        title="IdleRPG Status Panel",
+        description="Tap the button to pull your live character status without typing /status.",
+        color=0x3498DB,
+    )
+    embed.add_field(name="What It Does", value="Shows your current level, build, inventory, gear, and mission state.", inline=False)
+    embed.add_field(name="Tip", value="If your mission timer is done, this status call resolves rewards too.", inline=False)
+    embed.set_footer(text="IdleRPG status panel • one-click check")
+
+    try:
+        msg = await panel_ch.send(embed=embed, view=IdleRPGStatusPanelView())
+    except Exception:
+        return None, "failed"
+
+    try:
+        await msg.pin(reason="IdleRPG status panel")
+    except Exception:
+        pass
+    return msg, "posted"
+
+
+@client.tree.command(name="setupidlerpgstatuspanel", description="Post the persistent IdleRPG status panel (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def setupidlerpgstatuspanel(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    panel_ch = guild.get_channel(IDLERPG_CHAT_CHANNEL_ID)
+    if not isinstance(panel_ch, discord.TextChannel):
+        await interaction.followup.send(f"IdleRPG channel ID `{IDLERPG_CHAT_CHANNEL_ID}` was not found.", ephemeral=True)
+        return
+
+    panel_msg, panel_status = await _ensure_idlerpg_status_panel(panel_ch)
+    if panel_msg is None:
+        await interaction.followup.send(f"Could not create status panel in {panel_ch.mention}.", ephemeral=True)
+        return
+
+    await interaction.followup.send(f"IdleRPG status panel {panel_status} in {panel_ch.mention}.", ephemeral=True)
+    await _log_admin_cmd(interaction, "setupidlerpgstatuspanel", f"Status panel {panel_status} in {panel_ch.mention}")
+
+
 @client.tree.command(name="idlerpghelp", description="Open the IdleRPG quick guide", guild=GUILD_ID)
 async def idlerpg_help(interaction: discord.Interaction):
     allowed, target_ch = _idlerpg_allowed_channel(interaction)
@@ -8667,7 +8751,7 @@ async def idlerpg_help(interaction: discord.Interaction):
     embed.add_field(name="Store", value="`/idlerpgshop` for class-themed gear crates and quick chest access.", inline=False)
     embed.add_field(name="Click Flow", value="Use `/idlerpgpanel` and `/idlerpgcodex` for one-click controls and full game info.", inline=False)
     embed.set_footer(text="Use the buttons below for quick guidance.")
-    await interaction.response.send_message(embed=embed, view=IdleRPGHelpView())
+    await interaction.response.send_message(embed=embed, view=IdleRPGHelpView(), ephemeral=True)
 
 
 @client.tree.command(name="idlerpgcodex", description="Open the clickable IdleRPG codex", guild=GUILD_ID)
@@ -8679,6 +8763,7 @@ async def idlerpg_codex(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=_idlerpg_codex_embed("overview"),
         view=IdleRPGCodexView(interaction.user.id),
+        ephemeral=True,
     )
 
 
@@ -8702,11 +8787,12 @@ async def idlerpg_panel(interaction: discord.Interaction):
     embed.add_field(name="Gear Loop", value="After status resolves a drop, use reward buttons to equip/sell/keep.", inline=False)
     embed.add_field(name="Shop", value="Open the class crate store from the panel buttons or /idlerpgshop.", inline=False)
     embed.set_footer(text="Panel is player-bound; buttons only work for you.")
-    await interaction.response.send_message(embed=embed, view=IdleRPGAdventureView(interaction.user.id))
+    await interaction.response.send_message(embed=embed, view=IdleRPGAdventureView(interaction.user.id), ephemeral=True)
 
 
 @client.tree.command(name="idlerpgshop", description="Open the IdleRPG class crate store", guild=GUILD_ID)
-async def idlerpg_shop(interaction: discord.Interaction):
+@app_commands.describe(public="Post shop panel in chat (default is private)")
+async def idlerpg_shop(interaction: discord.Interaction, public: bool = False):
     allowed, target_ch = _idlerpg_allowed_channel(interaction)
     if not allowed:
         await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
@@ -8716,6 +8802,8 @@ async def idlerpg_shop(interaction: discord.Interaction):
     if not profile:
         await interaction.response.send_message("Create your character first with /create.", ephemeral=True)
         return
+
+    shop_ephemeral = not public
 
     coins = int(profile.get("money", 0))
     class_name = profile.get("class") or "Unchosen"
@@ -8737,7 +8825,7 @@ async def idlerpg_shop(interaction: discord.Interaction):
         inline=False,
     )
     embed.set_footer(text="Use the buttons below to buy crates or open chests.")
-    await interaction.response.send_message(embed=embed, view=IdleRPGShopView(interaction.user.id))
+    await interaction.response.send_message(embed=embed, view=IdleRPGShopView(interaction.user.id), ephemeral=shop_ephemeral)
 
 
 @client.tree.command(name="create", description="Create your IdleRPG character", guild=GUILD_ID)
@@ -8773,11 +8861,12 @@ async def idlerpg_create(interaction: discord.Interaction, name: str):
     embed.add_field(name="Build Step 3", value="Choose alignment with **/alignment**", inline=False)
     embed.add_field(name="Build Step 4", value="Choose god with **/follow**", inline=False)
     embed.set_footer(text="You can only run /adventure after all 4 build steps are complete.")
-    await interaction.response.send_message(embed=embed, view=IdleRPGBuildView(interaction.user.id))
+    await interaction.response.send_message(embed=embed, view=IdleRPGBuildView(interaction.user.id), ephemeral=True)
 
 
 @client.tree.command(name="status", description="View your IdleRPG character status", guild=GUILD_ID)
-async def idlerpg_status(interaction: discord.Interaction):
+@app_commands.describe(public="Post status in chat (default is private)")
+async def idlerpg_status(interaction: discord.Interaction, public: bool = False):
     allowed, target_ch = _idlerpg_allowed_channel(interaction)
     if not allowed:
         await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
@@ -8787,6 +8876,8 @@ async def idlerpg_status(interaction: discord.Interaction):
     if not profile:
         await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
         return
+
+    status_ephemeral = not public
 
     inventory = profile.get("inventory", [])
     magic_chests = sum(1 for i in inventory if i.get("type") == "chest" and str(i.get("tier", "magic")).lower() != "mythic")
@@ -8884,7 +8975,11 @@ async def idlerpg_status(interaction: discord.Interaction):
         embed.set_footer(text="Build complete. You are ready for /adventure.")
 
     embed.timestamp = discord.utils.utcnow()
-    await interaction.response.send_message(embed=embed, view=IdleRPGAdventureView(interaction.user.id))
+    await interaction.response.send_message(
+        embed=embed,
+        view=IdleRPGAdventureView(interaction.user.id),
+        ephemeral=status_ephemeral,
+    )
 
     if reward_view:
         await interaction.followup.send(
@@ -8959,11 +9054,12 @@ async def idlerpg_adventure(interaction: discord.Interaction):
     embed.timestamp = discord.utils.utcnow()
 
     _save_idlerpg_data()
-    await interaction.response.send_message(embed=embed, view=IdleRPGAdventureView(interaction.user.id))
+    await interaction.response.send_message(embed=embed, view=IdleRPGAdventureView(interaction.user.id), ephemeral=True)
 
 
 @client.tree.command(name="inventory", description="View your IdleRPG inventory", guild=GUILD_ID)
-async def idlerpg_inventory(interaction: discord.Interaction):
+@app_commands.describe(public="Post inventory in chat (default is private)")
+async def idlerpg_inventory(interaction: discord.Interaction, public: bool = False):
     allowed, target_ch = _idlerpg_allowed_channel(interaction)
     if not allowed:
         await interaction.response.send_message(f"Use IdleRPG commands in {target_ch.mention}.", ephemeral=True)
@@ -8973,6 +9069,8 @@ async def idlerpg_inventory(interaction: discord.Interaction):
     if not profile:
         await interaction.response.send_message("No character found. Run /create first.", ephemeral=True)
         return
+
+    inv_ephemeral = not public
 
     inv = profile.get("inventory", [])
     if not inv:
@@ -8991,7 +9089,7 @@ async def idlerpg_inventory(interaction: discord.Interaction):
     embed = discord.Embed(title=f"{profile.get('name', 'Player')} • Inventory", description="\n".join(lines), color=top_color)
     if len(inv) > 20:
         embed.set_footer(text=f"Showing 20/{len(inv)} items")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=inv_ephemeral)
 
 
 @client.tree.command(name="equip", description="Equip an item by ID", guild=GUILD_ID)
@@ -9017,7 +9115,7 @@ async def idlerpg_equip(interaction: discord.Interaction, item_id: str):
 
     profile["equipped"] = item
     _save_idlerpg_data()
-    await interaction.response.send_message(f"Equipped {item.get('emoji', '')} **{item.get('name', 'item')}**.")
+    await interaction.response.send_message(f"Equipped {item.get('emoji', '')} **{item.get('name', 'item')}**.", ephemeral=True)
 
 
 @client.tree.command(name="sell", description="Sell an item by ID", guild=GUILD_ID)
@@ -9046,7 +9144,7 @@ async def idlerpg_sell(interaction: discord.Interaction, item_id: str):
     coins = int(item.get("value", 50))
     profile["money"] = int(profile.get("money", 0)) + coins
     _save_idlerpg_data()
-    await interaction.response.send_message(f"Sold **{item.get('name', 'item')}** for **{coins}** coins.")
+    await interaction.response.send_message(f"Sold **{item.get('name', 'item')}** for **{coins}** coins.", ephemeral=True)
 
 
 @client.tree.command(name="follow", description="Choose a god", guild=GUILD_ID)
