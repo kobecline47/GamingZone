@@ -2506,6 +2506,14 @@ def _idlerpg_progress_bar(ratio: float, width: int = 10) -> str:
     return "█" * fill + "░" * (width - fill)
 
 
+def _idlerpg_travel_visual(ratio: float, width: int = 12) -> str:
+    ratio = max(0.0, min(1.0, ratio))
+    pos = min(width - 1, max(0, int(round(ratio * (width - 1)))))
+    tiles = ["·"] * width
+    tiles[pos] = "🧍"
+    return "🏁" + "".join(tiles) + "🏰"
+
+
 def _idlerpg_prepare_adventure(profile: dict) -> dict:
     roll = random.random()
 
@@ -9451,11 +9459,13 @@ async def idlerpg_status(interaction: discord.Interaction, public: bool = False)
             done = max(0, now_ts - start_ts)
             ratio = done / total
             bar = _idlerpg_progress_bar(ratio)
+            travel = _idlerpg_travel_visual(ratio)
             embed.add_field(
                 name="Active Mission",
                 value=(
                     f"{adv.get('encounter_emoji', '⚡')} **{adv.get('encounter', 'Mission')}**\n"
                     f"Progress `{bar}` {int(ratio * 100)}%\n"
+                    f"Travel {travel}\n"
                     f"Ends <t:{end_ts}:R>"
                 ),
                 inline=False,
@@ -9594,6 +9604,7 @@ async def idlerpg_adventure(interaction: discord.Interaction):
     embed.set_author(name=profile.get("name", str(interaction.user)), icon_url=interaction.user.display_avatar.url)
     embed.add_field(name="Launch", value=f"<t:{int(adv.get('start_ts', int(time.time())))}:t>", inline=True)
     embed.add_field(name="ETA", value=f"<t:{end_ts}:R>", inline=True)
+    embed.add_field(name="Travel", value=_idlerpg_travel_visual(0.0), inline=False)
     embed.add_field(name="Resolve", value="Use **/status** to check and claim mission rewards.", inline=False)
     embed.add_field(name="Build", value=f"{profile.get('race')} • {profile.get('class')} • {profile.get('alignment')} • {profile.get('god')}", inline=False)
     embed.set_footer(text="Timed mission active. Progress updates are visible in /status.")
